@@ -81,6 +81,13 @@ await kit.run(async () => {
   // `extension` registration, not only the offered tool list) and the plugin code does not run.
   // Read through the other project: the disabled one refuses its RPCs.
   const counters = async () => call(beta, "counters");
+  // 16b: a real Follow PRs tick (every 200 ms) runs the plugin's follow provider for each project that has Follow PRs on.
+  for (const id of [alpha, beta]) await rpc({ action: "automation-update", id, change: { follow: { enabled: true } } });
+  await kit.eventually(async () => {
+    const seen = (await counters()).observed;
+    return seen[alpha] > 0 && seen[beta] > 0;
+  }, "follow ticks did not reach the plugin's follow provider");
+  check("16b follow ticks observe both projects while the plugin is on", true, await counters());
   await rpc({ action: "message", id: alpha, text: "GATED-CALL one" });
   await kit.eventually(async () => (await counters()).toolRuns === 1, "tool ran while enabled");
   await kit.eventually(async () => !(await rpc({ action: "show", id: alpha })).chats.find((chat) => chat.id === "main")?.busy, "idle");
@@ -111,6 +118,28 @@ await kit.run(async () => {
   check("8 the disabled plugin's PR code did not run", (await counters()).listCalls === listed, await counters());
   // 16: the PR monitor and follow ticks (every 200 ms here) run none of the disabled plugin's code.
   await kit.delay(1000);
+  // The tick's per-project interval does not fire again inside this window, so poll by hand: the same Follow PRs poll the tick runs.
+  const followed = (await counters()).observed,
+    publishedBefore = (await counters()).published[alpha] ?? 0;
+  const polled = await refused(() => rpc({ action: "follow-poll", id: alpha }));
+  await rpc({ action: "follow-poll", id: beta });
+  await kit.delay(1000);
+  const followedLater = (await counters()).observed;
+  check(
+    "16b a follow poll of the disabled project is refused: no provider connected",
+    /needs a GitHub authorization or a connected provider/.test(polled),
+    polled,
+  );
+  check("16b the disabled project's follow provider never observed it", followedLater[alpha] === followed[alpha], {
+    followed,
+    followedLater,
+  });
+  check("16b the other project's follow poll still observes", followedLater[beta] > followed[beta], { followed, followedLater });
+  check(
+    "16b no follow published call ran for the disabled project",
+    ((await counters()).published[alpha] ?? 0) === publishedBefore,
+    await counters(),
+  );
   check("16 a PR monitor tick ran no disabled plugin code", (await counters()).listCalls === listed, await counters());
   // 14/15: the lifecycle pause taken for the disable stays held for this project only, and the enable releases it.
   check("14 the plugin's pause stays held while it is off", (await counters()).paused.includes(alpha), await counters());
@@ -189,11 +218,31 @@ await kit.run(async () => {
     "14b a later disable works and holds the pause again",
     (await set(alpha, "gated", false)).enabled === false && (await counters()).paused.includes(alpha),
   );
+  // 14d: an enable whose save fails leaves the plugin off with its pause held; the retry enables it and releases the pause once.
+  chmodSync(projectFolder, 0o555);
+  const enableFailure = await refused(() => set(alpha, "gated", true));
+  chmodSync(projectFolder, 0o700);
+  check("14d a failed save refuses the enable", enableFailure !== "", enableFailure);
+  check("14d the plugin is still off", (await entry(alpha, "gated")).enabled === false);
+  check("14d the pause is still held", (await counters()).paused.includes(alpha), await counters());
+  check("14d the still-off plugin refuses its RPC", /disabled in this project/.test(await refused(() => call(alpha, "ping"))));
+  check("14d the retry enables it", (await set(alpha, "gated", true)).enabled === true);
+  check("14d the retry released the pause", !(await counters()).paused.includes(alpha), await counters());
+  check("14d the enabled plugin answers again", (await call(alpha, "ping")).pong === alpha);
+  check("14d a second enable is a no-op", (await set(alpha, "gated", true)).enabled === true);
+  check(
+    "14d a disable after the retry holds the pause once",
+    (await set(alpha, "gated", false)).enabled === false && (await counters()).paused.includes(alpha),
+  );
   // 14c: after a host restart the flag is persistent: the disabled plugin runs nothing for the project (no tick, RPC or pause needed).
   await kit.restartHost();
   await kit.delay(1200);
   check("14c the flag survives the restart", (await entry(alpha, "gated")).enabled === false);
-  check("14c no PR monitor or follow tick ran the disabled plugin", (await counters()).listCalls === 0, await counters());
+  check(
+    "14c no PR monitor or follow tick ran the disabled plugin for its project",
+    !(await counters()).listed[alpha] && !(await counters()).observed[alpha] && !(await counters()).published[alpha],
+    await counters(),
+  );
   check("19 the restarted host holds the disabled plugin's pause again", (await counters()).paused.includes(alpha), await counters());
   check("19 and not the enabled project's", !(await counters()).paused.includes(beta), await counters());
   check("14c its RPC is still refused", /disabled in this project/.test(await refused(() => call(alpha, "ping"))));

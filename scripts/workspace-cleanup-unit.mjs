@@ -31,7 +31,13 @@ import {
 } from "../src/workspace-cleanup.ts";
 import { sweepWorkspaceCaches, workspaceCaches } from "../src/workspace-cache.ts";
 import { cloneUsage, deviceLastUse, idleClones, strayTestClones } from "../plugins/simulator/idle.ts";
-import { pruneTestProducts, hourlyPruneApplies } from "../plugins/simulator/test-products.ts";
+import {
+  pruneTestProducts,
+  hourlyPruneApplies,
+  pruneProjectProducts,
+  pruneEnabledProjects,
+  workspaceKeyForRoot,
+} from "../plugins/simulator/test-products.ts";
 
 const DAY = 86_400_000,
   now = Date.now(),
@@ -420,10 +426,37 @@ try {
   assert.ok(existsSync(join(escape, "keep")), "T3 a symlink is never followed");
   assert.equal(pruned.removed, 3);
   assert.ok(pruned.bytes >= 3 * 32 * 1024, `T4 freed bytes are counted: ${pruned.bytes}`);
-  // T5: the host-wide hourly timer runs only while some project still has the plugin on (a disabled plugin touches nothing).
-  assert.equal(hourlyPruneApplies([{ disabledPlugins: ["simulator"] }, {}]), true, "T5 one project has it on");
-  assert.equal(hourlyPruneApplies([{ disabledPlugins: ["simulator"] }, { disabledPlugins: ["other", "simulator"] }]), false, "T5 all off");
-  assert.equal(hourlyPruneApplies([]), false, "T5 no projects");
+  // T5: two projects share the XcodeBuildMCP root. A disabled the plugin, B did not: only B's own workspaces (its checkout and
+  // worktrees, keyed by XcodeBuildMCP's sha256 of the real path) are pruned; A's and an unowned workspace stay.
+  {
+    const rootA = join(root, "proj-a"),
+      rootB = join(root, "proj-b"),
+      treeB = join(root, "proj-b-tree"),
+      other = join(root, "stranger");
+    for (const dir of [rootA, rootB, treeB, other]) mkdirSync(dir, { recursive: true });
+    const [keyA, keyB, keyTreeB, keyOther] = [rootA, rootB, treeB, other].map(workspaceKeyForRoot);
+    const stale = (key) => [product(key, name("01-00-00", deadPid), 12), product(key, name("02-00-00", deadPid), 11)];
+    const [a1] = stale(keyA),
+      [b1] = stale(keyB),
+      [t1] = stale(keyTreeB),
+      [o1] = stale(keyOther);
+    const swept = await pruneEnabledProjects({
+      root: xbm,
+      now: Date.now(),
+      keepMs: 2 * HOUR,
+      projects: [
+        { disabledPlugins: ["simulator"], roots: [rootA] },
+        { disabledPlugins: undefined, roots: [rootB, treeB] },
+      ],
+    });
+    assert.equal(swept.removed, 2, "T5 only B's two stale runs go");
+    assert.ok(existsSync(a1), "T5 the disabled project's products are untouched");
+    assert.ok(existsSync(o1), "T5 a workspace no project owns is untouched");
+    assert.ok(!existsSync(b1) && !existsSync(t1), "T5 the enabled project's checkout and worktree are pruned");
+    const per = await pruneProjectProducts({ root: xbm, now: Date.now(), keepMs: 2 * HOUR, roots: [rootA] });
+    assert.equal(per.removed, 1, "T5 the cleanup step prunes the project it runs for");
+    assert.ok(!existsSync(a1) && existsSync(o1), "T5 and only that project's workspace");
+  }
   assert.deepEqual(await pruneTestProducts({ root: join(root, "missing"), now: Date.now(), keepMs: HOUR }), { removed: 0, bytes: 0 });
 } finally {
   rmSync(root, { recursive: true, force: true });
