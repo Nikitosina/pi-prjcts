@@ -567,31 +567,33 @@ export async function renderWorker(root, id, { steer = false } = {}) {
     paint();
   };
   // The composer works while the transcript loads: Enter right after opening sends (scripts/worker-chat-ui-failures.md C6).
-  const form = root.querySelector(".worker-send"),
-    text = form.querySelector("textarea");
-  if (steer) text.focus();
-  text.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+  const form = root.querySelector(".worker-send");
+  if (form) {
+    const text = form.querySelector("textarea");
+    if (steer) text.focus();
+    text.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+        event.preventDefault();
+        form.requestSubmit();
+      }
+    });
+    form.addEventListener("submit", async (event) => {
       event.preventDefault();
-      form.requestSubmit();
-    }
-  });
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const value = text.value.trim();
-    if (!value) return;
-    const worker = find();
-    text.value = "";
-    try {
-      await call(worker?.working ? "thread-steer" : "thread-send", { id: state.projectId, threadId: id, requestId: uuid(), text: value });
-      if (stale(gen)) return;
-      toast(worker?.working ? "Steer sent." : "Sent to the worker.");
-      void load();
-    } catch (error) {
-      text.value = value;
-      fail(error);
-    }
-  });
+      const value = text.value.trim();
+      if (!value) return;
+      const worker = find();
+      text.value = "";
+      try {
+        await call(worker?.working ? "thread-steer" : "thread-send", { id: state.projectId, threadId: id, requestId: uuid(), text: value });
+        if (stale(gen)) return;
+        toast(worker?.working ? "Steer sent." : "Sent to the worker.");
+        void load();
+      } catch (error) {
+        text.value = value;
+        fail(error);
+      }
+    });
+  }
   await load();
   if (!alive()) return;
   node.addEventListener("click", (event) => void transcriptClick(event, root, paint, follow));
