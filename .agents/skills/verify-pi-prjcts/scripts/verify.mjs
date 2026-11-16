@@ -1627,7 +1627,7 @@ const journeys = {
     if (!scopes.length || scopes.some((scope) => scope !== "project" && scope !== "host"))
       throw Error(`nav items without scope: ${scopes}`);
     await page.press("h", { keyCode: 72 });
-    await page.waitFor(`document.querySelector('#settings').dataset.section === 'theme'`, "theme section by letter H");
+    await page.waitFor(`document.querySelector('#settings').dataset.section === 'appearance'`, "Appearance section by letter H");
     await page.click('#settings [data-theme-option="midnight"]');
     await page.waitFor(`document.documentElement.dataset.theme === 'midnight'`, "midnight applied");
     await delay(300); // let the open transition finish before the screenshot
@@ -1825,7 +1825,7 @@ const journeys = {
       );
       await page.click('[data-verify="open-settings"]');
       await page.waitFor(
-        `document.querySelector('#settings')?.open === true && document.querySelector('#settings').dataset.section === 'statusline' && !!document.querySelector('#settings .sl-order')`,
+        `document.querySelector('#settings')?.open === true && document.querySelector('#settings').dataset.section === 'appearance' && !!document.querySelector('#settings .sl-order')`,
         "the owner's click opens Settings at Status line",
       );
       record("visible", "the toast's Open settings opened Settings → Status line");
@@ -2605,12 +2605,15 @@ const journeys = {
     );
     await page.navigate(run.webUrl);
     await page.waitFor(`document.body.dataset.ready === "1" && !!document.querySelector('#tree [data-chat="main"]')`, "UI ready on Main");
-    await page.waitFor(`document.querySelectorAll('#plugin-cards .plugin-row').length >= ${mine.length}`, "Plugins section");
+    await page.evaluate(`document.querySelector('[data-cmd="settings"]').click()`);
+    await page.waitFor(`document.querySelector('#settings').open`, "settings open");
+    await page.evaluate(`document.querySelector('#settings nav [data-section="plugins"]').click()`);
+    await page.waitFor(`document.querySelectorAll('#settings .plugin-row').length >= ${mine.length}`, "Plugins section");
     record("entry", `opened ${new URL(run.webUrl).origin}/; Main of "${PROJECT_NAME}" is selected`);
-    await page.evaluate(`document.querySelector('#plugin-cards').scrollIntoView()`);
+    await page.evaluate(`document.querySelector('#settings .plugin-card').scrollIntoView()`);
     await page.shot(dir, "01-plugins");
     const rows = await page.evaluate(
-      `[...document.querySelectorAll('#plugin-cards .plugin-row')].map((row) => ({ name: row.dataset.plugin, state: row.dataset.state, source: row.title, text: row.innerText, error: row.querySelector('.plugin-error')?.textContent ?? null }))`,
+      `[...document.querySelectorAll('#settings .plugin-row')].map((row) => ({ name: row.dataset.plugin, state: row.dataset.state, source: row.title, text: row.innerText, error: row.querySelector('.plugin-error')?.textContent ?? null }))`,
     );
     writeFileSync(join(dir, "plugins-dom.json"), JSON.stringify(rows, null, 2));
     // A long error is clipped with "…": the shown text must be the error itself or its first 100 characters at least.

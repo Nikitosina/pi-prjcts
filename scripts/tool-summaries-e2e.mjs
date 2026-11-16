@@ -647,7 +647,7 @@ await kit.run(async () => {
   // Settings → Chat display.
   await page.evaluate(`document.querySelector('[data-cmd="settings"]').click()`);
   await page.waitFor(`document.querySelector('#settings').open`, "settings open");
-  await page.evaluate(`document.querySelector('nav [data-section="display"]').click()`);
+  await page.evaluate(`document.querySelector('nav [data-section="appearance"]').click()`);
   await page.waitFor(`document.querySelector('#summary-model')`, "chat display section");
   const section = await page.evaluate(
     `(() => ({ thinking: document.querySelector('#show-thinking').checked, summaries: document.querySelector('#tool-summaries').checked, model: document.querySelector('#summary-model').value, options: [...document.querySelectorAll('#summary-model option')].map((o) => ({ value: o.value, disabled: o.disabled })), note: document.querySelector('.ts-data-note')?.innerText ?? '' }))()`,

@@ -8,7 +8,8 @@ import { image, video } from "./telegram-media-fixtures.mjs";
 import { htmlToPlain } from "../src/telegram-html.ts";
 
 const updates = [],
-  sends = [];
+  sends = [],
+  commandCalls = [];
 let nextUpdate = 1,
   nextMessage = 1,
   rejectPhoto = true;
@@ -67,6 +68,7 @@ const api = createServer(async (req, res) => {
     rejectPhoto = false;
     return reply({ ok: false, error_code: 429, description: "Fixture rate limit", parameters: { retry_after: 1 } });
   }
+  if (method === "setMyCommands") return (commandCalls.push(input), reply({ ok: true, result: true }));
   assert(["sendMessage", "sendPhoto", "sendVideo", "sendDocument", "sendMediaGroup"].includes(method));
   const message_ids = Array.from({ length: method === "sendMediaGroup" ? input.media.length : 1 }, () => nextMessage++);
   const message = { method, input, message_id: message_ids[0], message_ids };
@@ -153,6 +155,11 @@ await k.run(async () => {
       album.input.files.map((f) => f.mime),
       ["image/png", "video/mp4"],
     );
+    // The slash-command menu is registered once for private chats (fake Bot API transcript; the real Bot API was not read).
+    assert.equal(commandCalls.length, 1);
+    assert.deepEqual(commandCalls[0].scope, { type: "all_private_chats" });
+    assert(commandCalls[0].commands.length > 0 && commandCalls[0].commands.every((c) => /^[a-z_]{1,32}$/.test(c.command) && c.description));
+    writeFileSync(join(k.artifacts, "set-my-commands.json"), JSON.stringify(commandCalls, null, 2) + "\n");
     assert.deepEqual(
       album.input.media.map((m) => m.type),
       ["photo", "video"],

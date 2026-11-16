@@ -34,6 +34,7 @@ const {
   windowForSeconds,
   parseElizaUsage,
   parseKimiUsage,
+  parseOllamaBalance,
   limitsVisibility,
   setLimitVisibility,
 } = await import("../src/usage-limits.ts");
@@ -66,14 +67,43 @@ assert.deepEqual(parseKimiUsage({ usages: { limit_5h: { used_ratio: 2, reset_tim
 });
 
 // Visibility is instance-wide, durable and independent. A damaged file fails open to the established all-visible default.
-assert.deepEqual(limitsVisibility(), { claude: true, codex: true, cursor: true, eliza: true, kimi: true });
+assert.deepEqual(limitsVisibility(), { claude: true, codex: true, cursor: true, eliza: true, kimi: true, ollama: true });
+// Ollama /api/balance: both documented `included` shapes. Remaining percent becomes used percent; nothing is invented.
+const legacy = parseOllamaBalance({
+  included: {
+    session: { remaining_percent: 70, resets_at: "2026-11-15T10:00:00Z" },
+    weekly: { remaining_percent: 25.5, resets_at: "2026-11-20T00:00:00Z" },
+  },
+  purchased: { balance_usd: 4.5 },
+});
+assert.deepEqual(
+  legacy.samples.map((s) => [s.window, Math.round(s.usedPercent * 10) / 10, s.resetsAt]),
+  [
+    ["5h", 30, Date.parse("2026-11-15T10:00:00Z")],
+    ["7d", 74.5, Date.parse("2026-11-20T00:00:00Z")],
+  ],
+);
+assert.equal(legacy.credits.purchasedUsd, 4.5);
+const credits = parseOllamaBalance({
+  included: { balance_usd: 15, allowance_usd: 20, period: { from: "2026-11-01T00:00:00Z", until: "2026-12-01T00:00:00Z" } },
+  purchased: { balance_usd: 0 },
+});
+assert.deepEqual(credits.samples, [{ window: "mo", usedPercent: 25, resetsAt: Date.parse("2026-12-01T00:00:00Z") }]);
+assert.deepEqual(credits.credits, { includedUsd: 15, allowanceUsd: 20, purchasedUsd: 0 });
+assert.deepEqual(
+  parseOllamaBalance({ included: { balance_usd: 0, allowance_usd: 0, period: {} }, purchased: {} }).samples,
+  [],
+  "no allowance, no percent",
+);
+assert.throws(() => parseOllamaBalance({ included: { session: { remaining_percent: "x" }, weekly: {} } }), /unreadable balance response/);
+assert.throws(() => parseOllamaBalance(null), /unreadable balance response/);
 setLimitVisibility("claude", false);
 setLimitVisibility("kimi", false);
-assert.deepEqual(limitsVisibility(), { claude: false, codex: true, cursor: true, eliza: true, kimi: false });
+assert.deepEqual(limitsVisibility(), { claude: false, codex: true, cursor: true, eliza: true, kimi: false, ollama: true });
 setLimitVisibility("claude", true);
 assert.equal(limitsVisibility().claude, true);
 writeFileSync(join(dir, "projects", "limits-visibility.json"), "not json");
-assert.deepEqual(limitsVisibility(), { claude: true, codex: true, cursor: true, eliza: true, kimi: true });
+assert.deepEqual(limitsVisibility(), { claude: true, codex: true, cursor: true, eliza: true, kimi: true, ollama: true });
 
 // Eliza: sum actual monthly cost across usage buckets. The account and UTC calendar-month bounds come from the response and documented reset rule.
 const october = Date.parse("2026-10-26T18:00:00Z");

@@ -79,7 +79,7 @@ await kit.run(async () => {
     const low = transcript.low.filter((entry) => !/^(time|button\.primary)\b/.test(entry));
     await page.shot(`01-${dark}`, { force: true });
     // Accent-filled buttons (Send, primary) are the brand color, not a light card.
-    const bright = found.bright.filter((entry) => !/^button\.(send|primary)\b/.test(entry));
+    const bright = found.bright.filter((entry) => !/^button(#[\w-]+)?\.(send|primary)\b/.test(entry));
     check(`T5 ${dark}: no bright surfaces in the inbox`, bright.length === 0, bright.slice(0, 8));
     check(`T6 ${dark}: transcript text contrast >= 4.5`, low.length === 0 && transcript.texts > 5, low.slice(0, 8));
     check(
@@ -107,13 +107,38 @@ await kit.run(async () => {
   // T9: picking a theme in Settings applies at once, is saved on the host and survives a reload.
   await page.evaluate(`document.querySelector('[data-cmd="settings"]').click()`);
   await page.waitFor(`document.querySelector('#settings').open`, "settings open");
-  await page.evaluate(`document.querySelector('nav [data-section="theme"]')?.click()`);
+  await page.evaluate(`document.querySelector('nav [data-section="appearance"]')?.click()`);
   await page.waitFor(`!!document.querySelector('[data-theme-option="midnight"]')`, "theme cards");
   await page.evaluate(`document.querySelector('[data-theme-option="midnight"]').click()`);
   await page.waitFor(`document.documentElement.dataset.theme === 'midnight'`, "applied at once");
   await kit.eventually(async () => (await rpc({ action: "ui-get" })).ui.theme === "midnight", "theme not saved on the host", 100);
   check("T9 a theme picked in Settings applies at once and is saved on the host", true);
   await page.shot("03-settings-midnight", { force: true });
+  // A1: Theme, Animations, Chat display and Status line are four parts of one Appearance page; each keeps its own stored value.
+  check(
+    "A1 Appearance holds Theme, Animations, Chat display and Status line in that order, and the nav has no separate pages for them",
+    await page.evaluate(
+      `JSON.stringify([...document.querySelectorAll('#settings .appearance-part > h2')].map((h) => h.textContent)) === JSON.stringify(["Theme", "Animations", "Chat display", "Status line"]) && !document.querySelector('#settings nav [data-section="theme"], #settings nav [data-section="animations"], #settings nav [data-section="display"], #settings nav [data-section="statusline"]')`,
+    ),
+  );
+  await page.evaluate(`document.querySelector('[data-part="animations"] [data-motion="off"]').click()`);
+  await page.evaluate(`document.querySelector('#show-thinking').click()`);
+  await kit.eventually(
+    async () => {
+      const ui = (await rpc({ action: "ui-get" })).ui;
+      return ui.animations === "off" && ui.showThinking === false && ui.theme === "midnight";
+    },
+    "Appearance values not saved together",
+    100,
+  );
+  check("A1 each part saves its own value on the host: theme midnight, animations off, thinking hidden", true);
+  check(
+    "A2 a link to an old section id still opens Appearance",
+    await page.evaluate(
+      `import("/settings.js").then((settings) => { settings.openSettings("statusline"); return document.querySelector('#settings').dataset.section === "appearance" && !!document.querySelector('[data-part="statusline"]'); })`,
+    ),
+  );
+  await page.shot("04-appearance", { force: true });
   await page.reload();
   await page.waitFor(`document.body.dataset.ready === "1"`, "reloaded after pick");
   check(

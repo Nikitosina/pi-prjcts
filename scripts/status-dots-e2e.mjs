@@ -491,6 +491,30 @@ try {
   const dots = await states(s);
   const expected = { Main: "working", Scout: "done", Failing: "needs", Idle: "idle" };
   if (JSON.stringify(dots) !== JSON.stringify(expected)) throw Error("Chat dot states wrong: " + JSON.stringify(dots));
+  // Row order: title, then archive button, then the unread dot at the far edge; Main (no archive button) uses the same edge slot.
+  const layout = await evaluate(
+    `(() => {
+      const box = (node) => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right }; };
+      const row = document.querySelector('${chatRow(scoutChat.id)}').closest('.tree-row');
+      const main = document.querySelector('${chatRow("main")}').closest('.tree-row');
+      const probe = document.createElement('span');
+      probe.className = 'unread';
+      document.querySelector('${chatRow("main")}').append(probe);
+      const out = { name: box(row.querySelector('.name')), archive: box(row.querySelector('.tree-archive')), unread: box(row.querySelector('.unread')), mainUnread: box(probe), mainRow: box(main), row: box(row) };
+      probe.remove();
+      return out;
+    })()`,
+    s,
+  );
+  if (!(
+    layout.name.right <= layout.archive.left + 0.5 &&
+    layout.archive.right <= layout.unread.left + 0.5 &&
+    layout.unread.right <= layout.row.right
+  ))
+    throw Error("Row order is not title, archive, unread dot: " + JSON.stringify(layout));
+  if (Math.abs(layout.mainUnread.right - layout.mainRow.right - (layout.unread.right - layout.row.right)) > 0.5)
+    throw Error("Main's unread dot is not in the same edge slot: " + JSON.stringify(layout));
+  result.checks.push("D1a row order is title, archive, unread dot with the dot in one edge slot (Main included)");
   result.checks.push("D1 one dot per chat: working (Main), unread (Scout), needs you (Failing), idle (Idle)");
   const labels = await evaluate(
     `[...document.querySelectorAll('#tree .tree-project.selected [data-chat] .dot:not(.idle)')].map(n => ({ cls: n.className, label: n.getAttribute('aria-label') }))`,
