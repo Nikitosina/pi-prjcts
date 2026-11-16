@@ -257,6 +257,28 @@ try {
     await page.shot("03b-ollama-details", { force: true });
     await page.evaluate(`document.activeElement.blur()`);
     await page.waitFor(`!${popOpen}`, "Ollama details close on blur");
+    // The same details at 390 px stay inside the screen (keyboard focus; no touch device is emulated).
+    await page.viewport(390, 844, true);
+    await kit.delay(500); // the panes animate into the narrow layout
+    await page.evaluate(`(() => { const b = ${item("ollama")}; b.parentElement.scrollLeft = b.offsetLeft - 120; b.focus(); })()`);
+    await page.waitFor(popOpen, "Ollama details on keyboard focus at 390 px");
+    const ollamaNarrow = await page.evaluate(
+      `(() => { const r = document.querySelector('#limit-detail').getBoundingClientRect(); return { left: r.left, right: r.right, w: innerWidth, over: document.documentElement.scrollWidth - innerWidth, text: document.querySelector('#limit-detail').innerText }; })()`,
+    );
+    check(
+      "O4 at 390 px Ollama's details fit the screen and still show use, reset and dollars",
+      ollamaNarrow.left >= 0 &&
+        ollamaNarrow.right <= ollamaNarrow.w &&
+        ollamaNarrow.over <= 1 &&
+        /25% used/.test(ollamaNarrow.text) &&
+        /included left/.test(ollamaNarrow.text),
+      ollamaNarrow,
+    );
+    await page.shot("03c-ollama-details-narrow-390", { force: true });
+    await page.evaluate(`document.activeElement.blur()`);
+    await page.waitFor(`!${popOpen}`, "Ollama details close on blur at 390 px");
+    await page.viewport(1440, 1000);
+    await kit.delay(500);
 
     // A failed refresh keeps the numbers, says so in the bar, opens nothing.
     await kit.delay(COOLDOWN_MS + 500);
