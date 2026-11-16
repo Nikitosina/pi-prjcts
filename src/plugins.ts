@@ -30,7 +30,7 @@ import type {
 import { usePluginPromptBlocks } from "./prompt-blocks.ts";
 import { hostLeases } from "./resource-leases.ts";
 import { webFile, type WebFile } from "./web-file.ts";
-import { home, loadProject, projectDir, type Project } from "./state.ts";
+import { home, listProjects, loadProject, projectDir, type Project } from "./state.ts";
 import { runCli, findVcsRoot } from "./vcs.ts";
 import {
   authorizationFingerprint,
@@ -245,7 +245,8 @@ export const plugins = {
       return [
         guarded(provider, {
           repository: (project) => (disabledIn(project, plugin) ? undefined : provider.repository(project)),
-          observe: (input) => gate.run(input.project.id, plugin, () => provider.observe(input)),
+          observe: (input) => gate.settled(input.project.id, plugin, () => provider.observe(input)),
+          published: (root, project) => gate.run(project.id, plugin, () => provider.published(root, project)),
         }),
       ];
     }),
@@ -527,6 +528,7 @@ async function hostApi(name: string, stage: PluginCapabilities): Promise<HostPlu
     },
     projects: {
       load: loadProject,
+      list: listProjects,
       dir: projectDir,
       record: <T>(project: object, key: string) => (project as Record<string, unknown>)[key] as T | undefined,
       authorizationFingerprint,
@@ -616,6 +618,21 @@ async function loadOne(source: string, path: string, builtIn = false): Promise<P
   return status;
 }
 
+/** A restart forgets the pauses a disable held: take them again for every project that has a plugin off. A refusing plugin stays gated by the flag. */
+function retakePauses() {
+  for (const project of listProjects())
+    for (const name of project.disabledPlugins ?? []) {
+      const held = `${project.id}\0${name}`;
+      if (heldPauses.has(held)) continue;
+      try {
+        const paused = [...builtins(), ...loaded].find((entry) => entry.plugin === name)?.capabilities.lifecycle?.pause?.(project.id);
+        if (paused) heldPauses.set(held, paused);
+      } catch {
+        /* the stored flag already refuses every entry of the plugin */
+      }
+    }
+}
+
 /** Loads every configured plugin once per host process; later callers share the result. Never throws. */
 export function loadPlugins(): Promise<PluginStatus[]> {
   return (loading ??= (async () => {
@@ -635,6 +652,7 @@ export function loadPlugins(): Promise<PluginStatus[]> {
       }
       statuses.push(await loadOne(item.source, item.path));
     }
+    retakePauses();
     return plugins.status();
   })());
 }

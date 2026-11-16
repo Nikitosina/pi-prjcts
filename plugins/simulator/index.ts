@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { Static, TSchema } from "typebox";
 import type { HostPluginApi, PluginRpcContext } from "../../src/plugin-types.ts";
 import { createSimulators, leaseName } from "./simulator.ts";
-import { pruneTestProducts } from "./test-products.ts";
+import { hourlyPruneApplies, pruneTestProducts } from "./test-products.ts";
 import { COORDINATOR_NOTE, WORKER_NOTE, createSimulatorTools } from "./tools.ts";
 
 const TEST_PRODUCTS_ROOT = join(homedir(), "Library", "Developer", "XcodeBuildMCP", "workspaces");
@@ -24,7 +24,9 @@ export default {
   register(api: HostPluginApi) {
     const simulators = createSimulators(api);
     // Each simulator test run leaves 2-4 GB of test products; a daily cleanup is too rare for a busy afternoon (FAILURES.md T1-T4).
-    const pruning = setInterval(() => void pruneXcodeTestProducts().catch(() => {}), 3600_000);
+    const pruning = setInterval(() => {
+      if (hourlyPruneApplies(api.projects.list())) void pruneXcodeTestProducts().catch(() => {});
+    }, 3600_000);
     pruning.unref();
     const tools = createSimulatorTools(api, simulators);
     const { Type } = api.lib.typebox,

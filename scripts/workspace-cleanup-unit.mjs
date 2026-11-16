@@ -30,7 +30,7 @@ import {
 } from "../src/workspace-cleanup.ts";
 import { sweepWorkspaceCaches, workspaceCaches } from "../src/workspace-cache.ts";
 import { cloneUsage, deviceLastUse, idleClones } from "../plugins/simulator/idle.ts";
-import { pruneTestProducts } from "../plugins/simulator/test-products.ts";
+import { pruneTestProducts, hourlyPruneApplies } from "../plugins/simulator/test-products.ts";
 
 const DAY = 86_400_000,
   now = Date.now(),
@@ -355,6 +355,10 @@ try {
   assert.ok(existsSync(join(escape, "keep")), "T3 a symlink is never followed");
   assert.equal(pruned.removed, 3);
   assert.ok(pruned.bytes >= 3 * 32 * 1024, `T4 freed bytes are counted: ${pruned.bytes}`);
+  // T5: the host-wide hourly timer runs only while some project still has the plugin on (a disabled plugin touches nothing).
+  assert.equal(hourlyPruneApplies([{ disabledPlugins: ["simulator"] }, {}]), true, "T5 one project has it on");
+  assert.equal(hourlyPruneApplies([{ disabledPlugins: ["simulator"] }, { disabledPlugins: ["other", "simulator"] }]), false, "T5 all off");
+  assert.equal(hourlyPruneApplies([]), false, "T5 no projects");
   assert.deepEqual(await pruneTestProducts({ root: join(root, "missing"), now: Date.now(), keepMs: HOUR }), { removed: 0, bytes: 0 });
 } finally {
   rmSync(root, { recursive: true, force: true });

@@ -189,7 +189,7 @@ The owner turns a loaded plugin on or off for one project in Project settings â†
 
 - Every entry of the plugin into a disabled project is refused at execution time with "plugin is disabled in this project": tool calls (also of threads that froze the tools earlier), RPC calls and web routes. `cleanup` and `usage` skip the project, and `workerTools.offered`, `coordinatorTools.applies` and the prompt block treat the plugin as absent.
 - The host refuses to disable a plugin that has active work in the project (a running tool call, RPC or route, or a `lifecycle.pause` that throws) or that the project's checkout needs (its workspace grant names the plugin or a provider id it provides). Nothing is stopped by force.
-- Hooks the host cannot route through the project (`lifecycle.close`, timers, a coordinator `extension`'s own hooks) are the plugin's own; check the project yourself if they must stop.
+- A disable holds the plugin's `lifecycle.pause` for the project until the enable, and a restarted host takes it again. Hooks the host cannot route through the project (`lifecycle.close`, timers, a coordinator `extension`'s own hooks) are the plugin's own; a host-wide timer checks `api.projects.list()` for projects that still have the plugin on.
 
 ### Resource leases
 

@@ -197,6 +197,8 @@ await kit.run(async () => {
   await kit.delay(1200);
   check("14c the flag survives the restart", (await entry(alpha, "gated")).enabled === false);
   check("14c no PR monitor or follow tick ran the disabled plugin", (await counters()).listCalls === 0, await counters());
+  check("19 the restarted host holds the disabled plugin's pause again", (await counters()).paused.includes(alpha), await counters());
+  check("19 and not the enabled project's", !(await counters()).paused.includes(beta), await counters());
   check("14c its RPC is still refused", /disabled in this project/.test(await refused(() => call(alpha, "ping"))));
   // The refused route probes of 6 are the only expected HTTP errors.
   kit.result.httpErrors = kit.result.httpErrors.filter((error) => !(error.url.endsWith("/plugins/gated/data") && error.status === 409));
