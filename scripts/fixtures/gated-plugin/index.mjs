@@ -4,6 +4,9 @@ export const calls = [];
 const paused = new Set();
 let toolRuns = 0,
   listCalls = 0;
+const observed = new Map();
+const publishedBy = new Map(),
+  listedBy = new Map();
 export default {
   name: "gated",
   register(api) {
@@ -30,7 +33,11 @@ export default {
         watchDocKind: "gated.watch",
         url: (id) => `https://gated.invalid/${id}`,
         applies: () => true,
-        list: async () => (listCalls++, { prs: [], fetchedAtMs: Date.now(), error: null, rateLimitedUntilMs: null }),
+        list: async (project) => (
+          listCalls++,
+          listedBy.set(project.id, (listedBy.get(project.id) ?? 0) + 1),
+          { prs: [], fetchedAtMs: Date.now(), error: null, rateLimitedUntilMs: null }
+        ),
         detail: async (_project, id) => ({
           id,
           title: "x",
@@ -44,12 +51,30 @@ export default {
         status: async () => ({ status: "open", merged: false, closed: false }),
         published: async () => [],
       },
+      follow: {
+        id: "gatedfollow",
+        eventKind: "gatedfollow.follow",
+        label: "Gated follow",
+        repository: (project) => ({ repositoryId: `gated/${project.id}` }),
+        observe: async ({ project }) => (
+          observed.set(project.id, (observed.get(project.id) ?? 0) + 1),
+          { state: { baselined: true, prs: {} }, items: [], failed: [] }
+        ),
+        published: async (_root, project) => (publishedBy.set(project.id, (publishedBy.get(project.id) ?? 0) + 1), []),
+      },
       rpc: {
         ping: async ({ projectId }) => ({ pong: projectId }),
         hold: async () => new Promise((resolve) => waiting.push(resolve)).then(() => ({ held: true })),
         release: async () => (waiting.splice(0).forEach((resolve) => resolve()), { released: true }),
         waiting: async () => ({ count: waiting.length }),
-        counters: async () => ({ toolRuns, listCalls, paused: [...paused] }),
+        counters: async () => ({
+          toolRuns,
+          listCalls,
+          published: Object.fromEntries(publishedBy),
+          listed: Object.fromEntries(listedBy),
+          observed: Object.fromEntries(observed),
+          paused: [...paused],
+        }),
       },
       rpcPolicy: { ping: "read", hold: "write", release: "write", waiting: "read", counters: "read" },
       web: { routes: { data: async ({ projectId }) => ({ mime: "text/plain", bytes: Buffer.from(`data:${projectId}`) }) } },
