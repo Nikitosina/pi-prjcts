@@ -76,3 +76,11 @@ moves to the new client's Settings → Notifications; host behaviour is unchange
 46. A network failure while sending or editing a Job progress message rejects the fire-and-forget `progress()` call, and the
     unhandled rejection exits the host. Each restart cuts off running work, until durable tasks are parked. Progress is best-effort:
     the failure is recorded as a delivery error, and the next progress update for that Job tries again.
+
+## Slash command suggestions (setMyCommands), added before the change
+Telegram shows a command menu only when the bot registers one. The list must be what `command()` in `src/telegram.ts` answers. Proof: `scripts/telegram-jobs-unit.mjs` (fake Bot API).
+47. The menu lists a command the handler does not answer, or omits one it does (projects, project, chats, chat, status, models, model).
+48. The scope is wider than private chats, so groups the bot sits in also show the menu.
+49. One failed `setMyCommands` (502, 429 with retry_after, dropped connection) is never retried, or retrying blocks `getUpdates`, or its error stops the host.
+50. After a success the call repeats on every poll or restart of the loop instead of once per bot, or a changed bot is not registered again.
+51. Registering messages a chat, changes pairing, or the Bot API error leaks the token.

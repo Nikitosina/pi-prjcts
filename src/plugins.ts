@@ -8,6 +8,7 @@ import type { Conversation, Tx } from "@earendil-works/pi-durable";
 import * as typebox from "typebox";
 import * as value from "typebox/value";
 import { githubPrProvider } from "./github-prs.ts";
+import { createPluginGate, disabledMessage } from "./plugin-gate.ts";
 import { clip, createListCache, RateLimitedError } from "./pr-cache.ts";
 import type {
   CoordinatorToolsProvider,
@@ -29,7 +30,8 @@ import type {
 import { usePluginPromptBlocks } from "./prompt-blocks.ts";
 import { hostLeases } from "./resource-leases.ts";
 import { webFile, type WebFile } from "./web-file.ts";
-import { home, loadProject, projectDir, type Project } from "./state.ts";
+import { home, listProjects, loadProject, projectDir, workerWorktreeRoot, type Project } from "./state.ts";
+import { verifiedWorkspaceRoots } from "./workspace-roots.ts";
 import { runCli, findVcsRoot } from "./vcs.ts";
 import {
   authorizationFingerprint,
@@ -75,32 +77,221 @@ usePluginPromptBlocks(() =>
     const tools = item.capabilities.coordinatorTools,
       prompt = tools?.prompt;
     if (!tools || !prompt) return [];
+    const plugin = item.plugin;
     return [
       {
         id: `plugin:${item.plugin}`,
         name: prompt.name,
         text: prompt.text,
-        grant: { label: prompt.name, on: (project: Project) => tools.applies(project) && (prompt.on?.(project) ?? true) },
+        grant: {
+          label: prompt.name,
+          on: (project: Project) => !disabledIn(project, plugin) && tools.applies(project) && (prompt.on?.(project) ?? true),
+        },
       },
     ];
   }),
 );
+const disabledIn = (project: Pick<Project, "disabledPlugins">, plugin: string) => project.disabledPlugins?.includes(plugin) ?? false;
+/** Every entry of a plugin into a project runs through this gate: a plugin the project turned off refuses, and work in flight is counted. */
+const release = (resume: (() => void) | undefined) => {
+  try {
+    resume?.();
+  } catch {
+    /* resuming never blocks the host */
+  }
+};
+/** Lifecycle pauses taken by a disable: held while the plugin is off, released by the enable. */
+const heldPauses = new Map<string, () => void>();
+// A project whose stored state cannot be read is not one that has the plugin on: the gate fails closed.
+const gate = createPluginGate((projectId, plugin) => {
+  try {
+    return disabledIn(loadProject(projectId), plugin);
+  } catch {
+    return true;
+  }
+});
+const loadedName = (name: string) => loaded.some((item) => item.plugin === name) || builtins().some((item) => item.plugin === name);
+
+/** What the project's folder really is (no grant needed), or null when it is not a checkout. */
+function checkoutKind(project: Project): string | null {
+  try {
+    return project.cwd && existsSync(project.cwd) ? (findVcsRoot(project.cwd)?.kind ?? null) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Why the project cannot turn the plugin off whatever else happens, or null. Looks at the real checkout, so it holds before a grant and after one is revoked. */
+function requiredBy(project: Project, name: string): string | null {
+  const item = [...builtins(), ...loaded].find((entry) => entry.plugin === name);
+  if (!item) return null;
+  const claims = [item.capabilities.workspace?.id, item.capabilities.vcs?.kind, item.capabilities.merge?.kind];
+  const provider = project.workspaceAuthorization?.provider;
+  if (provider && (provider === name || claims.includes(provider)))
+    return "required by this project's checkout (its workspace grant uses this plugin)";
+  const kind = checkoutKind(project);
+  if (kind && (claims.includes(kind) || (kind === "git" && name === "github")))
+    return `required by this project's checkout (its folder is a ${kind} checkout this plugin serves)`;
+  if (name === "github" && project.githubAuthorization?.length) return "required by this project's GitHub authorizations";
+  return null;
+}
+
+/** A copy of `provider` whose listed methods run through the project gate; everything else (and `this`) stays the provider's own. */
+const guards = new WeakMap<object, object>();
+/** One stable guarded copy per provider: callers that compare providers across calls keep working. */
+function guarded<T extends object>(provider: T, overrides: Partial<T>): T {
+  const known = guards.get(provider);
+  if (known) return known as T;
+  const made = Object.assign(Object.create(provider) as T, overrides);
+  guards.set(provider, made);
+  return made;
+}
+
 export const plugins = {
+  gate,
+  /** One row per plugin for a project: whether it is on, and why it cannot be turned off now (null when it can). */
+  forProject: (project: Project): Array<PluginStatus & { enabled: boolean; lock: string | null }> =>
+    statuses.map((status) => {
+      const name = status.name;
+      const enabled = !(name && disabledIn(project, name));
+      const busy = name ? gate.active(project.id, name) : 0;
+      const lock =
+        name && status.state === "loaded" ? (requiredBy(project, name) ?? (busy ? `active work (${busy} running)` : null)) : null;
+      return { ...status, enabled, lock };
+    }),
+  /**
+   * The project with the plugin turned on or off. Synchronous on purpose: the caller saves the result in the same tick, so no call
+   * can begin between the work check and the stored flag. Refuses a plugin with active work or one the checkout needs.
+   */
+  /** Why the plugin cannot be turned off in this project right now (needed by its checkout, or work in flight), or null. Read-only, so it can run before a lock. */
+  disableBlock: (project: Project, name: string): string | null => {
+    const required = requiredBy(project, name);
+    if (required) return `Cannot disable "${name}": ${required}`;
+    const busy = gate.active(project.id, name);
+    return busy ? `Cannot disable "${name}": it has active work in this project (${busy} running). Try again when it finishes.` : null;
+  },
+  setEnabled: (project: Project, name: string, enabled: boolean, save: (next: Project) => void): Project => {
+    if (!loadedName(name)) throw new Error(`Plugin "${name}" is not loaded`);
+    const off = new Set(project.disabledPlugins ?? []);
+    if (enabled === !off.has(name)) return project;
+    const held = `${project.id}\0${name}`;
+    let paused: (() => void) | undefined;
+    if (enabled) off.delete(name);
+    else {
+      const blocked = plugins.disableBlock(project, name);
+      if (blocked) throw new Error(blocked);
+      const lifecycle = [...builtins(), ...loaded].find((entry) => entry.plugin === name)?.capabilities.lifecycle;
+      try {
+        paused = lifecycle?.pause?.(project.id);
+      } catch (error) {
+        throw new Error(`Cannot disable "${name}": it has active work in this project (${message(error)})`);
+      }
+      off.add(name);
+    }
+    const { disabledPlugins: _, ...rest } = project;
+    const next = off.size ? { ...rest, disabledPlugins: [...off].sort() } : rest;
+    // The pause is kept only once the flag is stored: a failed save leaves the plugin as it was, running.
+    try {
+      save(next);
+    } catch (error) {
+      release(paused);
+      throw error;
+    }
+    if (paused) heldPauses.set(held, paused);
+    else if (enabled) {
+      release(heldPauses.get(held));
+      heldPauses.delete(held);
+    }
+    return next;
+  },
   vcsProviders: (): VcsProvider[] => each((caps) => caps.vcs),
   vcsProvider: (kind: string): VcsProvider | undefined => each((caps) => caps.vcs).find((item) => item.kind === kind),
-  workspaceProviders: (): WorkspaceProvider[] => each((caps) => caps.workspace),
-  workspaceProvider: (id: string): WorkspaceProvider | undefined => each((caps) => caps.workspace).find((item) => item.id === id),
-  prProviders: (): PrProvider[] => each((caps) => caps.prs),
-  prProvider: (id: string): PrProvider | undefined => each((caps) => caps.prs).find((item) => item.id === id),
-  followProviders: (): FollowProvider[] => each((caps) => caps.follow),
-  mergeProvider: (kind: string): MergeProvider | undefined => each((caps) => caps.merge).find((item) => item.kind === kind),
-  coordinatorTools: (): CoordinatorToolsProvider[] => each((caps) => caps.coordinatorTools),
-  /** Coordinator tool providers with their origin: a built-in plugin's tools keep their built-in tool group. */
+  workspaceProviders: (): WorkspaceProvider[] => plugins.workspaceSources(),
+  workspaceProvider: (id: string): WorkspaceProvider | undefined => plugins.workspaceSources().find((item) => item.id === id),
+  /** Workspace providers: a project that turned the plugin off is offered no setup of it (a grant that uses it locks the plugin on). */
+  workspaceSources: (): WorkspaceProvider[] =>
+    [...builtins(), ...loaded].flatMap((item) => {
+      const provider = item.capabilities.workspace;
+      if (!provider) return [];
+      return [
+        guarded(provider, {
+          quickPreview: (project, walkedRoot) =>
+            disabledIn(project, item.plugin)
+              ? { available: false, blocker: disabledMessage(item.plugin) }
+              : provider.quickPreview(project, walkedRoot),
+          setupCards: provider.setupCards
+            ? (project) => (disabledIn(project, item.plugin) ? [] : provider.setupCards!(project))
+            : undefined,
+        }),
+      ];
+    }),
+  prProviders: (): PrProvider[] =>
+    [...builtins(), ...loaded].flatMap((item) => {
+      const provider = item.capabilities.prs,
+        plugin = item.plugin;
+      if (!provider) return [];
+      const run = <R>(project: Project, work: () => Promise<R>) => gate.run(project.id, plugin, work);
+      return [
+        guarded(provider, {
+          applies: (project) => !disabledIn(project, plugin) && provider.applies(project),
+          list: (project, options) => run(project, () => provider.list(project, options)),
+          touching: provider.touching ? (project) => run(project, () => provider.touching!(project)) : undefined,
+          detail: (project, id) => run(project, () => provider.detail(project, id)),
+          status: (project, id) => run(project, () => provider.status(project, id)),
+          published: (root, project) => run(project, () => provider.published(root, project)),
+        }),
+      ];
+    }),
+  prProvider: (id: string): PrProvider | undefined => plugins.prProviders().find((item) => item.id === id),
+  followProviders: (): FollowProvider[] =>
+    [...builtins(), ...loaded].flatMap((item) => {
+      const provider = item.capabilities.follow,
+        plugin = item.plugin;
+      if (!provider) return [];
+      return [
+        guarded(provider, {
+          repository: (project) => (disabledIn(project, plugin) ? undefined : provider.repository(project)),
+          observe: (input) => gate.settled(input.project.id, plugin, () => provider.observe(input)),
+          published: (root, project) => gate.run(project.id, plugin, () => provider.published(root, project)),
+        }),
+      ];
+    }),
+  /** The merge provider for a checkout kind, its methods counted and refused by the project gate (`plugin` is the provider's plugin). */
+  mergeProvider: (projectId: string, kind: string): MergeProvider | undefined => {
+    const item = [...builtins(), ...loaded].find((entry) => entry.capabilities.merge?.kind === kind);
+    return item?.capabilities.merge ? plugins.gatedMerge(projectId, item.plugin, item.capabilities.merge) : undefined;
+  },
+  gatedMerge: (projectId: string, plugin: string, provider: MergeProvider): MergeProvider =>
+    gate.methods(projectId, plugin, provider, ["inspect", "markReady", "merge", "enableAutoMerge", "pullMain"]),
+  coordinatorTools: (): CoordinatorToolsProvider[] => plugins.coordinatorToolSources().map((source) => source.provider),
+  /** Coordinator tool providers with their origin: a built-in plugin's tools keep their built-in tool group. Their calls run through the project gate. */
   coordinatorToolSources: (): Array<{ provider: CoordinatorToolsProvider; builtIn: boolean }> =>
-    [...builtins(), ...loaded].flatMap((item) =>
-      item.capabilities.coordinatorTools ? [{ provider: item.capabilities.coordinatorTools, builtIn: item.builtIn === true }] : [],
-    ),
-  workerTools: (): WorkerToolsProvider[] => each((caps) => caps.workerTools),
+    [...builtins(), ...loaded].flatMap((item) => {
+      const provider = item.capabilities.coordinatorTools;
+      if (!provider) return [];
+      const guard = guarded<CoordinatorToolsProvider>(provider, {
+        applies: (project) => !disabledIn(project, item.plugin) && provider.applies(project),
+        create: (input) => {
+          const made = provider.create(input);
+          // The Durable registration is what a chat executes: gate its tools too, not only the offered list.
+          const extension = { ...made.extension, tools: gate.tools(input.projectId, item.plugin, [...(made.extension.tools ?? [])]) };
+          return { extension, tools: gate.tools(input.projectId, item.plugin, made.tools) };
+        },
+      });
+      return [{ provider: guard, builtIn: item.builtIn === true }];
+    }),
+  /** Worker tool providers: offered only while the project has the plugin on; tools a thread already froze stop at their next call after a disable. */
+  workerTools: (): WorkerToolsProvider[] =>
+    [...builtins(), ...loaded].flatMap((item) => {
+      const provider = item.capabilities.workerTools;
+      if (!provider) return [];
+      return [
+        guarded<WorkerToolsProvider>(provider, {
+          offered: (projectId: string) => !gate.isOff(projectId, item.plugin) && provider.offered(projectId),
+          create: (input) => gate.tools(input.projectId, item.plugin, provider.create(input)),
+        }),
+      ];
+    }),
   /** Runs every plugin's lifecycle pause; one refusal resumes the others and refuses the change. Returns the combined resume. */
   pauseLifecycle: (projectId: string): (() => void) => {
     const resumes: Array<() => void> = [];
@@ -122,10 +313,18 @@ export const plugins = {
     return resumeAll;
   },
   /** Cleanup routine steps of loaded plugins, by plugin name. */
-  cleanupSteps: () =>
-    loaded.flatMap((item) => (item.capabilities.cleanup ? [{ plugin: item.plugin, run: item.capabilities.cleanup }] : [])),
-  usageSources: () =>
-    loaded.flatMap((item) => (item.capabilities.usage ? [{ plugin: item.plugin, measure: item.capabilities.usage }] : [])),
+  cleanupSteps: (projectId: string) =>
+    loaded.flatMap((item) => {
+      const run = item.capabilities.cleanup;
+      if (!run || gate.isOff(projectId, item.plugin)) return [];
+      return [{ plugin: item.plugin, run: ((input) => gate.run(projectId, item.plugin, () => run(input))) as typeof run }];
+    }),
+  usageSources: (projectId: string) =>
+    loaded.flatMap((item) => {
+      const measure = item.capabilities.usage;
+      if (!measure || gate.isOff(projectId, item.plugin)) return [];
+      return [{ plugin: item.plugin, measure: ((input) => gate.run(projectId, item.plugin, () => measure(input))) as typeof measure }];
+    }),
   close: async (): Promise<void> => {
     await Promise.allSettled(each((caps) => caps.lifecycle).map((hooks) => hooks.close?.()));
   },
@@ -335,10 +534,13 @@ async function hostApi(name: string, stage: PluginCapabilities): Promise<HostPlu
     },
     projects: {
       load: loadProject,
+      list: listProjects,
       dir: projectDir,
       record: <T>(project: object, key: string) => (project as Record<string, unknown>)[key] as T | undefined,
       authorizationFingerprint,
       trustedOwner,
+      workspaceRoots: (id) => verifiedWorkspaceRoots(loadProject(id).cwd, workerWorktreeRoot(id)),
+      work: (id, work) => gate.run(id, name, work),
     },
     exec: {
       run: runCli,
@@ -424,6 +626,21 @@ async function loadOne(source: string, path: string, builtIn = false): Promise<P
   return status;
 }
 
+/** A restart forgets the pauses a disable held: take them again for every project that has a plugin off. A refusing plugin stays gated by the flag. */
+function retakePauses() {
+  for (const project of listProjects())
+    for (const name of project.disabledPlugins ?? []) {
+      const held = `${project.id}\0${name}`;
+      if (heldPauses.has(held)) continue;
+      try {
+        const paused = [...builtins(), ...loaded].find((entry) => entry.plugin === name)?.capabilities.lifecycle?.pause?.(project.id);
+        if (paused) heldPauses.set(held, paused);
+      } catch {
+        /* the stored flag already refuses every entry of the plugin */
+      }
+    }
+}
+
 /** Loads every configured plugin once per host process; later callers share the result. Never throws. */
 export function loadPlugins(): Promise<PluginStatus[]> {
   return (loading ??= (async () => {
@@ -443,6 +660,7 @@ export function loadPlugins(): Promise<PluginStatus[]> {
       }
       statuses.push(await loadOne(item.source, item.path));
     }
+    retakePauses();
     return plugins.status();
   })());
 }

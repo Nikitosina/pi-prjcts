@@ -2,10 +2,23 @@
 // as Approve / Deny cards and its own model, thinking and tools. Follows `ui_focus` frames from the host change feed (routed in
 // by app.js through onHostTopic). When the host could not open its Host agent, the drawer shows the host's reason.
 import { call, stream, uuid } from "./api.js";
-import { clip, esc, markdown, oneLine, shortModel } from "./format.js";
+import { clip, esc, fresherSettings, markdown, oneLine, shortModel } from "./format.js";
 import { emit, fail, inline, on, state, toast } from "./state.js";
 import { mergeGroups, morph, showThinking, thinkingHtml, transcriptClick, transcriptHtml } from "./chat.js";
 import { hydrateMedia } from "./media.js";
+import {
+  acknowledgeDraft,
+  beginSend,
+  failSend,
+  recoverSends,
+  finishSend,
+  isAltUp,
+  paintPending,
+  persistText,
+  readDraft,
+  restoreInto,
+  surfaces,
+} from "./queued-input.js";
 
 const THINKING = ["off", "low", "medium", "high", "max"];
 const drawer = document.querySelector("#host-agent"),
@@ -14,6 +27,7 @@ const drawer = document.querySelector("#host-agent"),
   settingsBox = drawer.querySelector("#ha-settings"),
   modelChip = drawer.querySelector("#ha-model"),
   form = drawer.querySelector("#ha-composer"),
+  pendingBox = drawer.querySelector("#ha-pending"),
   input = form.querySelector("textarea");
 let items = [],
   groups = null,
@@ -88,10 +102,11 @@ export async function loadHostAgent() {
   input.disabled = false;
   input.placeholder = "Ask the host agent…";
   drawer.querySelector("[data-ha-settings]").hidden = false;
-  if (next) settings = next;
+  if (next) settings = fresherSettings(settings, next);
   paintModel();
   if (!settingsBox.hidden) paintSettings();
   items = history.items ?? [];
+  paintPending(pendingBox, history.inputs);
   // Earlier pages keep the groups they were read with; the newest page brings its own, also for a group both hold.
   groups = mergeGroups(groups, history.toolGroups);
   before = history.before;
@@ -108,7 +123,19 @@ export async function loadHostAgent() {
 
 // ---------------------------------------------------------------------------------------------------------------- focus
 
-const FOCUS_SECTIONS = new Set(["theme", "tiers", "hotkeys", "animations", "statusline", "notifications", "remote", "deploy", "providers"]);
+const FOCUS_SECTIONS = new Set([
+  "appearance",
+  "theme",
+  "tiers",
+  "hotkeys",
+  "animations",
+  "display",
+  "statusline",
+  "notifications",
+  "remote",
+  "deploy",
+  "providers",
+]);
 /** `ui_focus { view, projectId?, chatId?, section? }` from the agent: move the page, say where in one line. Settings never open on
  * their own: the owner gets a toast and opens them with its button. */
 export function followFocus(focus) {
@@ -284,7 +311,7 @@ export function onTiersChanged() {
   if (!settingsBox.hidden) void loadModels();
   void call("host-agent-settings")
     .then((next) => {
-      settings = next;
+      settings = fresherSettings(settings, next);
       paintModel();
       if (!settingsBox.hidden) paintSettings();
     })
@@ -335,13 +362,13 @@ async function writeSettings(patch, label) {
   let problem = null;
   try {
     const next = await call("host-agent-settings", { revision: settings.revision, patch });
-    settings = next;
+    settings = fresherSettings(settings, next);
     error = "";
   } catch (reason) {
     problem = reason;
     // A stale revision or a refused model: show what the host has now.
     const fresh = await call("host-agent-settings").catch(() => null);
-    if (fresh) settings = fresh;
+    if (fresh) settings = fresherSettings(settings, fresh);
   }
   paintModel();
   paintSettings();
@@ -373,24 +400,75 @@ settingsBox.addEventListener("click", (event) => {
 
 // ---------------------------------------------------------------------------------------------------------------- composer
 
+// What the owner typed or restored here earlier (Alt+Up, a reload) is in the drawer's draft.
+const acknowledgeRestored = (requestIds) => call("host-agent-dequeue-ack", { requestIds });
+input.value = readDraft(surfaces.host).text;
+input.addEventListener("input", () => persistText(surfaces.host, input.value));
+void acknowledgeDraft({ surface: surfaces.host, acknowledge: acknowledgeRestored }).catch(() => {});
+// Sends the last page never saw accepted go out again under their own ids; a refused one comes back into the editor.
+const editor = { live: () => true, read: () => input.value, show: (value) => (input.value = value) };
+const recover = () =>
+  recoverSends(
+    surfaces.host,
+    (record) => call("host-agent-send", { requestId: record.requestId, text: record.text, delivery: record.delivery ?? "steer" }),
+    editor,
+  )
+    .then((accepted) => {
+      if (!input.value) input.value = readDraft(surfaces.host).text;
+      if (accepted) void loadHostAgent();
+      // An unknown outcome stays recorded and is sent again, under the same id, until the host answers.
+      if (readDraft(surfaces.host).sending.some((record) => !record.refused)) setTimeout(recover, 4000);
+    })
+    .catch(() => {});
+void recover();
+// Pi's keys: Enter steers a working agent, Alt+Enter queues a follow-up.
+let nextDelivery = "steer";
 input.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
+    nextDelivery = event.altKey ? "followUp" : "steer";
     form.requestSubmit();
+  } else if (isAltUp(event)) {
+    event.preventDefault();
+    void restoreQueued();
   }
 });
+// Alt+Up takes every message the Host agent has not taken yet back into the editor (the same two steps as the Coordinator's composer).
+async function restoreQueued() {
+  try {
+    await restoreInto({
+      surface: surfaces.host,
+      editor,
+      toast,
+      grow: () => ((input.style.height = "auto"), (input.style.height = `${Math.min(input.scrollHeight, 240)}px`)),
+      dequeue: () => call("host-agent-dequeue"),
+      acknowledge: acknowledgeRestored,
+    });
+    await loadHostAgent();
+  } catch (error) {
+    fail(error);
+  }
+}
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
+  const delivery = nextDelivery;
+  nextDelivery = "steer";
   const text = input.value.trim();
   if (!text || !available || form.dataset.sending === "1") return;
+  const requestId = uuid();
+  if (!beginSend(surfaces.host, { requestId, text, delivery })) {
+    toast("Could not keep the message in this browser, so it was not sent");
+    return;
+  }
   form.dataset.sending = "1";
   input.value = "";
   try {
-    await call("host-agent-send", { requestId: uuid(), text });
+    await call("host-agent-send", { requestId, text, delivery });
+    finishSend(surfaces.host, requestId);
     error = "";
     await loadHostAgent();
   } catch (reason) {
-    input.value = text;
+    if (failSend(surfaces.host, requestId, reason, editor) === "unknown") setTimeout(recover, 4000);
     // "has no model" / "not in the model catalog": say it where the owner is looking and open the model picker.
     if (/model/i.test(reason.message ?? "")) {
       error = reason.message;

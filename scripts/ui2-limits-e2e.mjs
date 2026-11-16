@@ -35,6 +35,20 @@ const cursor = createServer(async (req, res) => {
   );
 });
 await new Promise((ok) => cursor.listen(0, "127.0.0.1", ok));
+// Fake Ollama Cloud /api/balance (the current plan shape): records the Authorization header each read sent.
+const OLLAMA_KEY = "ol-fake-key-ui2-e2e";
+const ollamaAuth = [];
+const ollama = createServer((req, res) => {
+  ollamaAuth.push(`${req.method} ${req.url} ${req.headers.authorization}`);
+  res.writeHead(200, { "content-type": "application/json" });
+  res.end(
+    JSON.stringify({
+      included: { balance_usd: 15, allowance_usd: 20, period: { from: "2030-01-01T00:00:00Z", until: "2030-02-01T00:00:00Z" } },
+      purchased: { balance_usd: 3.5 },
+    }),
+  );
+});
+await new Promise((ok) => ollama.listen(0, "127.0.0.1", ok));
 const holdCursor = () => {
   let release;
   const promise = new Promise((ok) => (release = ok));
@@ -56,11 +70,24 @@ Object.assign(kit.hostEnv, {
   PI_PROJECTS_MACHINE_FIXTURE: machineFixture,
   PI_PROJECTS_CURSOR_DASHBOARD: `http://127.0.0.1:${cursor.address().port}`,
   PI_PROJECTS_CURSOR_API: `http://127.0.0.1:${cursor.address().port}`,
+  PI_PROJECTS_OLLAMA_BALANCE_URL: `http://127.0.0.1:${ollama.address().port}/api/balance`,
 });
+// The owner's Ollama Cloud connection in Pi: a custom provider with a key.
+const modelsFile = join(kit.agentDir, "models.json"),
+  piModels = JSON.parse(readFileSync(modelsFile, "utf8"));
+piModels.providers["ollama-cloud"] = {
+  baseUrl: "https://ollama.com/v1",
+  apiKey: OLLAMA_KEY,
+  api: "openai-completions",
+  models: [{ id: "gpt-oss:120b", name: "gpt-oss", reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 4096 }],
+};
+writeFileSync(modelsFile, JSON.stringify(piModels));
 const jwt = `x.${Buffer.from(JSON.stringify({ sub: "auth0|e2e", exp: Math.floor(Date.now() / 1000) + 3600 })).toString("base64url")}.y`;
 writeFileSync(
   join(kit.agentDir, "auth.json"),
-  JSON.stringify({ cursor: { type: "oauth", access: jwt, refresh: "r", expires: Date.now() + 3600e3 } }),
+  JSON.stringify({
+    cursor: { type: "oauth", access: jwt, refresh: "r", expires: Date.now() + 3600e3 },
+  }),
 );
 // Every page fetch of a limits action, and every interval the page sets, so the test can fire them all.
 const PROBE = `window.__limitCalls = []; window.__intervals = [];
@@ -190,7 +217,7 @@ try {
     hold.release();
     hold = null;
     await page.waitFor(
-      `!${button}.hasAttribute("aria-busy") && /Cursor/.test(document.querySelector('#statusline').innerText)`,
+      `!${button}.hasAttribute("aria-busy") && /Cursor/.test(document.querySelector('#statusline').innerText) && /Ollama/.test(document.querySelector('#statusline').innerText)`,
       "refreshed bar",
     );
     const refreshed = await bar();
@@ -201,6 +228,17 @@ try {
         /Claude 5h.*42%/.test(refreshed) &&
         /Cursor mo.*75%/.test(refreshed),
       { calls: await calls(), cursorHits, refreshed },
+    );
+    check(
+      "O1 Ollama shows its monthly share from /api/balance with the Pi key, once",
+      /Ollama mo.*25%/.test(refreshed) && ollamaAuth.length === 1 && ollamaAuth[0] === `GET /api/balance Bearer ${OLLAMA_KEY}`,
+      { refreshed, ollamaAuth },
+    );
+    const limitsJson = JSON.stringify(await rpc({ action: "limits-snapshot" }));
+    check(
+      "O2 the key never reaches a response and the dollars are in the snapshot",
+      !limitsJson.includes(OLLAMA_KEY) && /"includedUsd":15/.test(limitsJson) && /"purchasedUsd":3.5/.test(limitsJson),
+      limitsJson.slice(0, 400),
     );
     check("M10 after the refresh the keyboard is still on the button", await page.evaluate(`document.activeElement === ${button}`));
     await page.shot("03-refreshed", { force: true });
@@ -305,6 +343,9 @@ try {
       },
     );
     await page.shot("06-cursor-hidden", { force: true });
+    // Ollama is the third reading on the bar; hiding it leaves only Claude for the steps below.
+    await rpc({ action: "limits-visibility", provider: "ollama", visible: false });
+    await page.waitFor(`!/Ollama/.test(document.querySelector('#statusline').innerText)`, "Ollama hidden here");
 
     // A change saved elsewhere (another browser, the Host agent, the classic inbox) reaches this page without a reload. A second UI2
     // tab is not opened here: each tab holds several streams and Chrome's per-host connection cap would stall it.
@@ -320,7 +361,7 @@ try {
     );
     check(
       "M17 with every reading hidden the status line keeps its refresh button and Providers keeps every row",
-      allHidden?.label === "Refresh subscription limits" && allHidden.text === "limits" && allHidden.rows === 5,
+      allHidden?.label === "Refresh subscription limits" && allHidden.text === "limits" && allHidden.rows === 6,
       allHidden,
     );
     await page.shot("07-all-hidden", { force: true });
@@ -332,10 +373,14 @@ try {
     hits = cursorHits;
     await page.evaluate(`document.querySelector('dialog[open] [data-providers-refresh]').click()`);
     await page.waitFor(`/90% used/.test(${box("cursor")}.closest("li").innerText)`, "hidden Cursor refreshed");
-    check("M16 a refresh reads hidden providers and keeps them hidden", cursorHits === hits + 1 && !/Cursor|Claude/.test(await bar()), {
-      cursorHits,
-      bar: await bar(),
-    });
+    check(
+      "M16 a refresh reads hidden providers and keeps them hidden",
+      cursorHits === hits + 1 && !/Cursor|Claude|Ollama/.test(await bar()),
+      {
+        cursorHits,
+        bar: await bar(),
+      },
+    );
 
     // Rapid toggles of two providers are saved one at a time, and the page ends where the host ends.
     mark = await callCount();
@@ -565,4 +610,5 @@ try {
 } finally {
   hold?.release();
   cursor.close();
+  ollama.close();
 }

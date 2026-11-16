@@ -30,7 +30,8 @@ import {
 } from "../src/workspace-cleanup.ts";
 import { sweepWorkspaceCaches, workspaceCaches } from "../src/workspace-cache.ts";
 import { cloneUsage, deviceLastUse, idleClones } from "../plugins/simulator/idle.ts";
-import { pruneTestProducts } from "../plugins/simulator/test-products.ts";
+import { verifiedWorkspaceRoots } from "../src/workspace-roots.ts";
+import { pruneTestProducts, pruneEnabledProjects, workspaceKeyForRoot } from "../plugins/simulator/test-products.ts";
 
 const DAY = 86_400_000,
   now = Date.now(),
@@ -355,6 +356,98 @@ try {
   assert.ok(existsSync(join(escape, "keep")), "T3 a symlink is never followed");
   assert.equal(pruned.removed, 3);
   assert.ok(pruned.bytes >= 3 * 32 * 1024, `T4 freed bytes are counted: ${pruned.bytes}`);
+  // T5: two projects share the XcodeBuildMCP root. A disabled the plugin, B did not: only B's own workspaces (its checkout and
+  // host-owned workspaces, keyed by XcodeBuildMCP's sha256 of the real path) are pruned; A's and an unowned workspace stay.
+  {
+    const rootA = join(root, "proj-a"),
+      rootB = join(root, "proj-b"),
+      treeB = join(root, "proj-b-tree"),
+      other = join(root, "stranger"),
+      shared = join(root, "shared-checkout");
+    for (const dir of [rootA, rootB, treeB, other, shared]) mkdirSync(dir, { recursive: true });
+    const [keyA, keyB, keyTreeB, keyOther, keyShared] = [rootA, rootB, treeB, other, shared].map(workspaceKeyForRoot);
+    const stale = (key) => [product(key, name("01-00-00", deadPid), 12), product(key, name("02-00-00", deadPid), 11)];
+    const [a1] = stale(keyA),
+      [b1] = stale(keyB),
+      [t1] = stale(keyTreeB),
+      [o1] = stale(keyOther),
+      [s1] = stale(keyShared);
+    const projects = [
+      { id: "a", disabledPlugins: ["simulator"], roots: [rootA, shared] },
+      { id: "b", disabledPlugins: undefined, roots: [rootB, treeB, shared] },
+    ];
+    const swept = await pruneEnabledProjects({ root: xbm, now: Date.now(), keepMs: 2 * HOUR, projects });
+    assert.equal(swept.removed, 2, "T5 only B's two stale runs go");
+    assert.ok(existsSync(a1), "T5 the disabled project's products are untouched");
+    assert.ok(existsSync(o1), "T5 a workspace no project owns is untouched");
+    assert.ok(!existsSync(b1) && !existsSync(t1), "T5 the enabled project's checkout and workspace are pruned");
+    assert.ok(existsSync(s1), "T6 a checkout two projects claim is shared: neither the enabled nor the disabled project may prune it");
+    const per = await pruneEnabledProjects({
+      root: xbm,
+      now: Date.now(),
+      keepMs: 2 * HOUR,
+      projects: projects.map((project) => ({ ...project, disabledPlugins: undefined })),
+      only: "a",
+    });
+    assert.equal(per.removed, 1, "T5 the cleanup step prunes only the project it runs for");
+    assert.ok(!existsSync(a1) && existsSync(o1) && existsSync(s1), "T5 and only that project's own workspace");
+  }
+  // T8: each project's pruning is admitted through the host (counted for the project, refused once it turned the plugin off) and the deletion
+  // happens inside that admission, so a disable cannot be accepted in the middle of it.
+  {
+    const rootC = join(root, "t8-c"),
+      rootD = join(root, "t8-d");
+    for (const dir of [rootC, rootD]) mkdirSync(dir, { recursive: true });
+    const [c1] = [workspaceKeyForRoot(rootC)].map(
+      (key) => [product(key, name("01-00-00", deadPid), 12), product(key, name("02-00-00", deadPid), 11)][0],
+    );
+    const [d1] = [workspaceKeyForRoot(rootD)].map(
+      (key) => [product(key, name("01-00-00", deadPid), 12), product(key, name("02-00-00", deadPid), 11)][0],
+    );
+    const admitted = [];
+    let inside = 0;
+    const swept = await pruneEnabledProjects({
+      root: xbm,
+      now: Date.now(),
+      keepMs: 2 * HOUR,
+      projects: [
+        { id: "c", roots: [rootC] },
+        { id: "d", roots: [rootD] },
+      ],
+      admit: async (id, work) => {
+        admitted.push(id);
+        if (id === "d") throw new Error("disabled in this project");
+        inside++;
+        try {
+          return await work();
+        } finally {
+          inside--;
+        }
+      },
+    });
+    assert.deepEqual(admitted, ["c", "d"], "T8 every project is admitted before its roots are touched");
+    assert.equal(inside, 0);
+    assert.ok(!existsSync(c1), "T8 an admitted project is pruned");
+    assert.ok(existsSync(d1), "T8 a refused project is not touched");
+    assert.equal(swept.removed, 1);
+  }
+  // T7: the roots of a project are host-owned: its folder and the real directories under its worktree root. A symlink, a file, an escape
+  // through a link and a leftover git worktree list entry are not claimed.
+  {
+    const cwd = join(root, "t7-project"),
+      tree = join(root, "t7-worktrees"),
+      outsideDir = join(root, "t7-outside");
+    for (const dir of [cwd, tree, outsideDir, join(tree, "w1"), join(tree, "w2")]) mkdirSync(dir, { recursive: true });
+    writeFileSync(join(tree, "file"), "x");
+    symlinkSync(outsideDir, join(tree, "link"));
+    const roots = verifiedWorkspaceRoots(cwd, tree);
+    assert.deepEqual(
+      [...roots].sort(),
+      [cwd, join(tree, "w1"), join(tree, "w2")].map((path) => realpathSync(path)).sort(),
+      "T7 the folder and the real workspaces only",
+    );
+    assert.deepEqual(verifiedWorkspaceRoots(undefined, join(root, "t7-missing")), [], "T7 nothing known, nothing claimed");
+  }
   assert.deepEqual(await pruneTestProducts({ root: join(root, "missing"), now: Date.now(), keepMs: HOUR }), { removed: 0, bytes: 0 });
 } finally {
   rmSync(root, { recursive: true, force: true });

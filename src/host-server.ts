@@ -33,7 +33,9 @@ import {
   notes,
   parse,
   projectDir,
+  workerWorktreeRoot,
   saveJob,
+  deleteJob,
   saveProject,
   type GithubAuthorization,
   type Request as RequestData,
@@ -78,6 +80,7 @@ import { watchSelfCheckout } from "./main-pull.ts";
 import { describeAcceptance } from "./result-acceptance.ts";
 import { sendOwnerMessage, startTelegram } from "./telegram.ts";
 import type { JobsSnapshot } from "./jobs.ts";
+import { RefusedInput, serialized } from "./owner-input-queue.ts";
 import { loadAutomations, rotateWebhookSecret, updateAutomations } from "./project-automations.ts";
 import { listArtifacts } from "./artifacts.ts";
 import { openDurableHost, durableHostSnapshot, durableHostActivity, type ProjectActivity } from "./durable-host.ts";
@@ -117,7 +120,7 @@ import { commandProfilesSnapshot } from "./command-profiles.ts";
 import { type DurableProjectRuntime } from "./durable-runtime.ts";
 import { legacyEditorText, projectBehavior, promptBlocksView, resolvePromptBlocks } from "./prompt-blocks.ts";
 import { estimateTokens, promptSection } from "./prompt-sections.ts";
-import { limitsSnapshot, setLimitVisibility, setLimitsTokenResolver, startCursorLogin } from "./usage-limits.ts";
+import { limitsSnapshot, setLimitVisibility, setLimitsTokenResolver, setOllamaKeyResolver, startCursorLogin } from "./usage-limits.ts";
 import { machineStatus } from "./machine-status.ts";
 import { storageTotal, type StorageTotal, type StorageUsage } from "./storage-usage.ts";
 import { DEFAULT_SCRIPT_TIMEOUT_MS } from "./routine-script.ts";
@@ -216,6 +219,12 @@ async function withProjectLock<T>(id: string, operation: () => Promise<T>, durin
     release();
     if (projectLocks.get(id) === current) projectLocks.delete(id);
   }
+}
+
+/** The disable refusal for a project's plugin that needs no lock to decide (its checkout needs it, or its work is in flight), or null. */
+function loadedPluginBlock(projectId: string, plugin: string): string | null {
+  ownedProjectDir(projectId);
+  return plugins.disableBlock(loadProject(projectId), plugin);
 }
 
 async function withDurableOwner<T>({
@@ -383,10 +392,6 @@ const rebindAuthorizations = (project: ReturnType<typeof loadProject>) =>
   plugins
     .workspaceProviders()
     .reduce((current, provider) => (provider.rebind ? provider.rebind(current) : current), rebindOneClickGithub(project));
-/** Worker worktrees for one-click grants live with the project data, outside the owner checkout. */
-function workerWorktreeRoot(id: string): string {
-  return join(projectDir(id), "worktrees");
-}
 
 async function persistWorkspaceGrant<T>(
   before: ReturnType<typeof loadProject>,
@@ -846,6 +851,58 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       feed.publish(input.projectId, { topic: "chat", chat: result.chatId });
       return result;
     }
+    case "chat-dequeue":
+      return serialized(`${input.projectId}:${input.chatId ?? "main"}`, async () => {
+        const project = loadProject(input.projectId);
+        if (project.deleted || project.archived) throw new Error("Inactive project has no queued input to withdraw");
+        const owner = await durable(input.projectId),
+          chatKey = input.chatId ?? "main";
+        const mine = () => jobs(input.projectId).filter((job) => (job.chatId ?? "main") === chatKey);
+        // Only the owner's own ledger entries can be taken back; internal inputs (worker reports, approval results) have none and stay queued.
+        const asked = mine().filter((job) => job.state === "queued" && (!input.requestIds || input.requestIds.includes(job.id)));
+        // Marked before the abort: a crash between the two leaves the text recoverable, never lost.
+        for (const job of asked) saveJob(input.projectId, { ...job, state: "withdrawn" });
+        const result = await owner.dequeue(
+          input.chatId,
+          asked.map((job) => job.id),
+        );
+        for (const job of asked) if (!result.withdrawn.includes(job.id)) saveJob(input.projectId, { ...job, state: "queued" });
+        // Withdrawn earlier and never acknowledged: confirm the runtime really dropped it before offering it again.
+        const earlier = mine().filter((job) => job.state === "withdrawn" && !result.withdrawn.includes(job.id));
+        const live = earlier.length
+          ? await owner.ledgerSubmissions(
+              chatKey,
+              earlier.map((job) => job.id),
+            )
+          : [];
+        for (const job of earlier) {
+          const submission = live.find((item) => item.requestId === job.id);
+          if (submission && !(submission.status === "unanswered" && submission.reason === "aborted"))
+            saveJob(input.projectId, { ...job, state: "queued", error: null });
+        }
+        const order = (job: import("./state.ts").Job) => (job.delivery === "steer" ? 0 : 1);
+        const restored = mine()
+          .filter((job) => job.state === "withdrawn" && (!input.requestIds || input.requestIds.includes(job.id)))
+          .sort((a, b) => order(a) - order(b) || a.at.localeCompare(b.at))
+          .map((job) => ({
+            id: job.id,
+            text: job.text,
+            delivery: job.delivery ?? "followUp",
+            attachments: job.attachments ?? [],
+            ...(job.origin ? { origin: job.origin } : {}),
+          }));
+        const restoredIds = new Set(restored.map((item) => item.id));
+        const kept = (input.requestIds ?? asked.map((job) => job.id)).filter((id) => !restoredIds.has(id));
+        feed.publish(input.projectId, { topic: "chat", chat: result.chatId });
+        return { restored, kept };
+      });
+    case "chat-dequeue-ack": {
+      const project = loadProject(input.projectId);
+      if (project.deleted || project.archived) throw new Error("Inactive project has no queued input to withdraw");
+      for (const job of jobs(input.projectId))
+        if (job.state === "withdrawn" && input.requestIds.includes(job.id)) deleteJob(input.projectId, job.id);
+      return { acknowledged: input.requestIds };
+    }
     case "memory-undo":
       return withProjectLock(input.projectId, async () => {
         const project = loadProject(input.projectId);
@@ -1241,38 +1298,64 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       });
     }
     case "plugins":
-      return { plugins: plugins.status(), labels: plugins.labels(), web: plugins.web() };
+      return {
+        plugins: input.id ? plugins.forProject(loadProject(input.id)) : plugins.status(),
+        labels: plugins.labels(),
+        web: plugins.web(),
+      };
+    case "project-plugin": {
+      // Work in flight refuses the disable at once; it does not queue behind a project lock the work itself holds.
+      if (!input.enabled) {
+        const early = loadedPluginBlock(input.id, input.plugin);
+        if (early) throw new Error(early);
+      }
+      return withProjectLock(input.id, async () => {
+        const project = loadProject(input.id);
+        if (project.deleted || project.archived) throw new Error("Inactive project settings cannot be changed");
+        // Check and save in one synchronous step: no plugin call can start between the work check and the stored flag.
+        plugins.setEnabled(project, input.plugin, input.enabled, saveProject);
+        return { plugin: input.plugin, enabled: input.enabled };
+      });
+    }
     case "plugin": {
       const handler = plugins.rpc(input.plugin, input.method);
       if (!handler)
         throw new Error(`Plugin RPC ${input.plugin}.${input.method} is unavailable: the plugin is not loaded or has no such method`);
-      return handler({
-        params: input.params,
-        projectId: input.id,
-        withRoot: (id, fn) => withDurableOwner({ id, operation: (owner) => owner.withRoot(fn) }),
-        mutateIdle: (id, change) =>
-          lifecycle(id, change.validate, async (owner) => {
-            const view = await owner.snapshot(),
-              plan = await owner.jobs();
-            if (
-              view.chats.some((chat) => chat.busy) ||
-              view.coordinator.busy ||
-              view.coordinator.submissions.some((item) => item.status === "queued" || item.status === "placed") ||
-              workBusy(plan)
-            )
-              throw new Error("This change requires no active project work");
-            await closeLifecycleOwner(id, owner);
-            return withProjectLock(
-              id,
-              async () => {
-                const project = loadProject(id);
-                change.validate(project);
-                saveProject(change.apply(project));
-              },
-              true,
-            );
-          }),
-      });
+      const run = <T>(work: () => Promise<T>) => (input.id ? plugins.gate.run(input.id, input.plugin, work) : work());
+      return run(() =>
+        handler({
+          params: input.params,
+          projectId: input.id,
+          // An RPC without a project id reaches a project only through these two: each counts as the plugin's work in that project, from before the
+          // project is opened or locked until its effects are done, and is refused once the project turned the plugin off.
+          withRoot: (id, fn) =>
+            plugins.gate.run(id, input.plugin, () => withDurableOwner({ id, operation: (owner) => owner.withRoot(fn) })),
+          mutateIdle: (id, change) =>
+            plugins.gate.run(id, input.plugin, () =>
+              lifecycle(id, change.validate, async (owner) => {
+                const view = await owner.snapshot(),
+                  plan = await owner.jobs();
+                if (
+                  view.chats.some((chat) => chat.busy) ||
+                  view.coordinator.busy ||
+                  view.coordinator.submissions.some((item) => item.status === "queued" || item.status === "placed") ||
+                  workBusy(plan)
+                )
+                  throw new Error("This change requires no active project work");
+                await closeLifecycleOwner(id, owner);
+                return withProjectLock(
+                  id,
+                  async () => {
+                    const project = loadProject(id);
+                    change.validate(project);
+                    saveProject(change.apply(project));
+                  },
+                  true,
+                );
+              }),
+            ),
+        }),
+      );
     }
     case "provider-pr-inspect":
     case "provider-ci-inspect":
@@ -1577,6 +1660,20 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       if (project.deleted || project.archived) throw new Error("Inactive project cannot control worker threads");
       return { result: await (await durable(input.id)).steerJob(input.threadId, input.text, { requestId: input.requestId }) };
     }
+    case "thread-dequeue": {
+      const project = loadProject(input.id);
+      if (project.deleted || project.archived) throw new Error("Inactive project has no queued input to withdraw");
+      const result = await (await durable(input.id)).dequeueJobInputs(input.threadId);
+      feed.publish(input.id, { topic: "jobs" });
+      return result;
+    }
+    case "thread-dequeue-ack": {
+      const project = loadProject(input.id);
+      if (project.deleted || project.archived) throw new Error("Inactive project has no queued input to withdraw");
+      const acknowledged = await (await durable(input.id)).acknowledgeJobInputs(input.threadId, input.requestIds);
+      feed.publish(input.id, { topic: "jobs" });
+      return { acknowledged };
+    }
     case "thread-dismiss": {
       const project = loadProject(input.id);
       if (project.deleted || project.archived) throw new Error("Inactive project cannot control worker threads");
@@ -1638,20 +1735,22 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return withDurableOwner({
         id: input.id,
         validate: (project) => {
-          if (project.deleted) throw new Error("Project is deleted; admission is denied");
-          if (project.archived) throw new Error("Project is archived; admission is denied");
+          if (project.deleted) throw new RefusedInput("Project is deleted; admission is denied");
+          if (project.archived) throw new RefusedInput("Project is archived; admission is denied");
         },
         operation: async (owner) => {
           const plan = await owner.jobs();
-          if (plan.paused) throw new Error("Project plan is paused; admission is denied");
-          return { result: await owner.steerJob(input.threadId, input.text, { followUp: true, requestId: input.requestId }) };
+          if (plan.paused) throw new RefusedInput("Project plan is paused; admission is denied");
+          return {
+            result: await owner.steerJob(input.threadId, input.text, { followUp: input.delivery !== "steer", requestId: input.requestId }),
+          };
         },
       });
     case "message": {
       const prepareJob = () => {
         const project = loadProject(input.id);
-        if (project.deleted) throw new Error("Project is deleted; admission is denied");
-        if (project.archived) throw new Error("Project is archived; admission is denied");
+        if (project.deleted) throw new RefusedInput("Project is deleted; admission is denied");
+        if (project.archived) throw new RefusedInput("Project is archived; admission is denied");
         for (const upload of input.attachments ?? []) uploadRecord(ownedProjectDir(input.id), upload);
         return {
           id: input.requestId ?? randomUUID(),
@@ -1661,19 +1760,26 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           error: null,
           ...(input.chatId && input.chatId !== "main" ? { chatId: input.chatId } : {}),
           ...(input.attachments ? { attachments: input.attachments } : {}),
+          ...(input.delivery ? { delivery: input.delivery } : {}),
+          ...(input.origin ? { origin: input.origin } : {}),
         } satisfies import("./state.ts").Job;
       };
+      const payloadOf = (job: import("./state.ts").Job) =>
+        JSON.stringify([job.text, job.delivery ?? null, job.chatId ?? "main", job.attachments ?? [], job.origin ?? null]);
       return withDurableOwner({
         id: input.id,
         validate: (project) => {
-          if (project.deleted) throw new Error("Project is deleted; admission is denied");
-          if (project.archived) throw new Error("Project is archived; admission is denied");
+          if (project.deleted) throw new RefusedInput("Project is deleted; admission is denied");
+          if (project.archived) throw new RefusedInput("Project is archived; admission is denied");
         },
         operation: async (owner) => {
-          // A repeated request ID (Telegram update replay) returns the job it already admitted.
+          // One request id names one payload. A repeated id with the same payload (a retry, a Telegram update replay) is submitted again: the runtime
+          // takes an id once, and a ledger entry whose submission never happened is run now. The owner's Alt+Up on that id wins.
           const prior = input.requestId ? jobs(input.id).find((job) => job.id === input.requestId) : undefined;
-          if (prior) return prior;
-          const job = prepareJob();
+          if (prior && payloadOf(prior) !== payloadOf(prepareJob()))
+            throw new RefusedInput("This request id was already used for a different message");
+          if (prior && prior.state !== "queued" && prior.state !== "withdrawn") return prior;
+          const job = prior ?? prepareJob();
           // The job keeps what the owner typed; the coordinator receives the expanded skill.
           // `/skill:<name>` anywhere: skill blocks precede the owner's words. `@issue:/@doc:/@upload:/@file:` and `#123` / `PR #123`: compact untrusted blocks follow them.
           const text =
@@ -1681,22 +1787,28 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
             (await referencedItemsBlock(loadProject(input.id), ownedProjectDir(input.id), job.text)) +
             (await referencedPrBlock(loadProject(input.id), job.text));
           if (text.length > 120_000)
-            throw new Error(`Message with its skills and references is too large to send (${text.length} characters; limit 120000)`);
-          for (const invoked of skillNames(job.text)) recordInvokedSkill(ownedProjectDir(input.id), invoked);
-          const plan = await owner.jobs();
-          if (plan.paused) throw new Error("Project plan is paused; admission is denied");
-          // Validate the chat before recording the job, so an unknown or archived chat leaves no ledger entry.
-          const chat = (await owner.chats()).find((item) => item.id === (input.chatId ?? "main"));
-          if (!chat) throw new Error("Unknown chat for this project");
-          if (chat.archived) throw new Error("Chat is archived; restore it before sending");
-          saveJob(input.id, job);
-          await owner.admit(attachmentContent(ownedProjectDir(input.id), text, job.attachments, owner.acceptsImages), {
-            requestId: job.id,
-            origin: input.origin,
-            chatId: input.chatId,
-            title: job.text,
+            throw new RefusedInput(`Message with its skills and references is too large to send (${text.length} characters; limit 120000)`);
+          return serialized(`${input.id}:${input.chatId ?? "main"}`, async () => {
+            if (prior && jobs(input.id).find((item) => item.id === job.id)?.state === "withdrawn") return prior;
+            if (!prior) {
+              for (const invoked of skillNames(job.text)) recordInvokedSkill(ownedProjectDir(input.id), invoked);
+              const plan = await owner.jobs();
+              if (plan.paused) throw new RefusedInput("Project plan is paused; admission is denied");
+              // Validate the chat before recording the job, so an unknown or archived chat leaves no ledger entry.
+              const chat = (await owner.chats()).find((item) => item.id === (input.chatId ?? "main"));
+              if (!chat) throw new RefusedInput("Unknown chat for this project");
+              if (chat.archived) throw new RefusedInput("Chat is archived; restore it before sending");
+              saveJob(input.id, job);
+            }
+            await owner.admit(attachmentContent(ownedProjectDir(input.id), text, job.attachments, owner.acceptsImages), {
+              requestId: job.id,
+              origin: job.origin,
+              chatId: input.chatId,
+              steer: job.delivery === "steer",
+              title: job.text,
+            });
+            return job;
           });
-          return job;
         },
       });
     }
@@ -1777,10 +1889,16 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return { settings: loadDeploySettings(), state: readDeployState(), running: true };
     case "deploy-shutdown":
       return stopForDeploy(input.sha);
-    case "host-agent-history":
-      return requireHostAgent().history(input.before);
+    case "host-agent-history": {
+      const agent = requireHostAgent();
+      return { ...(await agent.history(input.before)), inputs: await agent.inputs() };
+    }
+    case "host-agent-dequeue":
+      return requireHostAgent().dequeue();
+    case "host-agent-dequeue-ack":
+      return { acknowledged: await requireHostAgent().acknowledge(input.requestIds) };
     case "host-agent-send":
-      return requireHostAgent().send(input.requestId, input.text);
+      return requireHostAgent().send(input.requestId, input.text, input.delivery);
     case "host-agent-stop":
       return requireHostAgent().stop();
     case "host-agent-reset":
@@ -1814,6 +1932,32 @@ setLimitsTokenResolver(async (providerId) => {
   });
   const result = await (await limitsModels).getAuth(providerId);
   return result?.source === "OAuth" ? result.auth.apiKey : undefined;
+});
+// Ollama Cloud: the API key of the provider Pi already holds (never exposed to the browser; sent only to the balance endpoint).
+setOllamaKeyResolver(async () => {
+  limitsModels ??= createModelRuntime();
+  const runtime = await limitsModels;
+  // Pi has no built-in Ollama provider: the owner's own entry is named ollama-cloud/ollama, or points its models at ollama.com.
+  const onOllama = (id: string) =>
+    runtime.getModels(id).some((model) => {
+      try {
+        return new URL(model.baseUrl).hostname === "ollama.com";
+      } catch {
+        return false;
+      }
+    });
+  for (const id of new Set([
+    "ollama-cloud",
+    "ollama",
+    ...runtime
+      .getProviders()
+      .map((provider) => provider.id)
+      .filter(onOllama),
+  ])) {
+    const result = await runtime.getAuth(id).catch(() => undefined);
+    if (result?.auth.apiKey) return result.auth.apiKey;
+  }
+  return undefined;
 });
 const web = await startWeb(
   dispatch,
@@ -2032,7 +2176,9 @@ const server = createServer(async (request, response) => {
     const data = await dispatch(input);
     response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, data }));
   } catch (error) {
-    response.writeHead(400, { "content-type": "application/json" }).end(JSON.stringify({ ok: false, error: errorText(error) }));
+    response
+      .writeHead(400, { "content-type": "application/json" })
+      .end(JSON.stringify({ ok: false, error: errorText(error), ...(error instanceof RefusedInput ? { refused: true } : {}) }));
   }
 });
 server.requestTimeout = 120000;

@@ -7,6 +7,20 @@ import { slashCommand, slashKey } from "./slash.js";
 import { chatArgs, emit, fail, on, stale, state, toast } from "./state.js";
 import { loadRecentMemory, markMemoryUndone, memoryEntry, memoryKind, memoryTitle, memoryWrite } from "./memory.js";
 import { follower } from "./follow.js";
+import {
+  acknowledgeDraft,
+  beginSend,
+  failSend,
+  recoverSends,
+  finishSend,
+  pendingHtml,
+  persistText,
+  queuedOf,
+  readDraft,
+  restoreInto,
+  surfaces,
+  unclaimedOf,
+} from "./queued-input.js";
 
 const feed = document.querySelector("#feed"),
   input = document.querySelector("#composer-input"),
@@ -43,10 +57,13 @@ export async function loadChat() {
         // Another chat or project was selected meanwhile: drop this read, but still run the one that selection queued.
         if (stale(gen)) continue;
         state.view = view;
+        void acknowledgeDraft({ surface: surface(), acknowledge: acknowledgeRestored }).catch(() => {});
+        void recoverChatSends(gen);
         if (held && (entries >= held.entries || committed(view, held))) held = state.liveHeld = null;
         emit("view", view);
         renderFeed();
         renderQuestions();
+        renderPending();
         ensureLive();
       } while (run.again);
     } catch (error) {
@@ -65,6 +82,9 @@ on("select", () => {
   feed.replaceChildren();
   document.querySelector("#questions").replaceChildren();
   state.live = null;
+  // Each chat has its own draft: the editor shows this chat's, the one just left was kept as it was typed.
+  input.value = readDraft(surface()).text;
+  grow();
   held = state.liveHeld = null;
   live?.stop();
   live = null;
@@ -445,8 +465,7 @@ function renderLive() {
   const frame = state.live;
   emit("busy", !!frame?.running);
   document.querySelector("#stop-btn").hidden = !frame?.running;
-  document.querySelector("#send-mode").hidden = !frame?.running;
-  document.querySelector("#send-mode").textContent = state.steer ? "steer" : "queue";
+  paintComposerMode(!!frame?.running);
   const kept = held
     ? `${held.thinkingText && showThinking() ? thinkingHtml(held.thinkingText, "held-thinking") : ""}${held.text ? `<article class="msg agent"><div class="msg-meta"><span class="who">Coordinator</span></div><div class="prose">${markdown(held.text)}</div></article>` : ""}`
     : "";
@@ -534,23 +553,108 @@ function grow() {
   input.style.height = `${Math.min(input.scrollHeight, 240)}px`;
 }
 input.addEventListener("input", grow);
+// The editor follows into this chat's draft; emptying it drops the uploads of a restored message with its text.
+input.addEventListener("input", () => persistText(surface(), input.value));
+// Pi's input keys: Enter sends (a running turn is steered), Alt+Enter queues a follow-up, Alt+Up takes every queued message back into the editor.
+let nextDelivery = "steer";
 input.addEventListener("keydown", (event) => {
-  if (slashKey(event)) return;
-  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+  if (slashKey(event) || event.isComposing) return;
+  if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
+    nextDelivery = event.altKey ? "followUp" : "steer";
     form.requestSubmit();
+  } else if (event.key === "ArrowUp" && event.altKey) {
+    event.preventDefault();
+    void restoreQueued();
   }
 });
+document.querySelector("#followup-btn").addEventListener("click", () => {
+  nextDelivery = "followUp";
+  form.requestSubmit();
+});
+document.querySelector("#dequeue-btn").addEventListener("click", () => {
+  void restoreQueued();
+  input.focus();
+});
+const queuedJobs = () => queuedOf(state.view?.jobs);
+// A restore the page never acknowledged (closed or offline mid-answer): Alt+Up offers it again.
+const unclaimedJobs = () => unclaimedOf(state.view?.jobs);
+/** The busy composer says what Enter does; the queue buttons only exist while there is something to act on. */
+function paintComposerMode(running) {
+  document.querySelector("#followup-btn").hidden = !running;
+  document.querySelector("#dequeue-btn").hidden = !queuedJobs().length && !unclaimedJobs().length;
+  document.querySelector("#send-btn").setAttribute("aria-label", running ? "Steer the running turn" : "Send");
+}
+function renderPending() {
+  const box = document.querySelector("#pending"),
+    jobs = queuedJobs();
+  box.hidden = !jobs.length;
+  box.innerHTML = pendingHtml(jobs);
+  paintComposerMode(!!state.live?.running);
+}
+const surface = () => surfaces.chat(state.projectId, state.chatId);
+const acknowledgeRestored = (requestIds) => call("chat-dequeue-ack", { projectId: state.projectId, requestIds });
+/** Alt+Up: the host withdraws what no turn has taken yet; the editor gets it first, then whatever is already typed. */
+/** Sends the last page never saw accepted go out again under their own ids; a refused one comes back into the editor. */
+const RESEND_MS = 4000;
+const editor = (gen) => ({ live: () => !stale(gen), read: () => input.value, show: (value) => (input.value = value) });
+async function recoverChatSends(gen) {
+  const key = surface(),
+    id = state.projectId,
+    args = chatArgs();
+  const accepted = await recoverSends(
+    key,
+    (record) =>
+      call("message", {
+        id,
+        text: record.text,
+        requestId: record.requestId,
+        delivery: record.delivery ?? "steer",
+        ...(record.attachments?.length ? { attachments: record.attachments } : {}),
+        ...(record.origin ? { origin: record.origin } : {}),
+        ...args,
+      }),
+    editor(gen),
+  ).catch(() => 0);
+  if (stale(gen)) return;
+  if (!input.value) input.value = readDraft(key).text;
+  if (accepted) void loadChat();
+  // An unknown outcome stays recorded and is sent again, under the same id, until the host answers.
+  if (readDraft(key).sending.some((record) => !record.refused)) setTimeout(() => stale(gen) || void recoverChatSends(gen), RESEND_MS);
+}
+async function restoreQueued() {
+  const gen = state.generation,
+    key = surface(),
+    projectId = state.projectId,
+    args = chatArgs();
+  try {
+    await restoreInto({
+      surface: key,
+      editor: editor(gen),
+      toast,
+      grow,
+      dequeue: () => call("chat-dequeue", { projectId, ...args }),
+      acknowledge: (requestIds) => call("chat-dequeue-ack", { projectId, requestIds }),
+    });
+    if (!stale(gen)) await loadChat();
+  } catch (error) {
+    fail(error);
+  }
+}
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
+  const delivery = nextDelivery;
+  nextDelivery = "steer";
   const text = input.value.trim();
   if (!text || !state.projectId) return;
-  const gen = state.generation;
-  input.value = "";
-  grow();
-  follow.follow();
+  const gen = state.generation,
+    key = surface();
   const slash = slashCommand(text);
   if (slash) {
+    // A slash command runs in the page, so there is nothing to send again after a reload.
+    input.value = "";
+    grow();
+    follow.follow();
     try {
       await slash.command.run(slash.argument);
       if (!stale(gen)) void loadChat();
@@ -560,12 +664,32 @@ form.addEventListener("submit", async (event) => {
     }
     return;
   }
+  const requestId = uuid(),
+    sent = beginSend(key, { requestId, text, delivery });
+  if (!sent) {
+    toast("Could not keep the message in this browser, so it was not sent");
+    return;
+  }
+  input.value = "";
+  grow();
+  follow.follow();
   try {
-    await call("message", { id: state.projectId, text, requestId: uuid(), ...chatArgs() });
+    // The host decides what the mode means: an idle chat takes the message as a plain turn, so the page never guesses from its copy of the state.
+    await call("message", {
+      id: state.projectId,
+      text,
+      requestId,
+      delivery,
+      ...(sent.attachments.length ? { attachments: sent.attachments } : {}),
+      ...(sent.origin ? { origin: sent.origin } : {}),
+      ...chatArgs(),
+    });
+    finishSend(key, requestId);
     if (stale(gen)) return;
     await loadChat();
   } catch (error) {
-    if (!stale(gen) && !input.value) input.value = text;
+    const kind = failSend(key, requestId, error, editor(gen));
+    if (kind === "unknown") setTimeout(() => stale(gen) || void recoverChatSends(gen), RESEND_MS);
     fail(error);
   }
 });
@@ -580,11 +704,6 @@ export async function stopTurn() {
   } catch (error) {
     fail(error);
   }
-}
-export function toggleSteer() {
-  if (!state.live?.running) return false;
-  toast("Steering a running coordinator turn needs a backend request; messages queue for now.");
-  return true;
 }
 
 // ---------------------------------------------------------------------------------------------------------------- clicks

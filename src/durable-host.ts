@@ -45,6 +45,7 @@ export async function openDurableHost(
         await owner.admit(attachmentContent(projectDir(project.id), job.text, job.attachments, owner.acceptsImages), {
           requestId: job.id,
           chatId: job.chatId,
+          steer: job.delivery === "steer",
         });
       }
     }

@@ -391,7 +391,7 @@ export type FollowProvider = {
     prior: FollowRepoState | undefined;
     signal: AbortSignal;
   }): Promise<{ state: FollowRepoState; items: FollowItem[]; failed: FollowFailure[] }>;
-  published(root: Conversation): Promise<Array<{ number: number; conversationId: number }>>;
+  published(root: Conversation, project: Project): Promise<Array<{ number: number; conversationId: number }>>;
 };
 
 // ---- merge (result acceptance) ----
@@ -517,6 +517,8 @@ export type HostPluginApi = {
   provide(capabilities: PluginCapabilities): void;
   projects: {
     load(id: string): Project;
+    /** Every project, for host-wide work that must still honor a project's plugin switch. */
+    list(): Project[];
     /** The project's state directory (`$PI_PROJECTS_HOME/<id>`), for per-project plugin files. */
     dir(id: string): string;
     /** Provider-owned top-level project records (kept verbatim by the host even when no plugin understands them). */
@@ -524,6 +526,13 @@ export type HostPluginApi = {
     /** Digest of the project's workspace grant; provider authorizations bind to it. */
     authorizationFingerprint(project: Project): string;
     trustedOwner(): string;
+    /** The checkout roots the host owns for the project: its folder and the real workspaces under its worker worktree root (no `git worktree list`). */
+    workspaceRoots(id: string): string[];
+    /**
+     * Runs host-wide work for one project through the project's plugin gate: refused when the project turned the plugin off, counted until it
+     * settles (a disable waits for it), so deletions and other effects happen while the project still has the plugin on.
+     */
+    work<T>(id: string, work: () => Promise<T>): Promise<T>;
   };
   exec: {
     /** Runs a binary without throwing; the exit code is data. */

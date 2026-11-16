@@ -5,7 +5,7 @@ A plugin author starts a private host with a plugin under development and checks
 ## Sub-features
 
 - `load`: `launch --plugin <dir>` (repeatable) loads the plugin through `PI_PROJECTS_PLUGINS` on the private host; the scratch home has no `plugins.json`.
-- `list`: the Plugins section (`#plugin-cards`, one `.plugin-row` per plugin with `data-plugin` and `data-state`) shows name, version, `loaded` or `failed`, and capabilities or the error.
+- `list`: Settings → Plugins (`#settings .plugin-row`, one `.plugin-row` per plugin with `data-plugin` and `data-state`) shows name, version, `loaded` or `failed`, and capabilities or the error.
 - `status`: the `plugins` RPC (read-only, allowlisted) is the second view of the same statuses.
 - `panel`: Settings → Plugins (`#settings .plugin-card`, `.plugin-panel[data-plugin][data-state=loading|ready|failed]`, `.plugin-error`, `.plugin-slot`) mounts the panel a plugin's `web.script` registers.
 

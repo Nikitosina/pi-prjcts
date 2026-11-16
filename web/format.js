@@ -297,3 +297,7 @@ export function imagesHtml(images) {
     })
     .join("")}</div>`;
 }
+
+/** Settings from two reads or saves that may finish out of order: the one with the higher revision stays (a late, older read never replaces a save). */
+export const fresherSettings = (current, next) =>
+  !current || (next?.revision ?? 0) >= (current.revision ?? 0) ? (next ?? current) : current;

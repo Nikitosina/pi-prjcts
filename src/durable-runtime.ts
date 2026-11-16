@@ -374,6 +374,9 @@ export type DurableProjectRuntime = {
   dismissJob(id: string): Promise<string>;
   /** Message an agent; a finished Job runs again. `followUp` queues it after the agent's current answer. */
   steerJob(id: string, text: string, options?: { followUp?: boolean; requestId?: string }): Promise<string>;
+  /** Alt+Up on a worker: takes back what the owner sent it while it worked and no turn has taken; recoverable until acknowledged. */
+  dequeueJobInputs(id: string): ReturnType<JobsRuntime["dequeueInputs"]>;
+  acknowledgeJobInputs(id: string, requestIds: readonly string[]): Promise<string[]>;
   /** Approve a Ready Job: merge its candidate through result acceptance. */
   approveJob(id: string): ReturnType<JobsRuntime["approve"]>;
   /** Includes background approvals that may still pull after returning a pending answer. */
@@ -426,6 +429,12 @@ export type DurableProjectRuntime = {
   reset(chatId?: string): Promise<{ chatId: string }>;
   /** Aborts the chat's running Coordinator turn like the other Stops: queued inputs withdrawn, history kept, background work left running. */
   chatStop(chatId?: string): Promise<{ stopped: boolean; chatId: string }>;
+  /**
+   * Pi's Alt+Up: withdraws the given request ids of a chat that no turn has taken yet and says which it withdrew. Only the listed ids are touched:
+   * the caller names the owner's inputs, so internal inputs (worker reports, approval results) stay queued. Atomic per input: one already placed
+   * in a turn is reported as kept and still answered once.
+   */
+  dequeue(chatId: string | undefined, requestIds: readonly string[]): Promise<{ withdrawn: string[]; kept: string[]; chatId: string }>;
   /**
    * "/reload" for one idle chat: rebuilds the skill catalog from disk and applies it, with the system prompt and tool bindings, to this chat's next turn.
    * History, permissions and every existing worker thread are untouched; nothing changes when the rebuild fails. Refused while the chat is working or compacting.
@@ -1433,7 +1442,10 @@ export async function openDurableProject(input: {
           const scope = authorization?.scopes.find((item) => item.id === record?.scopeId),
             repository = authorization?.repositories.find((item) => item.repositoryId === scope?.repositoryId);
           if (!authorization || !repository) throw new Error("The Job's workspace scope is no longer authorized");
-          const provider = authorization.provider === "github" ? githubMergeProvider() : plugins.mergeProvider(authorization.provider);
+          const provider =
+            authorization.provider === "github"
+              ? plugins.gatedMerge(project.id, "github", githubMergeProvider())
+              : plugins.mergeProvider(project.id, authorization.provider);
           if (!provider)
             throw new Error(`The ${authorization.provider} plugin has no merge capability, so this Job cannot be approved here`);
           assertOpen();
@@ -1473,12 +1485,13 @@ export async function openDurableProject(input: {
         registry,
         conversationCreated: (tx, conversation) => refreshInstanceInstructions(tx, conversation.id),
         // Reasoning models can stay silent for minutes; Durable checkpoints retries and resends only the failed request.
-        // followUpMode "all": worker reports queued while the coordinator is busy are answered in one turn, not one turn each.
+        // Queued input is delivered one message at a time, as in the Pi coding agent (its steering and follow-up defaults).
         // Compaction is a getter: Durable reads settings on every resolution, so Settings changes apply to the next generation.
         settings: {
           stream: { timeoutMs: 300_000 },
           retry: { maxRetries: 3 },
-          followUpMode: "all",
+          steeringMode: "one-at-a-time",
+          followUpMode: "one-at-a-time",
           afterFailedRun: "continue",
           get compaction() {
             return compactionPolicy(contextSettings, contextSettings?.contextWindow ?? catalogWindow());
@@ -1723,7 +1736,10 @@ export async function openDurableProject(input: {
           const authorization = loadProject(project.id).workspaceAuthorization,
             repository = authorization?.repositories.find((item) => item.repositoryId === repositoryId);
           if (!authorization || !repository) return { pulled: false, reason: `${repositoryId} has no authorized main checkout` };
-          const provider = authorization.provider === "github" ? githubMergeProvider() : plugins.mergeProvider(authorization.provider);
+          const provider =
+            authorization.provider === "github"
+              ? plugins.gatedMerge(project.id, "github", githubMergeProvider())
+              : plugins.mergeProvider(project.id, authorization.provider);
           if (!provider) return { pulled: false, reason: `the ${authorization.provider} plugin has no merge capability` };
           return pullMainCheckout({ provider, checkout: repository.ownerCheckout, base, pr: String(pr), signal });
         },
@@ -1878,7 +1894,7 @@ export async function openDurableProject(input: {
         `Removed ${worktrees.removed.length} worktree(s), ${trimmed.length} cache(s), ${disposable.length} disposable path(s) and ${videos.length} old Job video(s).`,
       ];
       const failures = [...worktrees.unremovedCaches, ...removal.failed].map((failure) => `could not remove ${failure}`);
-      const pluginSteps = plugins.cleanupSteps();
+      const pluginSteps = plugins.cleanupSteps(project.id);
       for (const [index, step] of pluginSteps.entries()) {
         at("plugins", index, pluginSteps.length);
         if (closed) break;
@@ -1982,7 +1998,7 @@ export async function openDurableProject(input: {
             };
           },
         },
-        ...plugins.usageSources().map((source) => ({
+        ...plugins.usageSources(project.id).map((source) => ({
           id: `plugin:${source.plugin}`,
           kind: "plugin" as const,
           label: source.plugin,
@@ -2498,6 +2514,14 @@ export async function openDurableProject(input: {
           if (refusal) throw new Error(refusal);
           return jobs.steer(openedHarness, id, text, options.followUp, options.requestId);
         }),
+      dequeueJobInputs: (id) => {
+        assertOpen();
+        return jobs.dequeueInputs(openedHarness, id);
+      },
+      acknowledgeJobInputs: (id, requestIds) => {
+        assertOpen();
+        return jobs.acknowledgeInputs(openedHarness, id, requestIds);
+      },
       approveJob: async (id) => {
         assertOpen();
         return jobs.approve(openedHarness, id);
@@ -2737,6 +2761,28 @@ export async function openDurableProject(input: {
         }
         await conversation.abort(context);
         return { stopped: running || chat.busy, chatId: chat.id };
+      },
+      dequeue: async (id, requestIds) => {
+        assertOpen();
+        const { conversation, chat } = await resolveChat(id);
+        const queued = (await openedHarness.inspect(context)).submissions.filter(
+          (item) =>
+            item.type === "input" &&
+            item.conversationId === conversation.id &&
+            item.requestId !== undefined &&
+            requestIds.includes(item.requestId),
+        );
+        const withdrawn: string[] = [];
+        const kept = new Set(requestIds);
+        for (const item of queued) {
+          if (!item.requestId) continue;
+          const submission = await ownedSubmission(openedHarness, conversation, Number(item.id));
+          if ((await submission.abort(context)) === "aborted") {
+            withdrawn.push(item.requestId);
+            kept.delete(item.requestId);
+          } else kept.add(item.requestId);
+        }
+        return { withdrawn, kept: [...kept].filter((requestId) => !withdrawn.includes(requestId)), chatId: chat.id };
       },
       reset: (id) =>
         admitting(async () => {

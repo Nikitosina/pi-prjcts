@@ -46,6 +46,7 @@
           <div id="feed" role="log" aria-live="polite" aria-relevant="additions"></div>
           <div id="dock">
             <div id="questions" aria-label="Questions waiting"></div>
+            <div id="pending" aria-label="Queued messages" hidden></div>
             <div id="slash-menu" role="listbox" aria-label="Commands and skills" hidden></div>
             <form id="composer" autocomplete="off">
               <span class="glyph" aria-hidden="true">❯</span>
@@ -57,16 +58,22 @@
                 placeholder="Message the coordinator…"
               ></textarea>
               <div class="composer-side">
-                <span class="mode" id="send-mode" hidden></span>
                 <button type="button" id="stop-btn" class="ghost-btn small" data-cmd="stop" hidden aria-label="Stop the current turn">
                   Stop <kbd data-hint="stop"></kbd>
                 </button>
-                <button type="submit" class="send" aria-label="Send">↵</button>
+                <button type="button" id="dequeue-btn" class="ghost-btn small" hidden aria-label="Edit all queued messages">
+                  Edit queued <kbd>⌥↑</kbd>
+                </button>
+                <button type="button" id="followup-btn" class="ghost-btn small" hidden aria-label="Queue as a follow-up after the turn">
+                  Follow-up <kbd>⌥↵</kbd>
+                </button>
+                <button type="submit" class="send" id="send-btn" aria-label="Send">↵</button>
               </div>
             </form>
             <p class="composer-hints" aria-hidden="true">
-              <span><kbd>↵</kbd> send</span><span><kbd>⇧↵</kbd> newline</span><span><kbd data-hint="focus-composer"></kbd> focus</span
-              ><span><kbd data-hint="toggle-steer"></kbd> queue/steer</span>
+              <span><kbd>↵</kbd> send, or steer while working</span><span><kbd>⌥↵</kbd> follow-up</span
+              ><span><kbd>⌥↑</kbd> edit queued</span><span><kbd>⇧↵</kbd> newline</span
+              ><span><kbd data-hint="focus-composer"></kbd> focus</span>
             </p>
           </div>
         </section>
@@ -81,7 +88,6 @@
           <h2 id="prs-h">Pull requests</h2>
           <div id="prs"></div>
         </section>
-        <section class="ctx-section" id="plugin-cards" aria-label="Plugins"></section>
       </aside>
       <footer id="statusline" aria-label="Status line"></footer>
     </div>
@@ -106,6 +112,7 @@
       <section class="ha-settings" id="ha-settings" aria-label="Host agent settings" hidden></section>
       <section class="ha-approvals" id="ha-approvals" aria-label="Pending approvals"></section>
       <div class="ha-body" role="log" aria-live="polite"></div>
+      <div class="pending-box" id="ha-pending" aria-label="Queued messages" hidden></div>
       <form class="ha-composer" id="ha-composer" autocomplete="off">
         <span class="glyph" aria-hidden="true">❯</span>
         <textarea rows="1" maxlength="24000" aria-label="Message the host agent" placeholder="Ask the host agent…"></textarea>

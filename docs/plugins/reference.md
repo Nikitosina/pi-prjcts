@@ -183,6 +183,14 @@ workerTools?: {
 - The host keeps a plugin's files when the plugin is not loaded, and nothing reads them until it is loaded again.
 - Durable documents defined through `api.lib.durable` need an explicit `checkpointWhen` policy (`() => false` keeps changes as deltas).
 
+### Per-project on and off
+
+The owner turns a loaded plugin on or off for one project in Project settings → Plugins (a plugin is on by default). A disabled plugin is not unloaded and keeps its stored files; other projects are unaffected.
+
+- Every entry of the plugin into a disabled project is refused at execution time with "plugin is disabled in this project": tool calls (also of threads that froze the tools earlier), RPC calls and web routes. `cleanup` and `usage` skip the project, and `workerTools.offered`, `coordinatorTools.applies` and the prompt block treat the plugin as absent.
+- The host refuses to disable a plugin that has active work in the project (a running tool call, RPC or route, or a `lifecycle.pause` that throws) or that the project's checkout needs (its workspace grant names the plugin or a provider id it provides). Nothing is stopped by force.
+- A disable holds the plugin's `lifecycle.pause` for the project until the enable, and a restarted host takes it again. Hooks the host cannot route through the project (`lifecycle.close`, timers, a coordinator `extension`'s own hooks) are the plugin's own; a host-wide timer must work per project through `api.projects.list()` and touch only what an enabled project owns (the simulator plugin prunes only the XcodeBuildMCP workspaces of enabled projects' folders and worktrees).
+
 ### Resource leases
 
 Leases are host-wide advisory locks shared with workers, who take them with `projects_lease_acquire`. Use them for devices or ports a worker and the plugin must not use at the same time.

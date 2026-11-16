@@ -28,16 +28,16 @@ export const SECTIONS = [
   { id: "storage", label: "Storage", scope: "project", group: "Project", render: storage },
   { id: "plugins", label: "Plugins", scope: "project", group: "Project", render: pluginsSection },
   { id: "tiers", label: "Model tiers", scope: "host", group: "Host", render: tiersSection },
-  { id: "theme", label: "Theme", scope: "host", group: "Host", render: theme },
-  { id: "animations", label: "Animations", scope: "host", group: "Host", render: animations },
-  { id: "display", label: "Chat display", scope: "host", group: "Host", render: chatDisplay },
-  { id: "statusline", label: "Status line", scope: "host", group: "Host", render: statusLine },
+  { id: "appearance", label: "Appearance", scope: "host", group: "Host", render: appearance },
   { id: "hotkeys", label: "Hotkeys", scope: "host", group: "Host", render: hotkeys },
   { id: "notifications", label: "Notifications", scope: "host", group: "Advanced", render: notifications },
   { id: "remote", label: "Remote access", scope: "host", group: "Advanced", render: remote },
   { id: "deploy", label: "Deploy", scope: "host", group: "Advanced", render: deploy },
   { id: "providers", label: "Providers", scope: "host", group: "Advanced", render: providers },
 ];
+/** Sections that became parts of another one: old links (the Host agent's ui_focus, saved hotkeys) still land on the right page. */
+const ALIASES = { theme: "appearance", animations: "appearance", display: "appearance", statusline: "appearance" };
+const sectionId = (id) => ALIASES[id] ?? id;
 let section = "general",
   profile = "coordinator",
   paintGen = 0,
@@ -47,6 +47,7 @@ let section = "general",
 
 export const settingsOpen = () => dialog.open;
 export function openSettings(id) {
+  id = sectionId(id);
   if (id && SECTIONS.some((item) => item.id === id)) section = id;
   if (!dialog.open) dialog.showModal();
   paint();
@@ -60,6 +61,7 @@ export const settingsBack = () => !!prompts?.back() || !!back?.();
 /** Prompt blocks changed elsewhere (another tab, the Host agent): an open Prompt section re-reads; nothing opens. */
 on("prompts-changed", () => void prompts?.refresh().catch(() => {}));
 export function showSection(id) {
+  id = sectionId(id);
   if (!dialog.open || !SECTIONS.some((item) => item.id === id)) return false;
   section = id;
   paint();
@@ -535,10 +537,25 @@ async function storage(body, alive) {
 
 /** Every plugin the host loaded, and the panels plugins provide for this project (web/plugins.js). */
 async function pluginsSection(body, alive) {
-  const status = await call("plugins");
-  if (!alive()) return;
-  body.innerHTML = `${line("Plugins this host loaded at its start, and the panels they provide for this project.", "A panel is the plugin's own code running in this page. A changed plugin shows here after a host restart and a page reload.")}${pluginCards(status) || `<p class="muted">No plugins are loaded. List one in plugins.json and restart the host.</p>`}`;
-  unmount = mountPanels(body, state.projectId, status.web);
+  const draw = async () => {
+    const status = await call("plugins", state.projectId ? { id: state.projectId } : {});
+    if (!alive()) return;
+    unmount?.();
+    body.innerHTML = `${line("Plugins this host loaded at its start. Turn one off to stop it in this project only; its saved data stays.", "A plugin with active work, or one this project's checkout needs, cannot be turned off. A panel is the plugin's own code running in this page. A changed plugin shows here after a host restart and a page reload.")}${pluginCards(status) || `<p class="muted">No plugins are loaded. List one in plugins.json and restart the host.</p>`}`;
+    unmount = mountPanels(body, state.projectId, status.web);
+  };
+  await draw();
+  body.addEventListener("change", async (event) => {
+    const toggle = event.target.closest("[data-plugin-toggle]");
+    if (!toggle) return;
+    try {
+      await call("project-plugin", { id: state.projectId, plugin: toggle.dataset.pluginToggle, enabled: toggle.checked });
+      toast(`${toggle.dataset.pluginToggle} ${toggle.checked ? "on" : "off"} in this project.`);
+    } catch (error) {
+      sayFail(error);
+    }
+    if (alive()) await draw();
+  });
 }
 
 // ---------------------------------------------------------------------------------------------------------------- Automations
@@ -910,6 +927,20 @@ const FONTS = [
   { id: "system-sans", label: "System sans", hint: "Your device's UI font" },
   { id: "system-mono", label: "System mono", hint: "Your device's mono font" },
 ];
+/** One page for how the app looks: theme and font, motion, what transcripts show, and the status line. Each part keeps its own stored setting. */
+const APPEARANCE_PARTS = [
+  { id: "theme", label: "Theme", render: theme },
+  { id: "animations", label: "Animations", render: animations },
+  { id: "display", label: "Chat display", render: chatDisplay },
+  { id: "statusline", label: "Status line", render: statusLine },
+];
+async function appearance(body, alive) {
+  body.innerHTML = APPEARANCE_PARTS.map(
+    (part) =>
+      `<section class="appearance-part" data-part="${part.id}" aria-labelledby="appearance-${part.id}"><h2 id="appearance-${part.id}">${part.label}</h2><div class="appearance-body"></div></section>`,
+  ).join("");
+  await Promise.all(APPEARANCE_PARTS.map((part) => part.render(body.querySelector(`[data-part="${part.id}"] .appearance-body`), alive)));
+}
 function theme(body) {
   const current = state.ui?.theme ?? "claude",
     font = state.ui?.font ?? "jetbrains-mono";

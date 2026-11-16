@@ -85,7 +85,8 @@ export function renderTree() {
                 !(selected && chat.id === state.chatId);
               const current = selected && chat.id === state.chatId && state.focus.kind !== "memory";
               const row = `<button type="button" role="treeitem" class="tree-chat${current ? " current" : ""}" data-project-id="${esc(project.id)}" data-chat="${esc(chat.id)}" aria-current="${current}">${dot(activity)}<span class="name">${esc(clip(chat.title, 40))}</span>${unread ? `<span class="unread" aria-label="unread"></span>` : ""}</button>`;
-              if (chat.id === "main") return row;
+              // Main sits in a row too (without an archive button), so its unread dot keeps the same edge slot as every other chat.
+              if (chat.id === "main") return `<div class="tree-row" role="none">${row}</div>`;
               const pending = archiving.has(`${project.id}:${chat.id}`);
               return `<div class="tree-row" role="none">${row}<button type="button" class="tree-archive" data-project-id="${esc(project.id)}" data-archive-chat="${esc(chat.id)}" aria-label="Archive chat “${esc(clip(chat.title, 40))}”" title="${esc(archiveTitle())}"${pending ? " disabled" : ""}>${ARCHIVE_ICON}</button></div>`;
             })

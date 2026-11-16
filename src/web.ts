@@ -13,6 +13,7 @@ import { plugins } from "./plugins.ts";
 import { webFile, type WebFile } from "./web-file.ts";
 import { feed, HOST_FEED, type FeedEvent } from "./change-feed.ts";
 import type { RemoteAccess } from "./remote.ts";
+import { RefusedInput } from "./owner-input-queue.ts";
 
 /** `projectId` is a project UUID or `HOST_FEED` for the Host agent. */
 type LiveWatch = (projectId: string, onFrame: (frame: unknown) => void, onEnd: () => void, chatId?: string) => Promise<() => void>;
@@ -244,7 +245,7 @@ export async function startWeb(
         if (!/^[a-f0-9-]{36}$/.test(id)) throw new Error("Invalid project ID");
         loadProject(id);
         status = 409;
-        const result = await route({ projectId: id, query: url.searchParams });
+        const result = await plugins.gate.run(id, pluginRoute![1]!, () => route({ projectId: id, query: url.searchParams }));
         if (!/^[a-z]+\/[a-z0-9.+-]+$/.test(result.mime)) throw new Error("Plugin returned an invalid content type");
         response.writeHead(200, { ...headers, "content-type": result.mime, "content-length": result.bytes.length }).end(result.bytes);
         return;
@@ -344,7 +345,7 @@ export async function startWeb(
     } catch (error) {
       response
         .writeHead(status, { ...headers, "content-type": "application/json", ...(status === 413 ? { connection: "close" } : {}) })
-        .end(JSON.stringify({ ok: false, error: errorText(error) }));
+        .end(JSON.stringify({ ok: false, error: errorText(error), ...(error instanceof RefusedInput ? { refused: true } : {}) }));
     }
   });
   server.requestTimeout = 120000;

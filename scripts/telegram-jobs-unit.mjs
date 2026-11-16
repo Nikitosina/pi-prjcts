@@ -16,7 +16,8 @@ const OWNER = 42;
 let calls = [],
   updates = [],
   nextId = 100,
-  editFault = null;
+  editFault = null,
+  commandFaults = ["502", "429", "network"];
 const server = createServer(async (req, res) => {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
@@ -29,6 +30,16 @@ const server = createServer(async (req, res) => {
     return reply({ ok: true, result: batch });
   }
   calls.push({ method, input });
+  if (method === "setMyCommands" && commandFaults.length) {
+    const fault = commandFaults.shift();
+    if (fault === "network") return req.socket.destroy();
+    return reply(
+      fault === "429"
+        ? { ok: false, error_code: 429, description: "Too Many Requests: retry after 1", parameters: { retry_after: 0 } }
+        : { ok: false, error_code: 502, description: "Bad Gateway" },
+      Number(fault),
+    );
+  }
   if (method === "editMessageText" && editFault === "network") {
     editFault = null;
     return req.socket.destroy();
@@ -93,6 +104,21 @@ const until = async (check) => {
 };
 const texts = () => calls.filter((c) => c.method === "sendMessage").map((c) => c.input.text);
 try {
+  // Slash command suggestions: registered for private chats only, retried after Bot API failures, then left alone (idempotent).
+  const registered = () => calls.filter((c) => c.method === "setMyCommands");
+  await until(() => registered().length >= 4);
+  await sleep(400);
+  assert.equal(registered().length, 4, "three failures are retried, then exactly one success and no repeat");
+  const { commands, scope } = registered().at(-1).input;
+  assert.deepEqual(scope, { type: "all_private_chats" });
+  assert.deepEqual(
+    commands.map((c) => c.command),
+    ["projects", "project", "chats", "chat", "status", "models", "model"],
+  );
+  for (const c of commands) assert.ok(c.description.length >= 1 && c.description.length <= 256, c.command);
+  assert.ok(!calls.some((c) => c.method === "sendMessage"), "registering commands never messages anyone");
+  calls = [];
+
   // Not mergeable: plain Ready message. Mergeable: Approve button.
   notices = [notice(1, { jobId: "j1", mergeable: false })];
   await bridge.flush();

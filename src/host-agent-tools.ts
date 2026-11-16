@@ -155,6 +155,7 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
   "pr-watch": allow("Watch or unwatch a pull request."),
   "pr-hide": allow("Hide or show a pull request."),
   plugins: allow("Loaded plugins."),
+  "project-plugin": exclude("Turning a plugin on or off for a project is the owner's decision in Project settings → Plugins."),
   plugin: allow("Call a plugin method; methods the plugin does not declare as reads or safe writes need the owner's approval."),
   "work-submit": exclude("Worker-scoped admission path; the Host agent sends with message."),
   notes: allow("A project's notes."),
@@ -206,6 +207,12 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
   "memory-index": allow("A project's memory entries (preferences, decisions, procedures) and broken links."),
   "memory-undo": allow("Undo one memory write (revision of the write to undo)."),
   "memory-recent": allow("A project's recent memory writes, each with whether it was undone and whether it is current."),
+  "chat-dequeue": exclude("Withdrawing queued owner input is the owner's composer action."),
+  "chat-dequeue-ack": exclude("Part of the owner's composer restore."),
+  "thread-dequeue": exclude("Withdrawing queued owner input is the owner's composer action."),
+  "thread-dequeue-ack": exclude("Part of the owner's composer restore."),
+  "host-agent-dequeue": exclude("The Host agent would withdraw the owner's input to itself."),
+  "host-agent-dequeue-ack": exclude("Part of the owner's composer restore."),
   "chat-stop": allow("Stop the running Coordinator turn of one chat of a project."),
 };
 

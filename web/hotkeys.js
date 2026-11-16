@@ -10,7 +10,6 @@ export const DEFAULTS = {
   palette: "Mod+K",
   settings: "Mod+,",
   stop: "Mod+.",
-  "toggle-steer": "B",
   "archive-chat": "Mod+Shift+E",
   ...Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`chat-${i + 1}`, String(i + 1)])),
   // Settings sections, active only while the overlay is open.
@@ -23,10 +22,7 @@ export const DEFAULTS = {
   "settings-storage": "U",
   "settings-plugins": "X",
   "settings-tiers": "I",
-  "settings-theme": "H",
-  "settings-animations": "A",
-  "settings-display": "L",
-  "settings-statusline": "S",
+  "settings-appearance": "H",
   "settings-hotkeys": "?",
   "settings-notifications": "N",
   "settings-remote": "O",
@@ -42,7 +38,6 @@ export const LABELS = {
   palette: "Search and commands",
   settings: "Settings",
   stop: "Stop the current turn",
-  "toggle-steer": "Queue or steer while busy",
   "archive-chat": "Archive chat",
 };
 
@@ -63,8 +58,10 @@ export function setOverrides(next) {
   paintHints();
 }
 export const onBindingsChange = (listener) => listeners.add(listener);
+/** Settings pages merged into another keep a binding the owner set before the merge. */
+const LEGACY = { "settings-appearance": "settings-theme" };
 export function binding(id) {
-  return overrides[id] ?? DEFAULTS[id] ?? "";
+  return overrides[id] ?? overrides[LEGACY[id]] ?? DEFAULTS[id] ?? "";
 }
 export function bindings() {
   return Object.keys(DEFAULTS).map((id) => ({ id, label: LABELS[id] ?? id, binding: binding(id), changed: id in overrides }));

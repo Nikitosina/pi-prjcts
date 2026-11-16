@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { Type, type Static, type TSchema } from "typebox";
@@ -188,6 +188,8 @@ export const Project = Type.Object(
     decisionAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])),
     /** Coordinator gh access; absent means full. */
     githubCli: Type.Optional(Type.Union([Type.Literal("full"), Type.Literal("none")])),
+    /** Plugins this project turned off (src/plugin-gate.ts); absent = all on. Their stored data stays. */
+    disabledPlugins: Type.Optional(Type.Array(Type.String({ pattern: "^[a-z][a-z0-9-]{0,39}$" }), { maxItems: 64, uniqueItems: true })),
     /** Optional host-only workspace grant. Projects without it receive no workspace scope. */
     workspaceAuthorization: Type.Optional(WorkspaceAuthorization),
     workspaceAuthorizationHistory: Type.Optional(WorkspaceAuthorizationHistory),
@@ -237,6 +239,8 @@ export type Project = Static<typeof Project>;
 export const Note = Type.Object({ id: Id, at: text, author: text, text }, { additionalProperties: false });
 export type Note = Static<typeof Note>;
 const messageOrigin = Type.Optional(Type.Literal("telegram"));
+export const Delivery = Type.Union([Type.Literal("steer"), Type.Literal("followUp")]);
+export type Delivery = Static<typeof Delivery>;
 export const Job = Type.Object(
   {
     id: Id,
@@ -248,12 +252,18 @@ export const Job = Type.Object(
       Type.Literal("done"),
       Type.Literal("failed"),
       Type.Literal("interrupted"),
+      /** Taken back by Alt+Up; the text stays until the page acknowledges the restore (`chat-dequeue-ack`), so a lost response loses nothing. */
+      Type.Literal("withdrawn"),
     ]),
     error: Type.Union([Type.String(), Type.Null()]),
     /** Coordinator chat the message went to; absent on older jobs and for Main. */
     chatId: Type.Optional(Id),
     /** Owner uploads attached to the message. */
     attachments: Type.Optional(Type.Array(Id, { minItems: 1, maxItems: 10, uniqueItems: true })),
+    /** How the message joins a running turn (Pi: Enter steers, Alt+Enter follows up); absent on older jobs. */
+    delivery: Type.Optional(Delivery),
+    /** Where the message was typed, kept so a restored message is sent again as the same kind. */
+    origin: messageOrigin,
     /** When the host first saw the job settle (done or failed); drives the chat tab's "finished" dot. */
     settledAt: Type.Optional(Type.Number()),
   },
@@ -1158,7 +1168,10 @@ export const Request = Type.Union([
     },
     { additionalProperties: false },
   ),
-  Type.Object({ action: Type.Literal("thread-send"), id: Id, threadId: Id, requestId: Id, text }, { additionalProperties: false }),
+  Type.Object(
+    { action: Type.Literal("thread-send"), id: Id, threadId: Id, requestId: Id, text, delivery: Type.Optional(Delivery) },
+    { additionalProperties: false },
+  ),
   Type.Object(
     { action: Type.Literal("worker-contexts"), id: Id, threadIds: Type.Array(Id, { maxItems: 40, uniqueItems: true }) },
     { additionalProperties: false },
@@ -1175,6 +1188,7 @@ export const Request = Type.Union([
         Type.Literal("cursor"),
         Type.Literal("eliza"),
         Type.Literal("kimi"),
+        Type.Literal("ollama"),
       ]),
       visible: Type.Boolean(),
     },
@@ -1191,7 +1205,40 @@ export const Request = Type.Union([
       chatId: Type.Optional(ChatId),
       requestId: Type.Optional(Id),
       attachments: Type.Optional(Type.Array(Id, { minItems: 1, maxItems: 10, uniqueItems: true })),
+      delivery: Type.Optional(Delivery),
     },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      action: Type.Literal("chat-dequeue"),
+      projectId: Id,
+      chatId: Type.Optional(ChatId),
+      requestIds: Type.Optional(Type.Array(Id, { minItems: 1, maxItems: 100, uniqueItems: true })),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      action: Type.Literal("chat-dequeue-ack"),
+      projectId: Id,
+      requestIds: Type.Array(Id, { minItems: 1, maxItems: 100, uniqueItems: true }),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object({ action: Type.Literal("thread-dequeue"), id: Id, threadId: Id }, { additionalProperties: false }),
+  Type.Object(
+    {
+      action: Type.Literal("thread-dequeue-ack"),
+      id: Id,
+      threadId: Id,
+      requestIds: Type.Array(Id, { minItems: 1, maxItems: 100, uniqueItems: true }),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object({ action: Type.Literal("host-agent-dequeue") }, { additionalProperties: false }),
+  Type.Object(
+    { action: Type.Literal("host-agent-dequeue-ack"), requestIds: Type.Array(Id, { minItems: 1, maxItems: 100, uniqueItems: true }) },
     { additionalProperties: false },
   ),
   Type.Object({ action: Type.Literal("upload-list"), id: Id }, { additionalProperties: false }),
@@ -1349,7 +1396,11 @@ export const Request = Type.Union([
     },
     { additionalProperties: false },
   ),
-  Type.Object({ action: Type.Literal("plugins") }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("plugins"), id: Type.Optional(Id) }, { additionalProperties: false }),
+  Type.Object(
+    { action: Type.Literal("project-plugin"), id: Id, plugin: Type.String({ pattern: "^[a-z][a-z0-9-]{0,39}$" }), enabled: Type.Boolean() },
+    { additionalProperties: false },
+  ),
   Type.Object(
     {
       action: Type.Literal("plugin"),
@@ -1399,7 +1450,10 @@ export const Request = Type.Union([
     { action: Type.Literal("host-agent-history"), before: Type.Optional(Type.Integer({ minimum: 1 })) },
     { additionalProperties: false },
   ),
-  Type.Object({ action: Type.Literal("host-agent-send"), requestId: Id, text }, { additionalProperties: false }),
+  Type.Object(
+    { action: Type.Literal("host-agent-send"), requestId: Id, text, delivery: Type.Optional(Delivery) },
+    { additionalProperties: false },
+  ),
   Type.Object({ action: Type.Literal("host-agent-stop") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("host-agent-reset") }, { additionalProperties: false }),
   Type.Object(
@@ -1450,6 +1504,11 @@ export function socketPath(): string {
 
 export function projectDir(id: string): string {
   return join(home(), parse(Id, id));
+}
+
+/** Worker worktrees for one-click grants live with the project data, outside the owner checkout. */
+export function workerWorktreeRoot(id: string): string {
+  return join(projectDir(id), "worktrees");
 }
 
 export function saveJson(path: string, value: unknown): void {
@@ -1542,6 +1601,10 @@ export function jobs(id: string): Job[] {
     .filter((name) => name.endsWith(".json"))
     .map((name) => parse(Job, readJson(join(dir, name))))
     .sort((a, b) => a.at.localeCompare(b.at));
+}
+
+export function deleteJob(id: string, jobId: string): void {
+  rmSync(join(projectDir(id), "inbox", `${jobId}.json`), { force: true });
 }
 
 export function saveJob(id: string, job: Job): void {

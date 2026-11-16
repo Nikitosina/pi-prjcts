@@ -13,6 +13,8 @@ import { redactForAgent } from "../src/agent-redaction.ts";
   if (answer.length > RESULT_CHARS + 200 || !/cut/.test(answer)) throw Error(`host_call result not bounded: ${answer.length}`);
 }
 
+let releaseQueue;
+const queueHold = new Promise((ok) => (releaseQueue = ok));
 let releaseHold;
 const hold = new Promise((ok) => (releaseHold = ok));
 const directive = (user, name) => {
@@ -22,6 +24,11 @@ const directive = (user, name) => {
 const kit = await createKit("host-agent", {
   handler: async ({ tools, user, results }) => {
     if (tools.includes("host_call")) {
+      if (user.includes("HA-QHOLD"))
+        return (async function* () {
+          await queueHold;
+          yield kit.say("queue released");
+        })();
       if (user.includes("HA-HOLD"))
         return (async function* () {
           await hold;
@@ -363,6 +370,19 @@ await kit.run(async () => {
       /pending/i.test(poke.at(-1).text),
     { ran, wipe: wipe.at(-1).text, poke: poke.at(-1).text },
   );
+
+  // Pi input semantics for the Host agent: follow-ups queued during a turn are delivered one message at a time, each answered in its own turn.
+  await rpc({ action: "host-agent-send", requestId: crypto.randomUUID(), text: "HA-QHOLD" });
+  await eventually(async () => (await frames("/live?project=host", 1))[0].running, "host agent busy for the queue");
+  for (const name of ["HA-ONE", "HA-TWO"])
+    await rpc({ action: "host-agent-send", requestId: crypto.randomUUID(), text: `Reply exactly ${name}`, delivery: "followUp" });
+  releaseQueue();
+  await eventually(
+    async () => (await messages()).some((m) => m.role === "assistant" && m.text === "HA-TWO"),
+    "queued Host agent inputs answered",
+  );
+  const answers = (await messages()).filter((m) => m.role === "assistant" && /^HA-(ONE|TWO)$/.test(m.text)).map((m) => m.text);
+  check("Host agent: queued follow-ups are answered one at a time, in order", answers.join() === "HA-ONE,HA-TWO", answers);
 
   // Reset keeps history; stop clears a busy turn.
   await rpc({ action: "host-agent-reset" });
