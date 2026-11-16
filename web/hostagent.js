@@ -2,7 +2,7 @@
 // as Approve / Deny cards and its own model, thinking and tools. Follows `ui_focus` frames from the host change feed (routed in
 // by app.js through onHostTopic). When the host could not open its Host agent, the drawer shows the host's reason.
 import { call, stream, uuid } from "./api.js";
-import { clip, esc, markdown, oneLine, shortModel } from "./format.js";
+import { clip, esc, fresherSettings, markdown, oneLine, shortModel } from "./format.js";
 import { emit, fail, inline, on, state, toast } from "./state.js";
 import { mergeGroups, morph, showThinking, thinkingHtml, transcriptClick, transcriptHtml } from "./chat.js";
 import { hydrateMedia } from "./media.js";
@@ -103,7 +103,7 @@ export async function loadHostAgent() {
   input.disabled = false;
   input.placeholder = "Ask the host agent…";
   drawer.querySelector("[data-ha-settings]").hidden = false;
-  if (next) settings = next;
+  if (next) settings = fresherSettings(settings, next);
   paintModel();
   if (!settingsBox.hidden) paintSettings();
   items = history.items ?? [];
@@ -312,7 +312,7 @@ export function onTiersChanged() {
   if (!settingsBox.hidden) void loadModels();
   void call("host-agent-settings")
     .then((next) => {
-      settings = next;
+      settings = fresherSettings(settings, next);
       paintModel();
       if (!settingsBox.hidden) paintSettings();
     })
@@ -363,13 +363,13 @@ async function writeSettings(patch, label) {
   let problem = null;
   try {
     const next = await call("host-agent-settings", { revision: settings.revision, patch });
-    settings = next;
+    settings = fresherSettings(settings, next);
     error = "";
   } catch (reason) {
     problem = reason;
     // A stale revision or a refused model: show what the host has now.
     const fresh = await call("host-agent-settings").catch(() => null);
-    if (fresh) settings = fresh;
+    if (fresh) settings = fresherSettings(settings, fresh);
   }
   paintModel();
   paintSettings();

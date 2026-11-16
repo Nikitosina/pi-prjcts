@@ -14,6 +14,7 @@ globalThis.localStorage = {
 };
 const { ATTACHMENT_LIMIT, readDraft, persistText, beginSend, finishSend, failSend, recoverSends, restoreInto } =
   await import("../web/queued-input.js");
+const { fresherSettings } = await import("../web/format.js");
 
 const item = (id, text, attachments = []) => ({ id, text, delivery: "followUp", attachments });
 const toasts = [];
@@ -204,5 +205,14 @@ const gone = { live: () => false, read: () => "stale", show: () => assert.fail("
   failWrites = false;
   assert.deepEqual(acked, []);
   assert.match(toasts.at(-1), /not removed|still queued|kept/i);
+}
+// ui2 journey flake (found in the PR53 second pass): a settings read that began before the owner's save finished after it and put the old revision
+// back on screen (thinking showed "medium" after "low" was saved). A read never replaces newer settings.
+{
+  const saved = { revision: 4, thinking: "low" };
+  assert.equal(fresherSettings(saved, { revision: 3, thinking: "medium" }), saved, "a stale read is dropped");
+  assert.equal(fresherSettings(saved, { revision: 5, thinking: "high" }).thinking, "high", "a newer read wins");
+  assert.equal(fresherSettings(saved, { revision: 4, thinking: "low" }).thinking, "low");
+  assert.deepEqual(fresherSettings(null, { revision: 1 }), { revision: 1 }, "nothing held yet");
 }
 console.log("queued-input-unit: ok");
