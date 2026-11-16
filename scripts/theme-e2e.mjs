@@ -139,10 +139,47 @@ await kit.run(async () => {
     ),
   );
   await page.shot("04-appearance", { force: true });
+  // A3: the letter H still jumps to Appearance from another page, and a binding saved for the old Theme page carries over.
+  await page.evaluate(`document.querySelector('#settings nav [data-section="general"]').click()`);
+  await page.waitFor(`document.querySelector('#settings').dataset.section === "general"`, "general page");
+  for (const type of ["keyDown", "keyUp"])
+    await page.cdp("Input.dispatchKeyEvent", {
+      type,
+      key: "h",
+      code: "KeyH",
+      windowsVirtualKeyCode: 72,
+      text: type === "keyDown" ? "h" : undefined,
+    });
+  await page.waitFor(`document.querySelector('#settings').dataset.section === "appearance"`, "letter H opens Appearance");
+  check(
+    "A3 the letter H opens Appearance; a binding saved for the old Theme page binds Appearance",
+    await page.evaluate(
+      `import("/hotkeys.js").then((keys) => { keys.setOverrides({ "settings-theme": "G" }); const carried = keys.binding("settings-appearance") === "G"; keys.setOverrides({}); return carried; })`,
+    ),
+  );
+  await page.viewport(390, 844, true);
+  await page.waitFor(`document.querySelector('#settings .appearance-part[data-part="statusline"]')`, "narrow appearance");
+  check(
+    "A4 at 390 px Appearance fits the screen",
+    await page.evaluate(`document.scrollingElement.scrollWidth <= 391 && document.querySelector('#settings').scrollWidth <= 391`),
+  );
+  await page.shot("04b-appearance-narrow-390", { force: true });
+  await page.viewport(1440, 1000);
   await page.reload();
   await page.waitFor(`document.body.dataset.ready === "1"`, "reloaded after pick");
   check(
     "T9 the picked theme survives a reload",
     (await page.evaluate(`window.__atBody`)) === "midnight" && (await theme(page)) === "midnight",
   );
+  await page.evaluate(`document.querySelector('[data-cmd="settings"]').click()`);
+  await page.waitFor(`document.querySelector('#settings').open`, "settings open after reload");
+  await page.evaluate(`document.querySelector('nav [data-section="appearance"]').click()`);
+  await page.waitFor(`!!document.querySelector('#settings [data-part="display"] #show-thinking')`, "appearance after reload");
+  check(
+    "A5 after a reload every Appearance part shows its saved value: midnight, animations off, thinking hidden",
+    await page.evaluate(
+      `document.querySelector('[data-theme-option="midnight"]').getAttribute('aria-checked') === 'true' && document.querySelector('[data-motion="off"]').getAttribute('aria-checked') === 'true' && document.querySelector('#show-thinking').checked === false`,
+    ),
+  );
+  await page.shot("05-appearance-reloaded", { force: true });
 });

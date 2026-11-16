@@ -557,11 +557,28 @@ await kit.run(async () => {
   );
   await page.shot("01-prs-two-providers");
   // The right sidebar no longer lists plugins (UX batch); the list lives in Settings → Plugins.
-  check("29 the right sidebar has no plugin list", !(await page.evaluate(`!!document.querySelector('#plugin-cards, #context .plugin-row')`)));
+  check(
+    "29 the right sidebar has no plugin list",
+    !(await page.evaluate(`!!document.querySelector('#plugin-cards, #context .plugin-row')`)),
+  );
+  await page.viewport(390, 844, true);
+  await page.evaluate(`document.querySelector('[data-cmd="toggle-context"]').click()`);
+  await page.waitFor(`document.querySelector('#app').dataset.sheet === "context"`, "context sheet");
+  await new Promise((done) => setTimeout(done, 500));
+  check(
+    "29 the narrow context sheet has no plugin list either",
+    !(await page.evaluate(`!!document.querySelector('#context .plugin-row')`)),
+  );
+  await page.shot("01b-context-narrow-390", { force: true });
+  await page.evaluate(`document.querySelector('#app').dataset.sheet = ""`);
+  await page.viewport(1440, 1000);
   await page.evaluate(`document.querySelector('[data-cmd="settings"]').click()`);
   await page.waitFor(`document.querySelector('#settings').open`, "settings open");
   await page.evaluate(`document.querySelector('#settings nav [data-section="plugins"]').click()`);
-  await page.waitFor(`/hello/.test(document.querySelector('#settings .plugin-card')?.closest('#settings')?.innerText ?? '')`, "plugin list");
+  await page.waitFor(
+    `/hello/.test(document.querySelector('#settings .plugin-card')?.closest('#settings')?.innerText ?? '')`,
+    "plugin list",
+  );
   const pluginRows = await page.evaluate(
     `[...document.querySelectorAll('#settings .plugin-row')].map((row) => ({ name: row.dataset.plugin, state: row.dataset.state, text: row.innerText }))`,
   );

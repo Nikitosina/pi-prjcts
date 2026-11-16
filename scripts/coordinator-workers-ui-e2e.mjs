@@ -686,6 +686,18 @@ try {
   );
   if (!/MARK-CHILDTASK/.test(expanded.text) || !expanded.focused) throw Error("U1 the expanded row is wrong: " + JSON.stringify(expanded));
   await shot("01u-subagents-expanded", s);
+  await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }, s);
+  await evaluate(`document.querySelector('[data-cmd="toggle-context"]').click()`, s);
+  await waitFor(`document.querySelector('#app').dataset.sheet === "context"`, s, "context sheet");
+  const narrowSubs = await evaluate(
+    `(() => { const panel = document.querySelector('#context'), box = panel.getBoundingClientRect(); return { overflow: panel.scrollWidth - panel.clientWidth, outside: [...panel.querySelectorAll('.w-sub')].filter((n) => { const r = n.getBoundingClientRect(); return r.right > box.right + 1 || r.left < box.left - 1; }).length }; })()`,
+    s,
+  );
+  if (narrowSubs.overflow > 1 || narrowSubs.outside) throw Error("U1 the subagent rows overflow at 390 px: " + JSON.stringify(narrowSubs));
+  await delay(500); // let the sheet's open transition finish before the screenshot
+  await shot("01u-subagents-narrow-390", s);
+  await evaluate(`document.querySelector('#app').dataset.sheet = ""`, s);
+  await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
   await evaluate(`${parent}.querySelector('.w-sub-title').click()`, s);
   await waitFor(`document.querySelector('#worker-feed')?.innerText.includes('CHILD-TRANSCRIPT-LINE')`, s, "subagent transcript");
   const readOnly = await evaluate(

@@ -514,6 +514,15 @@ try {
     throw Error("Row order is not title, archive, unread dot: " + JSON.stringify(layout));
   if (Math.abs(layout.mainUnread.right - layout.mainRow.right - (layout.unread.right - layout.row.right)) > 0.5)
     throw Error("Main's unread dot is not in the same edge slot: " + JSON.stringify(layout));
+  await shot("01a-row-order-idle", s);
+  const hoverAt = await evaluate(
+    `(() => { const r = document.querySelector('${chatRow(scoutChat.id)}').closest('.tree-row').getBoundingClientRect(); return { x: r.left + 30, y: r.top + r.height / 2 }; })()`,
+    s,
+  );
+  await send("Input.dispatchMouseEvent", { type: "mouseMoved", ...hoverAt }, s);
+  await delay(300);
+  await shot("01b-row-order-hover", s);
+  await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 700, y: 500 }, s);
   result.checks.push("D1a row order is title, archive, unread dot with the dot in one edge slot (Main included)");
   result.checks.push("D1 one dot per chat: working (Main), unread (Scout), needs you (Failing), idle (Idle)");
   const labels = await evaluate(
@@ -604,6 +613,17 @@ try {
   if ((await evaluate(`document.scrollingElement.scrollWidth`, s)) > 391) throw Error("Narrow view overflows");
   result.checks.push("N1 390px: no horizontal overflow");
   await shot("08-narrow-390", s);
+  // Touch: the archive button is always shown, still between the title and the edge.
+  await evaluate(`document.querySelector('[data-cmd="toggle-list"]').click()`, s);
+  await waitFor(`document.querySelector('#app').dataset.sheet === "list"`, s, "list sheet");
+  await delay(500);
+  const touch = await evaluate(
+    `(() => { const row = document.querySelector('#tree .tree-row .tree-archive').closest('.tree-row'), name = row.querySelector('.name').getBoundingClientRect(), archive = row.querySelector('.tree-archive').getBoundingClientRect(); return { archiveShown: getComputedStyle(row.querySelector('.tree-archive')).opacity, gap: archive.left - name.right, inside: archive.right <= row.getBoundingClientRect().right }; })()`,
+    s,
+  );
+  if (touch.archiveShown !== "1" || touch.gap < -0.5 || !touch.inside) throw Error("Touch row order is wrong: " + JSON.stringify(touch));
+  await shot("08a-narrow-rows", s);
+  await evaluate(`document.querySelector('#app').dataset.sheet = ""`, s);
   await waitFor(`!!document.querySelector('#workers .worker.working [data-open-worker]')`, s, "narrow worker row");
   await evaluate(`document.querySelector('#workers .worker.working [data-open-worker]').click()`, s);
   await waitFor(`!!document.querySelector('#focus-view #worker-feed')`, s, "narrow worker view");
