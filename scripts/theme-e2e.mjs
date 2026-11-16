@@ -145,19 +145,31 @@ await kit.run(async () => {
   // A3: the letter H still jumps to Appearance from another page, and a binding saved for the old Theme page carries over.
   await page.evaluate(`document.querySelector('#settings nav [data-section="general"]').click()`);
   await page.waitFor(`document.querySelector('#settings').dataset.section === "general"`, "general page");
-  for (const type of ["keyDown", "keyUp"])
-    await page.cdp("Input.dispatchKeyEvent", {
-      type,
-      key: "h",
-      code: "KeyH",
-      windowsVirtualKeyCode: 72,
-      text: type === "keyDown" ? "h" : undefined,
-    });
-  await page.waitFor(`document.querySelector('#settings').dataset.section === "appearance"`, "letter H opens Appearance");
+  // The old Theme, Animations, Display and Status line letters all still land on Appearance (default bindings stay valid).
+  for (const letter of ["h", "a", "l", "s"]) {
+    await page.evaluate(`document.querySelector('#settings nav [data-section="general"]').click()`);
+    await page.waitFor(`document.querySelector('#settings').dataset.section === "general"`, "general page");
+    for (const type of ["keyDown", "keyUp"])
+      await page.cdp("Input.dispatchKeyEvent", {
+        type,
+        key: letter,
+        code: "Key" + letter.toUpperCase(),
+        windowsVirtualKeyCode: letter.toUpperCase().charCodeAt(0),
+        text: type === "keyDown" ? letter : undefined,
+      });
+    await page.waitFor(`document.querySelector('#settings').dataset.section === "appearance"`, `letter ${letter} opens Appearance`);
+  }
   check(
-    "A3 the letter H opens Appearance; a binding saved for the old Theme page binds Appearance",
+    "A3 the letters H, A, L and S open Appearance; a binding the owner saved for any of the old pages stays changed, resettable and bound",
     await page.evaluate(
-      `import("/hotkeys.js").then((keys) => { keys.setOverrides({ "settings-theme": "G" }); const carried = keys.binding("settings-appearance") === "G"; keys.setOverrides({}); return carried; })`,
+      `import("/hotkeys.js").then((keys) => {
+        const row = (id) => keys.bindings().find((item) => item.id === id);
+        keys.setOverrides({ "settings-theme": "G", "settings-statusline": "Y" });
+        const saved = row("settings-theme").binding === "G" && row("settings-theme").changed && row("settings-statusline").binding === "Y";
+        keys.setOverrides({});
+        const reset = row("settings-theme").binding === "H" && !row("settings-theme").changed && row("settings-animations").binding === "A";
+        return saved && reset;
+      })`,
     ),
   );
   await page.viewport(390, 844, true);

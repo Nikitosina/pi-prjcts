@@ -118,8 +118,9 @@ const entry = (provider: LimitProvider) => {
 };
 
 const clamp = (value: number) => Math.min(100, Math.max(0, value));
+// Only numbers and numeric strings: Number(null), Number(false) and Number([]) are 0, which would read as "nothing left".
 const finite = (value: unknown): number | null => {
-  const number = typeof value === "string" && value.trim() === "" ? NaN : Number(value);
+  const number = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : NaN;
   return Number.isFinite(number) ? number : null;
 };
 /** Seconds-or-milliseconds epoch to milliseconds (1e10 separates the two units). */
@@ -380,6 +381,21 @@ export function parseOllamaBalance(data: unknown): { samples: Polled; credits: O
   }
   return { samples, credits: { includedUsd, allowanceUsd, purchasedUsd } };
 }
+/**
+ * Providers that may receive the Ollama Cloud key: every model of the provider talks to https://ollama.com. A name proves nothing, so a local or
+ * proxy server called "ollama" never gets the key, and a custom provider pointed at Cloud does.
+ */
+export function ollamaCloudProviderIds(providers: { id: string; baseUrls: string[] }[]): string[] {
+  const cloud = (baseUrl: string) => {
+    try {
+      const url = new URL(baseUrl);
+      return url.protocol === "https:" && url.hostname === "ollama.com";
+    } catch {
+      return false;
+    }
+  };
+  return providers.filter((provider) => provider.baseUrls.length > 0 && provider.baseUrls.every(cloud)).map((provider) => provider.id);
+}
 const ollamaBalanceUrl = () => process.env.PI_PROJECTS_OLLAMA_BALANCE_URL ?? "https://ollama.com/api/balance";
 /** The API key of the Ollama Cloud connection Pi already holds; the host wires it to Pi's model runtime. Never cached, never sent anywhere else. */
 export type OllamaKeyResolver = () => Promise<string | undefined>;
@@ -608,6 +624,8 @@ function refreshProvider(provider: LimitProvider, now: number): Promise<void> {
   own.inflight = pollerOf(provider)()
     .then(
       (result) => {
+        // Ollama's reading is the whole account state: a plan change must not leave the old plan's windows behind.
+        if (provider === "ollama") own.samples.clear();
         record(provider, "endpoint", result.samples);
         if (provider === "eliza") own.usage = result.usage ? { ...result.usage, observedAt: Date.now() } : null;
         if (provider === "ollama") own.credits = result.credits ? { ...result.credits, observedAt: Date.now() } : null;

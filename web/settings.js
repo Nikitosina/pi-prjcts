@@ -103,7 +103,7 @@ function paint(keepScroll = false) {
         `<p class="nav-group">${esc(group)}</p>${SECTIONS.filter((item) => item.group === group)
           .map(
             (item) =>
-              `<button type="button" data-section="${item.id}" data-scope="${item.scope}" aria-current="${item.id === section}"><span>${esc(item.label)}</span><span class="scope-tag ${item.scope}">${item.scope === "project" ? "proj" : "host"}</span><kbd data-hint="settings-${item.id}"></kbd></button>`,
+              `<button type="button" data-section="${item.id}" data-scope="${item.scope}" aria-current="${item.id === section}"><span>${esc(item.label)}</span><span class="scope-tag ${item.scope}">${item.scope === "project" ? "proj" : "host"}</span><kbd data-hint="settings-${item.id === "appearance" ? "theme" : item.id}"></kbd></button>`,
           )
           .join("")}`,
     )
@@ -1080,7 +1080,7 @@ function hotkeys(body) {
     body.innerHTML = `${line("Every binding in one list.", "Press Edit, then the new key. Esc cancels. Settings letters work only while this overlay is open.")}<table class="hotkeys"><tbody>${rows
       .map(
         (item) =>
-          `<tr class="${clash.has(item.id) ? "clash" : ""}"><td>${esc(item.id === "chat-1" ? "Open chat 1–9" : item.id.startsWith("settings-") ? `Settings · ${SECTIONS.find((s) => `settings-${s.id}` === item.id)?.label ?? item.id}` : item.label)}</td><td><kbd>${esc(display(item.binding))}</kbd>${item.id === "chat-1" ? " … <kbd>9</kbd>" : ""}${clash.has(item.id) ? ` <span class="badge t-bad">conflict</span>` : ""}</td><td class="right">${item.id === "chat-1" ? "" : `<button type="button" class="link-btn" data-rebind="${item.id}">Edit</button>${item.changed ? `<button type="button" class="link-btn" data-reset="${item.id}">Reset</button>` : ""}`}</td></tr>`,
+          `<tr class="${clash.has(item.id) ? "clash" : ""}"><td>${esc(item.id === "chat-1" ? "Open chat 1–9" : item.id.startsWith("settings-") ? `Settings · ${SECTIONS.find((s) => `settings-${s.id}` === item.id)?.label ?? item.label}` : item.label)}</td><td><kbd>${esc(display(item.binding))}</kbd>${item.id === "chat-1" ? " … <kbd>9</kbd>" : ""}${clash.has(item.id) ? ` <span class="badge t-bad">conflict</span>` : ""}</td><td class="right">${item.id === "chat-1" ? "" : `<button type="button" class="link-btn" data-rebind="${item.id}">Edit</button>${item.changed ? `<button type="button" class="link-btn" data-reset="${item.id}">Reset</button>` : ""}`}</td></tr>`,
       )
       .join("")}</tbody></table>`;
   };

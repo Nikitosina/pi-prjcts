@@ -306,7 +306,11 @@ for (let i = 1; i <= 9; i++)
     },
     { when: outside },
   );
-for (const item of SECTIONS) register(`settings-${item.id}`, () => showSection(item.id), { when: () => settingsOpen() });
+for (const item of SECTIONS) {
+  // Appearance answers to the bindings of the four pages it absorbed.
+  const ids = item.id === "appearance" ? ["theme", "animations", "display", "statusline"] : [item.id];
+  for (const id of ids) register(`settings-${id}`, () => showSection(item.id), { when: () => settingsOpen() });
+}
 document.addEventListener("click", (event) => {
   const button = event.target.closest("[data-cmd]");
   if (button && COMMANDS[button.dataset.cmd]) COMMANDS[button.dataset.cmd]();

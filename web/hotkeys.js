@@ -23,7 +23,11 @@ export const DEFAULTS = {
   "settings-storage": "U",
   "settings-plugins": "X",
   "settings-tiers": "I",
-  "settings-appearance": "H",
+  // Appearance absorbed Theme, Animations, Display and Status line; each keeps its own saved binding and opens Appearance.
+  "settings-theme": "H",
+  "settings-animations": "A",
+  "settings-display": "L",
+  "settings-statusline": "S",
   "settings-hotkeys": "?",
   "settings-notifications": "N",
   "settings-remote": "O",
@@ -41,6 +45,10 @@ export const LABELS = {
   stop: "Stop the current turn",
   "toggle-steer": "Queue or steer while busy",
   "archive-chat": "Archive chat",
+  "settings-theme": "Settings · Appearance",
+  "settings-animations": "Settings · Appearance (Animations)",
+  "settings-display": "Settings · Appearance (Chat display)",
+  "settings-statusline": "Settings · Appearance (Status line)",
 };
 
 const mac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
@@ -60,10 +68,8 @@ export function setOverrides(next) {
   paintHints();
 }
 export const onBindingsChange = (listener) => listeners.add(listener);
-/** Settings pages merged into another keep a binding the owner set before the merge. */
-const LEGACY = { "settings-appearance": "settings-theme" };
 export function binding(id) {
-  return overrides[id] ?? overrides[LEGACY[id]] ?? DEFAULTS[id] ?? "";
+  return overrides[id] ?? DEFAULTS[id] ?? "";
 }
 export function bindings() {
   return Object.keys(DEFAULTS).map((id) => ({ id, label: LABELS[id] ?? id, binding: binding(id), changed: id in overrides }));
