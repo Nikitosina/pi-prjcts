@@ -7,7 +7,19 @@ import { slashCommand, slashKey } from "./slash.js";
 import { chatArgs, emit, fail, on, stale, state, toast } from "./state.js";
 import { loadRecentMemory, markMemoryUndone, memoryEntry, memoryKind, memoryTitle, memoryWrite } from "./memory.js";
 import { follower } from "./follow.js";
-import { joinText, pendingHtml, queuedOf, unclaimedOf } from "./queued-input.js";
+import {
+  acknowledgeDraft,
+  beginSend,
+  failSend,
+  finishSend,
+  pendingHtml,
+  persistText,
+  queuedOf,
+  readDraft,
+  restoreInto,
+  surfaces,
+  unclaimedOf,
+} from "./queued-input.js";
 
 const feed = document.querySelector("#feed"),
   input = document.querySelector("#composer-input"),
@@ -44,12 +56,7 @@ export async function loadChat() {
         // Another chat or project was selected meanwhile: drop this read, but still run the one that selection queued.
         if (stale(gen)) continue;
         state.view = view;
-        const back = stash.get(stashKey());
-        if (back) {
-          stash.delete(stashKey());
-          input.value = joinText(back, input.value);
-          grow();
-        }
+        void acknowledgeDraft({ surface: surface(), acknowledge: acknowledgeRestored }).catch(() => {});
         if (held && (entries >= held.entries || committed(view, held))) held = state.liveHeld = null;
         emit("view", view);
         renderFeed();
@@ -73,6 +80,9 @@ on("select", () => {
   feed.replaceChildren();
   document.querySelector("#questions").replaceChildren();
   state.live = null;
+  // Each chat has its own draft: the editor shows this chat's, the one just left was kept as it was typed.
+  input.value = readDraft(surface()).text;
+  grow();
   held = state.liveHeld = null;
   live?.stop();
   live = null;
@@ -541,10 +551,8 @@ function grow() {
   input.style.height = `${Math.min(input.scrollHeight, 240)}px`;
 }
 input.addEventListener("input", grow);
-// Emptying the editor drops the uploads of a restored message with its text.
-input.addEventListener("input", () => {
-  if (!input.value.trim()) carried.delete(stashKey());
-});
+// The editor follows into this chat's draft; emptying it drops the uploads of a restored message with its text.
+input.addEventListener("input", () => persistText(surface(), input.value));
 // Pi's input keys: Enter sends (a running turn is steered), Alt+Enter queues a follow-up, Alt+Up takes every queued message back into the editor.
 let nextDelivery = "steer";
 input.addEventListener("keydown", (event) => {
@@ -582,35 +590,23 @@ function renderPending() {
   box.innerHTML = pendingHtml(jobs);
   paintComposerMode(!!state.live?.running);
 }
-const stash = new Map(); // restored text of a chat the owner left before the host answered, shown when they return
-// Uploads and origin of restored messages ride along with the next send, so the resent message is the one the owner typed.
-const carried = new Map(); // stashKey -> { attachments, origin }
-const carry = (key, restored) => {
-  const old = carried.get(key);
-  const attachments = [...new Set([...(old?.attachments ?? []), ...restored.flatMap((item) => item.attachments ?? [])])].slice(0, 10);
-  const origins = new Set(restored.map((item) => item.origin ?? null));
-  const origin = !old && origins.size === 1 ? ([...origins][0] ?? undefined) : old?.origin;
-  if (attachments.length || origin) carried.set(key, { attachments, origin });
-};
-const stashKey = () => `${state.projectId}:${state.chatId ?? "main"}`;
+const surface = () => surfaces.chat(state.projectId, state.chatId);
+const acknowledgeRestored = (requestIds) => call("chat-dequeue-ack", { projectId: state.projectId, requestIds });
 /** Alt+Up: the host withdraws what no turn has taken yet; the editor gets it first, then whatever is already typed. */
 async function restoreQueued() {
   const gen = state.generation,
-    key = stashKey();
+    key = surface(),
+    projectId = state.projectId,
+    args = chatArgs();
   try {
-    const result = await call("chat-dequeue", { projectId: state.projectId, ...chatArgs() });
-    const restored = result.restored.map((item) => item.text).join("\n\n");
-    if (result.restored.length) carry(key, result.restored);
-    if (!result.restored.length) toast(result.kept.length ? "Already delivered; nothing to restore" : "No queued messages to restore");
-    else if (stale(gen)) stash.set(key, joinText(restored, stash.get(key) ?? ""));
-    else {
-      input.value = joinText(restored, input.value);
-      grow();
-      toast(`Restored ${result.restored.length} queued message${result.restored.length > 1 ? "s" : ""} to editor`);
-    }
-    // The text is in the editor (or the stash) now; only then may the host forget it.
-    if (result.restored.length)
-      await call("chat-dequeue-ack", { projectId: state.projectId, requestIds: result.restored.map((item) => item.id) });
+    await restoreInto({
+      surface: key,
+      editor: { live: () => !stale(gen), read: () => input.value, show: (value) => (input.value = value) },
+      toast,
+      grow,
+      dequeue: () => call("chat-dequeue", { projectId, ...args }),
+      acknowledge: (requestIds) => call("chat-dequeue-ack", { projectId, requestIds }),
+    });
     if (!stale(gen)) await loadChat();
   } catch (error) {
     fail(error);
@@ -622,9 +618,11 @@ form.addEventListener("submit", async (event) => {
   nextDelivery = "steer";
   const text = input.value.trim();
   if (!text || !state.projectId) return;
-  const gen = state.generation;
+  const gen = state.generation,
+    key = surface();
   input.value = "";
   grow();
+  const sent = beginSend(key);
   follow.follow();
   const slash = slashCommand(text);
   if (slash) {
@@ -632,13 +630,12 @@ form.addEventListener("submit", async (event) => {
       await slash.command.run(slash.argument);
       if (!stale(gen)) void loadChat();
     } catch (error) {
+      failSend(key, text);
       if (!stale(gen) && !input.value) input.value = text;
       fail(error);
     }
     return;
   }
-  const extra = carried.get(stashKey());
-  carried.delete(stashKey());
   try {
     // The host decides what the mode means: an idle chat takes the message as a plain turn, so the page never guesses from its copy of the state.
     await call("message", {
@@ -646,14 +643,15 @@ form.addEventListener("submit", async (event) => {
       text,
       requestId: uuid(),
       delivery,
-      ...(extra?.attachments.length ? { attachments: extra.attachments } : {}),
-      ...(extra?.origin ? { origin: extra.origin } : {}),
+      ...(sent.attachments.length ? { attachments: sent.attachments } : {}),
+      ...(sent.origin ? { origin: sent.origin } : {}),
       ...chatArgs(),
     });
+    finishSend(key, sent);
     if (stale(gen)) return;
     await loadChat();
   } catch (error) {
-    if (extra) carried.set(stashKey(), extra);
+    failSend(key, text);
     if (!stale(gen) && !input.value) input.value = text;
     fail(error);
   }

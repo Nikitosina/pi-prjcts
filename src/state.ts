@@ -1168,7 +1168,10 @@ export const Request = Type.Union([
     },
     { additionalProperties: false },
   ),
-  Type.Object({ action: Type.Literal("thread-send"), id: Id, threadId: Id, requestId: Id, text }, { additionalProperties: false }),
+  Type.Object(
+    { action: Type.Literal("thread-send"), id: Id, threadId: Id, requestId: Id, text, delivery: Type.Optional(Delivery) },
+    { additionalProperties: false },
+  ),
   Type.Object(
     { action: Type.Literal("worker-contexts"), id: Id, threadIds: Type.Array(Id, { maxItems: 40, uniqueItems: true }) },
     { additionalProperties: false },

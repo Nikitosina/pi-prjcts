@@ -99,4 +99,56 @@ const make = (entries, runtime) => {
   await afterSubmit(other.port, "b");
   assert.equal(other.runtime.get("b"), "queued");
 }
+// W9: the acknowledgment of a withdrawn input the producer has not submitted yet keeps a cancellation marker, so the later submission is taken back
+// out (the page already has the text; the agent must not run it as well).
+{
+  const { port, runtime, ledger } = make([{ id: "a", text: "one" }], new Map());
+  assert.equal((await withdrawInputs(port)).restored.length, 1);
+  assert.deepEqual(await acknowledgeInputs(port, ["a"]), ["a"]);
+  assert.equal(ledger.get("a")?.state, "cancelled");
+  assert.deepEqual(await pendingInputs(port), [], "a cancellation marker is not a pending input");
+  assert.equal((await withdrawInputs(port)).restored.length, 0, "a cancelled input is never restored again");
+  runtime.set("a", "queued");
+  await afterSubmit(port, "a");
+  assert.equal(runtime.get("a"), "aborted");
+  assert.equal(ledger.has("a"), false, "the marker goes once the producer can no longer resurrect the input");
+}
+
+// W9: a marker whose input the runtime never took stays; one the runtime already aborted is swept.
+{
+  const { port, ledger } = make([{ id: "a", text: "one", state: "cancelled" }], new Map());
+  await pendingInputs(port);
+  assert.equal(ledger.has("a"), true);
+  const done = make([{ id: "b", text: "two", state: "cancelled" }], new Map([["b", "aborted"]]));
+  await pendingInputs(done.port);
+  assert.equal(done.ledger.has("b"), false);
+}
+
+// W10: a crash between the withdrawn mark and the abort leaves the runtime queue holding the input; recovery finishes the abort before it
+// offers the text, so it is never restored and executing at once.
+{
+  const { port, runtime } = make([{ id: "a", text: "one", state: "withdrawn" }], new Map([["a", "queued"]]));
+  const pending = await pendingInputs(port);
+  assert.equal(runtime.get("a"), "aborted");
+  assert.equal(pending[0].state, "withdrawn");
+  assert.equal((await withdrawInputs(port)).restored.length, 1);
+}
+{
+  // The abort lost the race to a turn: the input was taken, so it is kept, not restored.
+  const { port, ledger } = make([{ id: "a", text: "one", state: "withdrawn" }], new Map([["a", "queued"]]));
+  port.abort = async () => (runtime0.set("a", "taken"), []);
+  const runtime0 = new Map([["a", "queued"]]);
+  port.status = async (ids) => new Map(ids.map((id) => [id, runtime0.get(id) ?? "unsent"]));
+  const result = await withdrawInputs(port);
+  assert.deepEqual(result.restored, []);
+  assert.equal(ledger.has("a"), false);
+}
+{
+  // The runtime refuses to abort it: it stays queued, not restored.
+  const { port, ledger } = make([{ id: "a", text: "one", state: "withdrawn" }], new Map([["a", "queued"]]));
+  port.abort = async () => [];
+  const result = await withdrawInputs(port);
+  assert.deepEqual(result.restored, []);
+  assert.equal(ledger.get("a").state, "queued");
+}
 console.log("owner-input-queue-unit: ok");

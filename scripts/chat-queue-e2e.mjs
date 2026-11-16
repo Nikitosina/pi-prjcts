@@ -1,13 +1,23 @@
 // E2E: Pi input semantics for the Coordinator chat. Failure cases Q1-Q10 in scripts/chat-queue-failures.md. Private host, fake model.
 import { createKit, say } from "./lib/e2e-kit.mjs";
 
-let release;
+let release, releaseWorker;
 const hold = new Promise((ok) => (release = ok));
+const workerHold = new Promise((ok) => (releaseWorker = ok));
 const seen = [];
+// Every message the Coordinator's model was given: a steering turn carries the queued report with it, so the last message alone does not show it.
+const given = [];
 const kit = await createKit("chat-queue", {
-  handler: ({ role, user, results }) => {
+  handler: ({ role, user, results, msgs }) => {
+    // The worker answers only when released, so its report reaches the Coordinator while the Coordinator is busy: an internal queued input.
+    if (role === "worker" && user.includes("Q11-TASK"))
+      return (async function* () {
+        await workerHold;
+        yield say("Q11 answered");
+      })();
     if (role !== "coordinator") return undefined;
     seen.push(user);
+    given.push(JSON.stringify(msgs));
     if (user.includes("SPAWN-W") && !results.length)
       return kit.call("agents", {
         action: "spawn",
@@ -45,22 +55,21 @@ await kit.run(async () => {
     /chat/i.test((await rejects({ action: "chat-dequeue", projectId: id, chatId: crypto.randomUUID() })) ?? ""),
   );
 
-  // A worker that finished once; sending to it again while the Coordinator is busy queues its report as an internal input (Q11).
+  // A worker that answers while the Coordinator is busy: its report is queued as an internal input (Q11).
   await send("SPAWN-W now");
-  const worker = await eventually(
-    async () => (await rpc({ action: "jobs-snapshot", id })).agents?.find((agent) => agent.title === "Q11-WORKER" && !agent.working),
-    "worker finished",
+  await eventually(
+    async () => (await rpc({ action: "jobs-snapshot", id })).agents?.find((agent) => agent.title === "Q11-WORKER" && agent.working),
+    "worker running",
   );
-  await eventually(async () => !(await busy()), "idle after the worker's first report");
+  await eventually(async () => !(await busy()), "idle after the spawn");
   await send("HOLD first turn");
   await eventually(busy, "main is running");
-  await rpc({ action: "thread-send", id, threadId: worker.id, requestId: crypto.randomUUID(), text: "Q11-AGAIN" });
+  releaseWorker();
   await eventually(
-    async () => (await rpc({ action: "jobs-snapshot", id })).agents?.find((agent) => agent.id === worker.id && !agent.working),
-    "worker answered again",
+    async () => !(await rpc({ action: "jobs-snapshot", id })).agents?.find((agent) => agent.title === "Q11-WORKER")?.working,
+    "worker answered",
   );
   await kit.delay(1000); // the report is queued behind the held turn
-  const reportsBefore = seen.filter((user) => user.startsWith("[worker ")).length;
   const f1 = await send("FOLLOW-A one", "followUp"),
     s1 = await send("STEER-A one", "steer"),
     f2 = await send("FOLLOW-B two", "followUp");
@@ -168,6 +177,11 @@ await kit.run(async () => {
     raced,
   );
   check("Q5 a delivered input appears once", ((await transcript()).match(/FOLLOW-E five/g) ?? []).length === 1);
+  await eventually(
+    async () => (await busy()) === false && given.some((request) => request.includes("[worker ") && request.includes("Q11 answered")),
+    "Q11 the worker's report was not withdrawn: the Coordinator still answered it",
+    80,
+  ).catch((error) => check(error.message, false, seen));
   check(
     "Q10 an archived project is refused",
     await (async () => {
@@ -175,11 +189,6 @@ await kit.run(async () => {
       return /inactive|archived/i.test((await rejects({ action: "chat-dequeue", projectId: id })) ?? "");
     })(),
   );
-  await eventually(
-    async () => (await busy()) === false && seen.filter((user) => user.startsWith("[worker ")).length > reportsBefore,
-    "Q11 the worker's report was not withdrawn: the Coordinator still answered it",
-    80,
-  ).catch((error) => check(error.message, false, seen));
   void f4;
   void s2;
 });

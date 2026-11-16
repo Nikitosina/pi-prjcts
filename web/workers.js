@@ -5,7 +5,19 @@ import { clip, dur, esc, oneLine, shortModel, tokens } from "./format.js";
 import { emit, fail, on, project, stale, state, toast } from "./state.js";
 import { morph, transcriptClick, transcriptHtml } from "./chat.js";
 import { follower } from "./follow.js";
-import { isAltUp, paintPending, restoreInto } from "./queued-input.js";
+import {
+  acknowledgeDraft,
+  beginSend,
+  failSend,
+  finishSend,
+  isAltUp,
+  joinText,
+  paintPending,
+  persistText,
+  readDraft,
+  restoreInto,
+  surfaces,
+} from "./queued-input.js";
 import { hydrateMedia } from "./media.js";
 
 const box = document.querySelector("#workers");
@@ -574,6 +586,15 @@ export async function renderWorker(root, id, { steer = false } = {}) {
   // The composer works while the transcript loads: Enter right after opening sends (scripts/worker-chat-ui-failures.md C6).
   const form = root.querySelector(".worker-send"),
     text = form?.querySelector("textarea");
+  // What the owner typed or restored here earlier (Alt+Up, a reload, leaving the view) is in the surface's draft.
+  const surface = surfaces.worker(state.projectId, id);
+  const acknowledge = (requestIds) => call("thread-dequeue-ack", { id: state.projectId, threadId: id, requestIds });
+  if (text) {
+    text.value = readDraft(surface).text;
+    if (text.value) text.style.height = `${Math.min(text.scrollHeight, 240)}px`;
+    text.addEventListener("input", () => persistText(surface, text.value));
+    void acknowledgeDraft({ surface, acknowledge }).catch(() => {});
+  }
   if (steer) text?.focus();
   // Pi's keys: Enter steers a working worker, Alt+Enter queues a follow-up (a plain message the worker takes after its turn).
   let followUp = false;
@@ -581,11 +602,12 @@ export async function renderWorker(root, id, { steer = false } = {}) {
   const restore = async () => {
     try {
       await restoreInto({
-        input: text,
+        surface,
+        editor: { live: alive, read: () => text.value, show: (value) => (text.value = value) },
         toast,
         grow: () => ((text.style.height = "auto"), (text.style.height = `${Math.min(text.scrollHeight, 240)}px`)),
         dequeue: () => call("thread-dequeue", { id: state.projectId, threadId: id }),
-        acknowledge: (requestIds) => call("thread-dequeue-ack", { id: state.projectId, threadId: id, requestIds }),
+        acknowledge,
       });
     } catch (error) {
       fail(error);
@@ -605,17 +627,21 @@ export async function renderWorker(root, id, { steer = false } = {}) {
     event.preventDefault();
     const value = text.value.trim();
     if (!value) return;
-    const worker = find(),
-      steering = !!worker?.working && !followUp;
+    // The page always sends the key's mode; the host knows whether the worker is busy, so a stale copy of its state cannot turn Enter into a follow-up.
+    const delivery = followUp ? "followUp" : "steer",
+      working = !!find()?.working;
     followUp = false;
     text.value = "";
+    const sent = beginSend(surface);
     try {
-      await call(steering ? "thread-steer" : "thread-send", { id: state.projectId, threadId: id, requestId: uuid(), text: value });
+      await call("thread-send", { id: state.projectId, threadId: id, requestId: uuid(), text: value, delivery });
+      finishSend(surface, sent);
       if (stale(gen)) return;
-      toast(steering ? "Steer sent." : worker?.working ? "Queued as a follow-up." : "Sent to the worker.");
+      toast(!working ? "Sent to the worker." : delivery === "steer" ? "Steer sent." : "Queued as a follow-up.");
       void load();
     } catch (error) {
-      text.value = value;
+      failSend(surface, value);
+      if (alive()) text.value = joinText(value, text.value);
       fail(error);
     }
   });

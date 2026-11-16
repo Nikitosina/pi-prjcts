@@ -1725,7 +1725,9 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         operation: async (owner) => {
           const plan = await owner.jobs();
           if (plan.paused) throw new Error("Project plan is paused; admission is denied");
-          return { result: await owner.steerJob(input.threadId, input.text, { followUp: true, requestId: input.requestId }) };
+          return {
+            result: await owner.steerJob(input.threadId, input.text, { followUp: input.delivery !== "steer", requestId: input.requestId }),
+          };
         },
       });
     case "message": {
@@ -1780,6 +1782,9 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
             steer: input.delivery === "steer",
             title: job.text,
           });
+          // An Alt+Up and its acknowledgment that ran between the ledger entry and this admission already gave the text back: take it out again.
+          const now = jobs(input.id).find((item) => item.id === job.id);
+          if (!now || now.state === "withdrawn") await owner.dequeue(input.chatId, [job.id]);
           return job;
         },
       });

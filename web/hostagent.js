@@ -6,7 +6,19 @@ import { clip, esc, markdown, oneLine, shortModel } from "./format.js";
 import { emit, fail, inline, on, state, toast } from "./state.js";
 import { mergeGroups, morph, showThinking, thinkingHtml, transcriptClick, transcriptHtml } from "./chat.js";
 import { hydrateMedia } from "./media.js";
-import { isAltUp, paintPending, restoreInto } from "./queued-input.js";
+import {
+  acknowledgeDraft,
+  beginSend,
+  failSend,
+  finishSend,
+  isAltUp,
+  joinText,
+  paintPending,
+  persistText,
+  readDraft,
+  restoreInto,
+  surfaces,
+} from "./queued-input.js";
 
 const THINKING = ["off", "low", "medium", "high", "max"];
 const drawer = document.querySelector("#host-agent"),
@@ -388,6 +400,11 @@ settingsBox.addEventListener("click", (event) => {
 
 // ---------------------------------------------------------------------------------------------------------------- composer
 
+// What the owner typed or restored here earlier (Alt+Up, a reload) is in the drawer's draft.
+const acknowledgeRestored = (requestIds) => call("host-agent-dequeue-ack", { requestIds });
+input.value = readDraft(surfaces.host).text;
+input.addEventListener("input", () => persistText(surfaces.host, input.value));
+void acknowledgeDraft({ surface: surfaces.host, acknowledge: acknowledgeRestored }).catch(() => {});
 // Pi's keys: Enter steers a working agent, Alt+Enter queues a follow-up.
 let nextDelivery = "steer";
 input.addEventListener("keydown", (event) => {
@@ -404,11 +421,12 @@ input.addEventListener("keydown", (event) => {
 async function restoreQueued() {
   try {
     await restoreInto({
-      input,
+      surface: surfaces.host,
+      editor: { live: () => true, read: () => input.value, show: (value) => (input.value = value) },
       toast,
       grow: () => ((input.style.height = "auto"), (input.style.height = `${Math.min(input.scrollHeight, 240)}px`)),
       dequeue: () => call("host-agent-dequeue"),
-      acknowledge: (requestIds) => call("host-agent-dequeue-ack", { requestIds }),
+      acknowledge: acknowledgeRestored,
     });
     await loadHostAgent();
   } catch (error) {
@@ -423,12 +441,15 @@ form.addEventListener("submit", async (event) => {
   if (!text || !available || form.dataset.sending === "1") return;
   form.dataset.sending = "1";
   input.value = "";
+  const sent = beginSend(surfaces.host);
   try {
     await call("host-agent-send", { requestId: uuid(), text, delivery });
+    finishSend(surfaces.host, sent);
     error = "";
     await loadHostAgent();
   } catch (reason) {
-    input.value = text;
+    failSend(surfaces.host, text);
+    input.value = joinText(text, input.value);
     // "has no model" / "not in the model catalog": say it where the owner is looking and open the model picker.
     if (/model/i.test(reason.message ?? "")) {
       error = reason.message;

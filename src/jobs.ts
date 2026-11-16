@@ -43,7 +43,9 @@ import {
   acknowledgeInputs,
   pendingInputs,
   withdrawInputs,
+  isWithdrawn,
   type InputPort,
+  type InputState,
   type InputStatus,
   type QueuedInput,
 } from "./owner-input-queue.ts";
@@ -201,7 +203,7 @@ export type Agent = {
   /** The newest admitted delivery, so reporters can recognize a shared answer without scanning history. */
   latestInput?: { seq: number; requestId: string };
   /** What the owner sent while this agent was working, until a turn takes it or the page acknowledges a withdrawal (`owner-input-queue.ts`). */
-  inputs?: Record<string, { text: string; delivery: "steer" | "followUp"; at: number; state: "queued" | "withdrawn"; seq: number }>;
+  inputs?: Record<string, { text: string; delivery: "steer" | "followUp"; at: number; state: InputState; seq: number }>;
   /** `sends` numbers of inputs the owner took back: they no longer count as a newer message that keeps the Job running. */
   withdrawnSeqs?: number[];
   /** Quota recovery in progress: the next automatic retry, and the model moves already made. */
@@ -628,8 +630,11 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
             if (!record || state.paused || (job ? job.status !== "running" : record.endedAt !== null))
               return { status: "running", checkpoint: { phase: "report" } } as const;
             // Taken back by the owner before it reached the conversation: nothing to deliver.
-            if (requestId && record.inputs?.[requestId]?.state === "withdrawn")
+            if (requestId && isWithdrawn(record.inputs?.[requestId])) {
+              // The cancellation marker did its job: this producer will never submit the input.
+              if (record.inputs?.[requestId]?.state === "cancelled") delete record.inputs[requestId];
               return { status: "running", checkpoint: { phase: "report" } } as const;
+            }
             if (message.startsWith(record.brief)) record.briefed = true;
             if ((record.sends ?? 0) === (reporter.input.seq ?? 0))
               record.latestInput = { seq: reporter.input.seq ?? 0, requestId: deliveryRequestId };
@@ -653,9 +658,15 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
         // A withdrawal that ran between the check above and this submission already gave the text back: take it out of the queue again.
         if (
           requestId &&
-          (await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext))?.agents[agentId]?.inputs?.[requestId]?.state === "withdrawn"
-        )
+          isWithdrawn((await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext))?.agents[agentId]?.inputs?.[requestId])
+        ) {
           await submission.abort(taskContext);
+          await runtime.commit(async (tx) => {
+            const input = (await tx.doc(Jobs, ROOT_CONVERSATION_ID)).agents[agentId]?.inputs;
+            if (input?.[requestId]?.state === "cancelled") delete input[requestId];
+            return undefined;
+          }, taskContext);
+        }
         const settled = await submission.wait(taskContext);
         const failure = await turnFailure(settled, async (at) => (await runtime.context(conversationId, taskContext, { at })).entries);
         // Quota (or a rate limit the host can route around): move to the next fallback model, otherwise wait for the allowance to recover and resend.
@@ -1558,7 +1569,7 @@ export function createJobs(host: JobsHost) {
             if (!input) continue;
             input.state = state;
             const seqs = new Set(agent.withdrawnSeqs ?? []);
-            if (state === "withdrawn") seqs.add(input.seq);
+            if (state !== "queued") seqs.add(input.seq);
             else seqs.delete(input.seq);
             agent.withdrawnSeqs = [...seqs];
           }

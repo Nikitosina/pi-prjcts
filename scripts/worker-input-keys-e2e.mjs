@@ -279,6 +279,43 @@ await kit.run(async () => {
   );
   await eventually(async () => (await threadState()).status !== "running", "worker settled after the idle send");
 
+  // W12: the page always sends the key's mode; the host decides what it means. A page that thinks the worker is idle still steers a working one.
+  gateW = deferred();
+  await type(box, "W-GATE third");
+  await ENTER();
+  await eventually(() => count(workerCalls(), "W-GATE third") >= 1, "third gated turn");
+  await rpc({ action: "thread-send", id, threadId: worker.id, requestId: uuid(), text: "W-MODE steer", delivery: "steer" });
+  await rpc({ action: "thread-send", id, threadId: worker.id, requestId: uuid(), text: "W-MODE follow", delivery: "followUp" });
+  const modeRows = await eventually(async () => {
+    const rows = (await rpc({ action: "thread-dequeue", id, threadId: worker.id })).restored;
+    return rows.length === 2 ? rows : null;
+  }, "both modes queued");
+  check(
+    "W12 thread-send carries the mode: a steer is queued as steering, a follow-up as a follow-up",
+    modeRows[0].text === "W-MODE steer" && modeRows[0].delivery === "steer" && modeRows[1].delivery === "followUp",
+    modeRows,
+  );
+  await rpc({ action: "thread-dequeue-ack", id, threadId: worker.id, requestIds: modeRows.map((item) => item.id) });
+
+  // W9: Alt+Up and its acknowledgment arrive before the worker's delivery task submitted the input: the acknowledged text is never delivered too.
+  const raced = [];
+  for (let n = 0; n < 3; n++) {
+    const requestId = uuid();
+    await rpc({ action: "thread-send", id, threadId: worker.id, requestId, text: `W-RACE ${n}`, delivery: "followUp" });
+    const taken = await rpc({ action: "thread-dequeue", id, threadId: worker.id });
+    await rpc({ action: "thread-dequeue-ack", id, threadId: worker.id, requestIds: taken.restored.map((item) => item.id) });
+    if (taken.restored.length) raced.push(`W-RACE ${n}`);
+  }
+  gateW.open();
+  await eventually(async () => (await threadState()).status !== "running", "worker settled after the race");
+  await kit.delay(1200);
+  const afterRace = workerCalls();
+  check(
+    "W9 an input acknowledged before its delivery was submitted is never delivered as well",
+    raced.length > 0 && raced.every((text) => count(afterRace, text) === 0),
+    { raced, afterRace },
+  );
+
   // ---- Alt+Up and the pending list: the Host agent drawer ----
   await type(hbox, "HK-GATE go");
   await ENTER();
