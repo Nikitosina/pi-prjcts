@@ -28,3 +28,10 @@ classic overlays and selectors (8, 10).
 Known, not fixed (palette decision): outside the transcript the shell's faint tokens measure under 4.5:1: timestamps, separators,
 tree chevrons and "New chat", panel headings, composer key hints (3.1-3.9:1), and white on the accent of Send/primary buttons
 (3.1-4.0:1). The report's `knownLowContrast` lists them per theme.
+
+## Appearance (A1-A5)
+
+- A1 Theme, Animations, Chat display and Status line stay four Settings pages, or one part loses its stored value or scope when they share a page.
+- A2 An old section id (`theme`, `animations`, `display`, `statusline`), such as the Host agent's `ui_focus`, no longer opens Settings.
+- A3 A hotkey the owner saved for the old Theme page stops working, and the letter H does not open Appearance.
+- A4 At 390 px the combined page overflows. A5: after a reload a part shows its default instead of its saved value.

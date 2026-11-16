@@ -613,10 +613,12 @@ try {
   if ((await evaluate(`document.scrollingElement.scrollWidth`, s)) > 391) throw Error("Narrow view overflows");
   result.checks.push("N1 390px: no horizontal overflow");
   await shot("08-narrow-390", s);
-  // Touch: the archive button is always shown, still between the title and the edge.
+  // Narrow, keyboard focus on a row shows its archive button between the title and the edge (a touch screen cannot be emulated here).
   await evaluate(`document.querySelector('[data-cmd="toggle-list"]').click()`, s);
   await waitFor(`document.querySelector('#app').dataset.sheet === "list"`, s, "list sheet");
   await delay(500);
+  await evaluate(`document.querySelector('#tree .tree-row .tree-archive').closest('.tree-row').querySelector('.tree-chat').focus()`, s);
+  await delay(300);
   const touch = await evaluate(
     `(() => { const row = document.querySelector('#tree .tree-row .tree-archive').closest('.tree-row'), name = row.querySelector('.name').getBoundingClientRect(), archive = row.querySelector('.tree-archive').getBoundingClientRect(); return { archiveShown: getComputedStyle(row.querySelector('.tree-archive')).opacity, gap: archive.left - name.right, inside: archive.right <= row.getBoundingClientRect().right }; })()`,
     s,

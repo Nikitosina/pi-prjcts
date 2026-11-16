@@ -174,12 +174,17 @@ await kit.run(async () => {
   await page.evaluate(`document.querySelector('[data-cmd="settings"]').click()`);
   await page.waitFor(`document.querySelector('#settings').open`, "settings open after reload");
   await page.evaluate(`document.querySelector('nav [data-section="appearance"]').click()`);
-  await page.waitFor(`!!document.querySelector('#settings [data-part="display"] #show-thinking')`, "appearance after reload");
+  await page.waitFor(
+    `!!document.querySelector('#settings [data-part="display"] #show-thinking') && !!document.querySelector('#settings [data-part="animations"] [data-motion="off"]')`,
+    "appearance after reload",
+  );
+  const saved = await page.evaluate(
+    `({ theme: document.querySelector('[data-theme-option="midnight"]').getAttribute('aria-checked'), motion: document.querySelector('#settings [data-part="animations"] [data-motion="off"]').getAttribute('aria-checked'), thinking: document.querySelector('#show-thinking').checked })`,
+  );
   check(
     "A5 after a reload every Appearance part shows its saved value: midnight, animations off, thinking hidden",
-    await page.evaluate(
-      `document.querySelector('[data-theme-option="midnight"]').getAttribute('aria-checked') === 'true' && document.querySelector('[data-motion="off"]').getAttribute('aria-checked') === 'true' && document.querySelector('#show-thinking').checked === false`,
-    ),
+    saved.theme === "true" && saved.motion === "true" && saved.thinking === false,
+    saved,
   );
   await page.shot("05-appearance-reloaded", { force: true });
 });

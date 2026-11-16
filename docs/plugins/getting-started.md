@@ -63,7 +63,7 @@ The check runs `register`, so it catches a wrong module shape, a missing provide
 node .agents/skills/verify-pi-prjcts/scripts/verify.mjs launch --plugin ~/code/hello
 ```
 
-This starts a host with its own scratch home, a fake model provider and your plugin, and prints JSON with `scratch` and `origin`. It never touches another host's home. Open `origin` and look at the Plugins section at the bottom of the right context panel: it shows the name, version, state and capabilities.
+This starts a host with its own scratch home, a fake model provider and your plugin, and prints JSON with `scratch` and `origin`. It never touches another host's home. Open `origin` and open Settings → Plugins: it shows the name, version, state and capabilities.
 
 Call an RPC method through the private host's socket. The socket path is in `<scratch>/run.json`:
 

@@ -35,7 +35,7 @@ The full verification procedure, including proof for a change to core, is the [`
 
 Every host shows what it loaded at its start, in five places:
 
-- the Plugins section of the context panel: name, version, state and capabilities, or the source and error of a failure;
+- Settings → Plugins: name, version, state and capabilities, or the source and error of a failure;
 - Settings → Plugins: the same rows, each with the plugin's panel or the panel's error;
 - the `plugins` RPC: `{ plugins: PluginStatus[], labels, web }`;
 - `/health`;

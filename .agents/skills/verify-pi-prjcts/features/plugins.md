@@ -1,6 +1,6 @@
 # Plugins
 
-A plugin author starts a private host with a plugin under development and checks what the host loaded: the Plugins section of the context panel lists each plugin with its name, version, state and capabilities, or its source and error when it failed. Settings → Plugins shows the same rows with each plugin's panel.
+A plugin author starts a private host with a plugin under development and checks what the host loaded: Settings → Plugins lists each plugin with its name, version, state and capabilities, or its source and error when it failed, with each plugin's panel. The right context panel does not list plugins.
 
 ## Sub-features
 
@@ -11,7 +11,7 @@ A plugin author starts a private host with a plugin under development and checks
 
 ## How to get to it (user POV)
 
-- Open the inbox and select any chat; the Plugins section is at the bottom of the right context panel, under Pull requests. It lists the plugins the host loaded at its start, the same in every project.
+- Open the inbox, then Settings → Plugins. It lists the plugins the host loaded at its start, the same in every project.
 - Settings (⌘,), then Plugins (X). Each card has the plugin's status and, when it has a browser script, its panel for the selected project.
 
 ## Driving it with browser CDP
