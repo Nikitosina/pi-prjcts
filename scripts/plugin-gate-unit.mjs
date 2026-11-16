@@ -56,5 +56,18 @@ void before;
   void held;
 }
 
+// 20: a result delivered after a disable is dropped: a follow observation that began before the flag must not reach its callback.
+{
+  const slow = (release) => new Promise((resolve) => (release.fn = resolve));
+  const release = {};
+  const pending = gate.settled("p7", "z", () => slow(release));
+  off.add("p7:z");
+  release.fn({ items: ["late"] });
+  await assert.rejects(() => pending, /disabled in this project/);
+  assert.equal(gate.active("p7", "z"), 0, "20 the count returns to zero");
+  off.delete("p7:z");
+  assert.deepEqual(await gate.settled("p7", "z", async () => ({ items: [] })), { items: [] }, "20 an enabled plugin's result passes");
+}
+
 console.log("plugin-gate-unit passed");
 process.exit(0);

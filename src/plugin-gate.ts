@@ -28,6 +28,12 @@ export function createPluginGate(isDisabled: (projectId: string, plugin: string)
         else running.delete(id);
       }
     },
+    /** `run`, and a result that arrives after the project turned the plugin off is refused too, so the caller never records it. */
+    async settled<T>(projectId: string, plugin: string, work: () => T | Promise<T>): Promise<T> {
+      const result = await gate.run(projectId, plugin, work);
+      if (isDisabled(projectId, plugin)) throw new Error(disabledMessage(plugin));
+      return result;
+    },
     /** A copy of `provider` whose listed async methods run through the gate; everything else stays the provider's own. */
     methods<T extends object>(projectId: string, plugin: string, provider: T, names: ReadonlyArray<keyof T & string>): T {
       const made = Object.create(provider) as Record<string, unknown>;

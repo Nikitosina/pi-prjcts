@@ -407,7 +407,7 @@ export type FollowProvider = {
     prior: FollowRepoState | undefined;
     signal: AbortSignal;
   }): Promise<{ state: FollowRepoState; items: FollowItem[]; failed: FollowFailure[] }>;
-  published(root: Conversation): Promise<Array<{ number: number; conversationId: number }>>;
+  published(root: Conversation, project: Project): Promise<Array<{ number: number; conversationId: number }>>;
 };
 
 // ---- merge (result acceptance) ----
@@ -541,6 +541,8 @@ export type HostPluginApi = {
   provide(capabilities: PluginCapabilities): void;
   projects: {
     load(id: string): Project;
+    /** Every project, for host-wide work that must still honor a project's plugin switch. */
+    list(): Project[];
     /** The project's state directory (`$PI_PROJECTS_HOME/<id>`), for per-project plugin files. */
     dir(id: string): string;
     /** Provider-owned top-level project records (kept verbatim by the host even when no plugin understands them). */

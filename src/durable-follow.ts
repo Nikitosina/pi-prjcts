@@ -8,7 +8,7 @@ import { failedCheckDetail } from "./github-prs.ts";
 import { githubPublishedPullRequests, settleClosedGithubWrites, type GithubWriteWait } from "./github-worker.ts";
 import { Jobs } from "./jobs.ts";
 import { loadAutomations } from "./project-automations.ts";
-import { loadProject, type GithubAuthorization } from "./state.ts";
+import { loadProject, type GithubAuthorization, type Project } from "./state.ts";
 import { plugins } from "./plugins.ts";
 import type { FollowFailure, FollowItem, FollowPrState } from "./plugin-types.ts";
 import { catalog } from "./workspace-authorization.ts";
@@ -252,7 +252,7 @@ export function followRuntime(
   const publishedPullRequests = (failure: Failure): Promise<Array<{ number: number; conversationId: number }>> => {
     if (!failure.provider) return githubPublishedPullRequests(root, failure.repo.numericId!);
     const provider = plugins.followProviders().find((item) => item.id === failure.provider);
-    return provider ? provider.published(root) : Promise.resolve([]);
+    return provider ? provider.published(root, loadProject(projectId)) : Promise.resolve([]);
   };
   async function fix(failure: Failure, state: FollowState, cap: number, chat: number): Promise<string> {
     const key = `${failure.repo.repositoryId}#${failure.number}`,
@@ -324,7 +324,7 @@ export function followRuntime(
   /** PR number -> chat conversation of the Job that opened it (a verified publication receipt, or the Job's own PR link). */
   async function prOwners(
     repos: Array<{ numericId: number }>,
-    providers: Array<{ published(root: Conversation): Promise<Array<{ number: number; conversationId: number }>> }>,
+    providers: Array<{ published(root: Conversation, project: Project): Promise<Array<{ number: number; conversationId: number }>> }>,
   ): Promise<Map<number, number>> {
     const jobs = await fixer.threads(),
       owners = new Map<number, number>();
@@ -334,7 +334,7 @@ export function followRuntime(
     }
     const receipts = await Promise.all([
       ...repos.map((repo) => githubPublishedPullRequests(root, repo.numericId).catch(() => [])),
-      ...providers.map((provider) => provider.published(root).catch(() => [])),
+      ...providers.map((provider) => provider.published(root, loadProject(projectId)).catch(() => [])),
     ]);
     for (const receipt of receipts.flat()) {
       const job = jobs.find((item) => item.conversationId === receipt.conversationId);

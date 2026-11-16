@@ -20,6 +20,10 @@ const exists = (path: string) =>
     () => false,
   );
 
+/** The hourly timer is host-wide, not per project: it runs only while some project still has the plugin on. */
+export const hourlyPruneApplies = (projects: ReadonlyArray<{ disabledPlugins?: string[] }>) =>
+  projects.some((project) => !project.disabledPlugins?.includes("simulator"));
+
 /** Removes finished test products older than `keepMs` in every XcodeBuildMCP workspace under `root`, keeping each workspace's
  * newest finished run for a rerun without building. A run is finished when its completion marker exists or its owner is gone. */
 export async function pruneTestProducts(input: { root: string; now: number; keepMs: number }): Promise<{ removed: number; bytes: number }> {
