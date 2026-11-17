@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { globSync, lstatSync, readdirSync, realpathSync } from "node:fs";
-import { lstat, opendir, rm } from "node:fs/promises";
+import { chmod, lstat, opendir, rm } from "node:fs/promises";
 import { isAbsolute, join, normalize, sep } from "node:path";
 import { promisify } from "node:util";
 
@@ -102,8 +102,16 @@ export async function gitIgnored(worktree: string, paths: readonly string[]): Pr
   return ignored;
 }
 
+/** Gives the owner write and search access to every folder under `path`, never through a symlink, so their entries can be unlinked. */
+async function makeWritable(path: string): Promise<void> {
+  const stat = await lstat(path).catch(() => null);
+  if (!stat?.isDirectory()) return;
+  if ((stat.mode & 0o700) !== 0o700) await chmod(path, stat.mode | 0o700);
+  for await (const entry of await opendir(path)) if (entry.isDirectory()) await makeWritable(join(path, entry.name));
+}
+
 /** Removes each path off the event loop; one that cannot go is reported as `path: reason` and the rest still go. Retries ride out
- * a file written meanwhile (Finder's .DS_Store, an indexer). */
+ * a file written meanwhile (Finder's .DS_Store, an indexer); read-only folders inside are made writable first (R27). */
 export async function removePaths(
   paths: readonly string[],
   onDone?: (path: string) => void,
@@ -111,8 +119,13 @@ export async function removePaths(
   const removed: string[] = [],
     failed: string[] = [];
   for (const path of paths) {
+    const remove = () => rm(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     try {
-      await rm(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+      await remove().catch(async (error: NodeJS.ErrnoException) => {
+        if (error.code !== "EACCES" && error.code !== "EPERM") throw error;
+        await makeWritable(path);
+        await remove();
+      });
       removed.push(path);
     } catch (error) {
       failed.push(`${path}: ${error instanceof Error ? error.message : String(error)}`);

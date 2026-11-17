@@ -209,33 +209,47 @@ try {
     ["approved", "dismissed", "merged"],
   );
 
-  // R21 a path that cannot be removed is reported, and the paths after it still go.
+  // R21 a path that cannot be removed (a file the owner locked) is reported, and the paths after it still go.
+  // R27 read-only folders inside a doomed path do not stop it; a symlink out is not followed to change modes.
   const removals = join(root, "removals"),
     stuck = join(removals, "stuck"),
-    gone = join(removals, "gone");
-  mkdirSync(join(stuck, "locked"), { recursive: true });
+    gone = join(removals, "gone"),
+    readOnly = join(removals, "read-only"),
+    elsewhere = join(root, "elsewhere-read-only");
+  mkdirSync(stuck, { recursive: true });
   mkdirSync(gone, { recursive: true });
-  writeFileSync(join(stuck, "locked", "file"), "x");
-  chmodSync(join(stuck, "locked"), 0o500);
+  writeFileSync(join(stuck, "locked-file"), "x");
+  execFileSync("chflags", ["uchg", join(stuck, "locked-file")]);
+  mkdirSync(join(readOnly, "App.app", "_CodeSignature"), { recursive: true });
+  writeFileSync(join(readOnly, "App.app", "_CodeSignature", "CodeResources"), "x");
+  mkdirSync(elsewhere);
+  writeFileSync(join(elsewhere, "keep"), "x");
+  chmodSync(elsewhere, 0o500);
+  symlinkSync(elsewhere, join(readOnly, "App.app", "link-out"));
+  for (const dir of [join(readOnly, "App.app", "_CodeSignature"), join(readOnly, "App.app")]) chmodSync(dir, 0o500);
   try {
-    const result = await removePaths([stuck, gone]);
-    assert.deepEqual(result.removed, [gone]);
+    const result = await removePaths([stuck, readOnly, gone]);
+    assert.deepEqual(result.removed, [readOnly, gone]);
     assert.equal(result.failed.length, 1);
     assert.match(result.failed[0], new RegExp(`^${stuck}: `));
-    assert.ok(!existsSync(gone) && existsSync(stuck));
+    assert.ok(!existsSync(gone) && !existsSync(readOnly) && existsSync(join(stuck, "locked-file")));
+    assert.equal(statSync(elsewhere).mode & 0o777, 0o500, "R27 a folder behind a symlink keeps its mode");
+    assert.ok(existsSync(join(elsewhere, "keep")));
     const orphanRoot = join(root, "orphans"),
       orphan = join(orphanRoot, "aaaaaaaa-bbbb-5ccc-addd-000000000001"),
       lockedOrphan = join(orphanRoot, "aaaaaaaa-bbbb-5ccc-addd-000000000002");
     mkdirSync(orphan, { recursive: true });
-    mkdirSync(join(lockedOrphan, "locked"), { recursive: true });
-    writeFileSync(join(lockedOrphan, "locked", "file"), "x");
-    chmodSync(join(lockedOrphan, "locked"), 0o500);
+    mkdirSync(lockedOrphan, { recursive: true });
+    writeFileSync(join(lockedOrphan, "file"), "x");
+    execFileSync("chflags", ["uchg", join(lockedOrphan, "file")]);
     const swept = await sweepWorkspaceCaches({ roots: [orphanRoot], live: new Set() });
     assert.deepEqual(swept.removed, [orphan]);
     assert.equal(swept.failed.length, 1, "the sweep reports the orphan it could not remove instead of throwing");
-    chmodSync(join(lockedOrphan, "locked"), 0o700);
+    execFileSync("chflags", ["nouchg", join(lockedOrphan, "file")]);
   } finally {
-    chmodSync(join(stuck, "locked"), 0o700);
+    execFileSync("chflags", ["nouchg", join(stuck, "locked-file")]);
+    execFileSync("chmod", ["-R", "u+w", removals]);
+    chmodSync(elsewhere, 0o700);
   }
 
   // R23 removing a large tree leaves the event loop free: the host keeps answering every project meanwhile.

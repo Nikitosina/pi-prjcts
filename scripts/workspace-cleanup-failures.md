@@ -40,6 +40,10 @@ Seen live (2026-11-13): Finder wrote a `.DS_Store` into a cache while it was bei
 failed before trimming any cache; the Storage button kept spinning because it looked for its run among the 30 oldest.
 - R21 One path that cannot be removed (a file written into it meanwhile, no permission) ends the run, so nothing after it is removed;
   or the failure is swallowed and the run reports success.
+- R27 A cache holding read-only folders (an `.app` copied out of a read-only checkout: 556 folders `dr-x`) is never removed, so
+  every daily run fails (seen live 2026-11-17, `EACCES`). Cleanup makes the folders inside the doomed path writable and tries once
+  more; it never follows a symlink out to change modes elsewhere, and a file the owner locked (`chflags uchg`) still fails and is
+  reported.
 - R22 Clean up never ends once the project has more than 30 routine runs: history pages oldest first, so the button never sees its
   own run.
 - R23 Removing a large cache blocks the host's event loop (a synchronous recursive remove), so every request of every project waits
