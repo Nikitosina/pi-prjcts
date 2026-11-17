@@ -108,7 +108,19 @@ export async function loadHostAgent() {
 
 // ---------------------------------------------------------------------------------------------------------------- focus
 
-const FOCUS_SECTIONS = new Set(["theme", "tiers", "hotkeys", "animations", "statusline", "notifications", "remote", "deploy", "providers"]);
+const FOCUS_SECTIONS = new Set([
+  "appearance",
+  "theme",
+  "tiers",
+  "hotkeys",
+  "animations",
+  "display",
+  "statusline",
+  "notifications",
+  "remote",
+  "deploy",
+  "providers",
+]);
 /** `ui_focus { view, projectId?, chatId?, section? }` from the agent: move the page, say where in one line. Settings never open on
  * their own: the owner gets a toast and opens them with its button. */
 export function followFocus(focus) {

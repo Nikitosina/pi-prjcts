@@ -1,17 +1,17 @@
 # Plugins
 
-A plugin author starts a private host with a plugin under development and checks what the host loaded: the Plugins section of the context panel lists each plugin with its name, version, state and capabilities, or its source and error when it failed. Settings → Plugins shows the same rows with each plugin's panel.
+A plugin author starts a private host with a plugin under development and checks what the host loaded: Settings → Plugins lists each plugin with its name, version, state and capabilities, or its source and error when it failed, with each plugin's panel. The right context panel does not list plugins.
 
 ## Sub-features
 
 - `load`: `launch --plugin <dir>` (repeatable) loads the plugin through `PI_PROJECTS_PLUGINS` on the private host; the scratch home has no `plugins.json`.
-- `list`: the Plugins section (`#plugin-cards`, one `.plugin-row` per plugin with `data-plugin` and `data-state`) shows name, version, `loaded` or `failed`, and capabilities or the error.
+- `list`: Settings → Plugins (`#settings .plugin-row`, one `.plugin-row` per plugin with `data-plugin` and `data-state`) shows name, version, `loaded` or `failed`, and capabilities or the error.
 - `status`: the `plugins` RPC (read-only, allowlisted) is the second view of the same statuses.
 - `panel`: Settings → Plugins (`#settings .plugin-card`, `.plugin-panel[data-plugin][data-state=loading|ready|failed]`, `.plugin-error`, `.plugin-slot`) mounts the panel a plugin's `web.script` registers.
 
 ## How to get to it (user POV)
 
-- Open the inbox and select any chat; the Plugins section is at the bottom of the right context panel, under Pull requests. It lists the plugins the host loaded at its start, the same in every project.
+- Open the inbox, then Settings → Plugins. It lists the plugins the host loaded at its start, the same in every project.
 - Settings (⌘,), then Plugins (X). Each card has the plugin's status and, when it has a browser script, its panel for the selected project.
 
 ## Driving it with browser CDP

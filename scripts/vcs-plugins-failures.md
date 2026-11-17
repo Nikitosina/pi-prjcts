@@ -47,5 +47,5 @@ removed) and the "plugin is not loaded" note in the PR card (20; `automation-sna
 ## Developing a plugin (2026-11-10)
 
 28. A plugin's declared version is missing from the `plugins` RPC or `/health`, so the owner cannot tell which version a host runs.
-29. The browser shows no plugin status: the Plugins section of the context panel must list every plugin with its name, version, state and capabilities, and a failed plugin with its source and error, escaped.
+29. The browser shows no plugin status: Settings → Plugins must list every plugin with its name, version, state and capabilities, and a failed plugin with its source and error, escaped.
 30. A plugin scaffolded by `projects plugin new` in a directory outside the core repository does not load on a host started with it, or its scaffolded read RPC does not answer.

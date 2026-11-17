@@ -72,3 +72,9 @@ space so a filling disk is visible. Proof: `scripts/machine-status-unit.mjs`, `s
 - S3 A `ui` document saved before the item existed fails to read, or gains the item in a new place and loses the owner's order or
   hidden items.
 - S4 The readout polls while the tab is hidden, or every poll rebuilds the whole status line and drops a provider's open details.
+
+## Ollama Cloud (usage-limits-unit, ui2-limits-e2e O1-O2)
+
+- O1 The key Pi holds is read from a provider other than the Ollama Cloud one, sent anywhere but the balance endpoint, or shown to the browser.
+- O2 A current-plan response (`included.balance_usd` / `allowance_usd`) or a legacy one (`session` / `weekly` remaining percent) is read as the other, or a missing allowance shows 0 % used instead of no percent.
+- O3 An unreadable response shows invented numbers instead of an error; a missing key shows a generic failure instead of saying what to add to Pi.

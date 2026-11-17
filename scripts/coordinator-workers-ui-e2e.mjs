@@ -28,6 +28,10 @@ let releaseHold;
 const hold = new Promise((ok) => {
   releaseHold = ok;
 });
+let releaseParent;
+const holdParent = new Promise((ok) => {
+  releaseParent = ok;
+});
 const STEPS = 4;
 let releaseSteps;
 const stepsSeen = new Promise((ok) => {
@@ -83,6 +87,7 @@ const model = createServer((req, res) => {
         "MARK-FAIL": { role: "worker", task: "MARK-FAILTASK will fail" },
         "MARK-HOLD": { role: "worker", task: "MARK-HOLDTASK waits" },
         "MARK-STEPS": { role: "worker", task: "MARK-STEPSTASK runs commands" },
+        "MARK-PARENT": { role: "worker", task: "MARK-PARENTTASK spawns a scout" },
         "MARK-SCOPED": { role: "scout", task: "MARK-SCOPEDTASK", scopeId: randomUUID() },
         "MARK-WEBSCOUT": { role: "scout", task: "MARK-WEBSCOUTTASK search" },
       }[marker];
@@ -130,6 +135,13 @@ const model = createServer((req, res) => {
       res.end(JSON.stringify({ error: { message: "Fake invalid request" } }));
       return;
     }
+    // A worker that starts a scout subagent and stays running while the scout finishes (collapsible subagent list).
+    if (marker === "MARK-PARENTTASK") {
+      if (stage === 0) return reply(call("subagent", { role: "scout", task: "MARK-CHILDTASK look around" }));
+      await holdParent;
+      return reply(say("Parent done"));
+    }
+    if (marker === "MARK-CHILDTASK") return reply(say("CHILD-TRANSCRIPT-LINE nothing to report"));
     if (marker === "MARK-HOLDTASK") {
       await hold;
       return reply(say("Hold done"));
@@ -645,6 +657,60 @@ try {
   await waitFor(`!${workers}.includes('MARK-FAILTASK')`, s, "dismissed Job leaves the list");
   result.checks.push("A2 a dismissed Job leaves the Workers list");
 
+  // U1: a worker's subagents are a collapsed list under its card; opening one shows its transcript read-only.
+  await rpc({ action: "message", id, text: "MARK-PARENT" });
+  const parent = `document.querySelector('#workers > .worker[data-key]:has(.w-subs-toggle)')`;
+  await waitFor(`!!${parent} && ${parent}.innerText.includes('MARK-PARENTTASK')`, s, "parent worker card with a subagent list");
+  const collapsed = await evaluate(
+    `(() => { const t = ${parent}.querySelector('.w-subs-toggle'); return { expanded: t.getAttribute('aria-expanded'), rows: ${parent}.querySelectorAll('.w-sub').length, text: t.innerText.replace(/\\s+/g, ' ') }; })()`,
+    s,
+  );
+  if (collapsed.expanded !== "false" || collapsed.rows !== 0 || !/Subagents 1/.test(collapsed.text))
+    throw Error("U1 the subagent list is not collapsed with its count: " + JSON.stringify(collapsed));
+  await shot("01u-subagents-collapsed", s);
+  await evaluate(`${parent}.querySelector('.w-subs-toggle').focus()`, s);
+  for (const type of ["keyDown", "keyUp"])
+    await send(
+      "Input.dispatchKeyEvent",
+      { type, key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: type === "keyDown" ? "\r" : undefined },
+      s,
+    );
+  await waitFor(
+    `${parent}.querySelectorAll('.w-sub').length === 1 && ${parent}.querySelector('.w-subs-toggle').getAttribute('aria-expanded') === 'true'`,
+    s,
+    "expanded subagent list",
+  );
+  const expanded = await evaluate(
+    `(() => { const row = ${parent}.querySelector('.w-sub'); return { text: row.innerText.replace(/\\s+/g, ' '), status: row.dataset.status, focused: document.activeElement === ${parent}.querySelector('.w-subs-toggle') }; })()`,
+    s,
+  );
+  if (!/MARK-CHILDTASK/.test(expanded.text) || !expanded.focused) throw Error("U1 the expanded row is wrong: " + JSON.stringify(expanded));
+  await shot("01u-subagents-expanded", s);
+  await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }, s);
+  await evaluate(`document.querySelector('[data-cmd="toggle-context"]').click()`, s);
+  await waitFor(`document.querySelector('#app').dataset.sheet === "context"`, s, "context sheet");
+  const narrowSubs = await evaluate(
+    `(() => { const panel = document.querySelector('#context'), box = panel.getBoundingClientRect(); return { overflow: panel.scrollWidth - panel.clientWidth, outside: [...panel.querySelectorAll('.w-sub')].filter((n) => { const r = n.getBoundingClientRect(); return r.right > box.right + 1 || r.left < box.left - 1; }).length }; })()`,
+    s,
+  );
+  if (narrowSubs.overflow > 1 || narrowSubs.outside) throw Error("U1 the subagent rows overflow at 390 px: " + JSON.stringify(narrowSubs));
+  await delay(500); // let the sheet's open transition finish before the screenshot
+  await shot("01u-subagents-narrow-390", s);
+  await evaluate(`document.querySelector('#app').dataset.sheet = ""`, s);
+  await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
+  await evaluate(`${parent}.querySelector('.w-sub-title').click()`, s);
+  await waitFor(`document.querySelector('#worker-feed')?.innerText.includes('CHILD-TRANSCRIPT-LINE')`, s, "subagent transcript");
+  const readOnly = await evaluate(
+    `({ send: !!document.querySelector('#focus-view .worker-send'), stop: !!document.querySelector('#focus-view [data-stop-worker]') })`,
+    s,
+  );
+  if (readOnly.send || readOnly.stop) throw Error("U1 the subagent transcript is not read-only: " + JSON.stringify(readOnly));
+  await shot("01u-subagent-transcript", s);
+  await evaluate(`document.querySelector('#focus-view [data-cmd="leave-focus"]').click()`, s);
+  releaseParent();
+  await eventually(async () => (await workFor(id, "MARK-PARENTTASK")).status !== "running", "parent Job did not finish");
+  result.checks.push("U1 a worker's subagents: collapsed with a count, expand by keyboard, transcript opens read-only");
+
   // F1: a worker running several commands in a row keeps one card that animates in once; only its current command changes.
   await evaluate(
     `(() => {
@@ -731,6 +797,7 @@ try {
   } catch {}
 } finally {
   releaseHold?.();
+  releaseParent?.();
   if (chrome && !cdpEnded) {
     try {
       await send("Browser.close");

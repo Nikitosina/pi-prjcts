@@ -79,7 +79,7 @@ await kit.run(async () => {
     const low = transcript.low.filter((entry) => !/^(time|button\.primary)\b/.test(entry));
     await page.shot(`01-${dark}`, { force: true });
     // Accent-filled buttons (Send, primary) are the brand color, not a light card.
-    const bright = found.bright.filter((entry) => !/^button\.(send|primary)\b/.test(entry));
+    const bright = found.bright.filter((entry) => !/^button(#[\w-]+)?\.(send|primary)\b/.test(entry));
     check(`T5 ${dark}: no bright surfaces in the inbox`, bright.length === 0, bright.slice(0, 8));
     check(`T6 ${dark}: transcript text contrast >= 4.5`, low.length === 0 && transcript.texts > 5, low.slice(0, 8));
     check(
@@ -107,17 +107,102 @@ await kit.run(async () => {
   // T9: picking a theme in Settings applies at once, is saved on the host and survives a reload.
   await page.evaluate(`document.querySelector('[data-cmd="settings"]').click()`);
   await page.waitFor(`document.querySelector('#settings').open`, "settings open");
-  await page.evaluate(`document.querySelector('nav [data-section="theme"]')?.click()`);
+  await page.evaluate(`document.querySelector('nav [data-section="appearance"]')?.click()`);
   await page.waitFor(`!!document.querySelector('[data-theme-option="midnight"]')`, "theme cards");
   await page.evaluate(`document.querySelector('[data-theme-option="midnight"]').click()`);
   await page.waitFor(`document.documentElement.dataset.theme === 'midnight'`, "applied at once");
   await kit.eventually(async () => (await rpc({ action: "ui-get" })).ui.theme === "midnight", "theme not saved on the host", 100);
   check("T9 a theme picked in Settings applies at once and is saved on the host", true);
   await page.shot("03-settings-midnight", { force: true });
+  // A1: Theme, Animations, Chat display and Status line are four parts of one Appearance page; each keeps its own stored value.
+  check(
+    "A1 Appearance holds Theme, Animations, Chat display and Status line in that order, and the nav has no separate pages for them",
+    await page.evaluate(
+      `JSON.stringify([...document.querySelectorAll('#settings .appearance-part > h2')].map((h) => h.textContent)) === JSON.stringify(["Theme", "Animations", "Chat display", "Status line"]) && !document.querySelector('#settings nav [data-section="theme"], #settings nav [data-section="animations"], #settings nav [data-section="display"], #settings nav [data-section="statusline"]')`,
+    ),
+  );
+  await page.evaluate(`document.querySelector('[data-part="animations"] [data-motion="off"]').click()`);
+  await page.evaluate(`document.querySelector('#show-thinking').click()`);
+  await kit.eventually(
+    async () => {
+      const ui = (await rpc({ action: "ui-get" })).ui;
+      return ui.animations === "off" && ui.showThinking === false && ui.theme === "midnight";
+    },
+    "Appearance values not saved together",
+    100,
+  );
+  check("A1 each part saves its own value on the host: theme midnight, animations off, thinking hidden", true);
+  check(
+    "A2 a link to an old section id still opens Appearance",
+    await page.evaluate(
+      `import("/settings.js").then((settings) => { settings.openSettings("statusline"); return document.querySelector('#settings').dataset.section === "appearance" && !!document.querySelector('[data-part="statusline"]'); })`,
+    ),
+  );
+  await page.shot("04-appearance", { force: true });
+  await page.evaluate(`document.querySelector('#settings [data-part="statusline"]').scrollIntoView({ block: "end" })`);
+  await page.shot("04-appearance-lower", { force: true });
+  await page.evaluate(`document.querySelector('#settings [data-part="theme"]').scrollIntoView({ block: "start" })`);
+  // A3: the letter H still jumps to Appearance from another page, and a binding saved for the old Theme page carries over.
+  await page.evaluate(`document.querySelector('#settings nav [data-section="general"]').click()`);
+  await page.waitFor(`document.querySelector('#settings').dataset.section === "general"`, "general page");
+  // The old Theme, Animations, Display and Status line letters all still land on Appearance (default bindings stay valid).
+  for (const letter of ["h", "a", "l", "s"]) {
+    await page.evaluate(`document.querySelector('#settings nav [data-section="general"]').click()`);
+    await page.waitFor(`document.querySelector('#settings').dataset.section === "general"`, "general page");
+    for (const type of ["keyDown", "keyUp"])
+      await page.cdp("Input.dispatchKeyEvent", {
+        type,
+        key: letter,
+        code: "Key" + letter.toUpperCase(),
+        windowsVirtualKeyCode: letter.toUpperCase().charCodeAt(0),
+        text: type === "keyDown" ? letter : undefined,
+      });
+    await page.waitFor(`document.querySelector('#settings').dataset.section === "appearance"`, `letter ${letter} opens Appearance`);
+  }
+  check(
+    "A3 the letters H, A, L and S open Appearance; a binding the owner saved for any of the old pages stays changed, resettable and bound",
+    await page.evaluate(
+      `import("/hotkeys.js").then((keys) => {
+        const row = (id) => keys.bindings().find((item) => item.id === id);
+        keys.setOverrides({ "settings-theme": "G", "settings-statusline": "Y" });
+        const saved = row("settings-theme").binding === "G" && row("settings-theme").changed && row("settings-statusline").binding === "Y";
+        keys.setOverrides({});
+        const reset = row("settings-theme").binding === "H" && !row("settings-theme").changed && row("settings-animations").binding === "A";
+        return saved && reset;
+      })`,
+    ),
+  );
+  await page.viewport(390, 844, true);
+  await page.waitFor(`document.querySelector('#settings .appearance-part[data-part="statusline"]')`, "narrow appearance");
+  check(
+    "A4 at 390 px Appearance fits the screen",
+    await page.evaluate(`document.scrollingElement.scrollWidth <= 391 && document.querySelector('#settings').scrollWidth <= 391`),
+  );
+  await page.shot("04b-appearance-narrow-390", { force: true });
+  await page.viewport(1440, 1000);
   await page.reload();
   await page.waitFor(`document.body.dataset.ready === "1"`, "reloaded after pick");
   check(
     "T9 the picked theme survives a reload",
     (await page.evaluate(`window.__atBody`)) === "midnight" && (await theme(page)) === "midnight",
   );
+  await page.evaluate(`document.querySelector('[data-cmd="settings"]').click()`);
+  await page.waitFor(`document.querySelector('#settings').open`, "settings open after reload");
+  await page.evaluate(`document.querySelector('nav [data-section="appearance"]').click()`);
+  await page.waitFor(
+    `!!document.querySelector('#settings [data-part="display"] #show-thinking') && !!document.querySelector('#settings [data-part="animations"] [data-motion="off"]')`,
+    "appearance after reload",
+  );
+  const saved = await page.evaluate(
+    `({ theme: document.querySelector('[data-theme-option="midnight"]').getAttribute('aria-checked'), motion: document.querySelector('#settings [data-part="animations"] [data-motion="off"]').getAttribute('aria-checked'), thinking: document.querySelector('#show-thinking').checked })`,
+  );
+  check(
+    "A5 after a reload every Appearance part shows its saved value: midnight, animations off, thinking hidden",
+    saved.theme === "true" && saved.motion === "true" && saved.thinking === false,
+    saved,
+  );
+  await page.shot("05-appearance-reloaded", { force: true });
+  await page.evaluate(`document.querySelector('#settings [data-part="statusline"]').scrollIntoView({ block: "end" })`);
+  await page.shot("05-appearance-reloaded-lower", { force: true });
+  await page.evaluate(`document.querySelector('#settings [data-part="theme"]').scrollIntoView({ block: "start" })`);
 });

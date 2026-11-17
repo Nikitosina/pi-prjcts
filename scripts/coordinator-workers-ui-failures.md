@@ -25,3 +25,9 @@ C5 Ended workers in the history carry a ring. Only active workers get one.
 F1 Every jobs push or current-command read redraws the panel, so a running worker's card is rebuilt and its entry animation
 replays: the card flashes once per command. A card must mount and animate in once; later updates change its content in place.
 New cards still animate in, and ended ones still leave. A focused control inside the card keeps the keyboard across the update.
+
+## Subagent list (U1)
+
+- U1a A worker's subagents show their tool summaries, or the list starts open, or opening it loses the keyboard on its toggle.
+- U1b Opening a subagent's transcript offers a composer or Stop, so the owner could message or stop a child that belongs to its tool call. The view must be read-only.
+- U1c At 390 px a long subagent title pushes its status badge outside the context sheet.

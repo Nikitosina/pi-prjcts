@@ -20,3 +20,8 @@ Retired with the classic layout: D3 (no number bubbles: the tree shows hotkey di
 sidebar avatar dot), W1 (compact Jobs tree row with a context ring), V1's Steer/Stop, artifacts and evidence panes, V2b (browser Back)
 and V3 (`?worker=` deep link). The limits bar checks B1-B6 are covered for the status line by `scripts/ui2-limits-e2e.mjs`.
 Known gaps: no worker deep link or history entry; the classic machine status (B2b) has no place in the new status line.
+
+## Row order (D1a)
+
+- D1a1 The unread dot sits left of the archive button, or covers it on hover or focus.
+- D1a2 Main has no archive button and so draws its unread dot in another place than the other chats. It shares the same edge slot.

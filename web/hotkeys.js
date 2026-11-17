@@ -23,6 +23,7 @@ export const DEFAULTS = {
   "settings-storage": "U",
   "settings-plugins": "X",
   "settings-tiers": "I",
+  // Appearance absorbed Theme, Animations, Display and Status line; each keeps its own saved binding and opens Appearance.
   "settings-theme": "H",
   "settings-animations": "A",
   "settings-display": "L",
@@ -44,6 +45,10 @@ export const LABELS = {
   stop: "Stop the current turn",
   "toggle-steer": "Queue or steer while busy",
   "archive-chat": "Archive chat",
+  "settings-theme": "Settings · Appearance",
+  "settings-animations": "Settings · Appearance (Animations)",
+  "settings-display": "Settings · Appearance (Chat display)",
+  "settings-statusline": "Settings · Appearance (Status line)",
 };
 
 const mac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);

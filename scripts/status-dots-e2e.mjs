@@ -491,6 +491,39 @@ try {
   const dots = await states(s);
   const expected = { Main: "working", Scout: "done", Failing: "needs", Idle: "idle" };
   if (JSON.stringify(dots) !== JSON.stringify(expected)) throw Error("Chat dot states wrong: " + JSON.stringify(dots));
+  // Row order: title, then archive button, then the unread dot at the far edge; Main (no archive button) uses the same edge slot.
+  const layout = await evaluate(
+    `(() => {
+      const box = (node) => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right }; };
+      const row = document.querySelector('${chatRow(scoutChat.id)}').closest('.tree-row');
+      const main = document.querySelector('${chatRow("main")}').closest('.tree-row');
+      const probe = document.createElement('span');
+      probe.className = 'unread';
+      document.querySelector('${chatRow("main")}').append(probe);
+      const out = { name: box(row.querySelector('.name')), archive: box(row.querySelector('.tree-archive')), unread: box(row.querySelector('.unread')), mainUnread: box(probe), mainRow: box(main), row: box(row) };
+      probe.remove();
+      return out;
+    })()`,
+    s,
+  );
+  if (!(
+    layout.name.right <= layout.archive.left + 0.5 &&
+    layout.archive.right <= layout.unread.left + 0.5 &&
+    layout.unread.right <= layout.row.right
+  ))
+    throw Error("Row order is not title, archive, unread dot: " + JSON.stringify(layout));
+  if (Math.abs(layout.mainUnread.right - layout.mainRow.right - (layout.unread.right - layout.row.right)) > 0.5)
+    throw Error("Main's unread dot is not in the same edge slot: " + JSON.stringify(layout));
+  await shot("01a-row-order-idle", s);
+  const hoverAt = await evaluate(
+    `(() => { const r = document.querySelector('${chatRow(scoutChat.id)}').closest('.tree-row').getBoundingClientRect(); return { x: r.left + 30, y: r.top + r.height / 2 }; })()`,
+    s,
+  );
+  await send("Input.dispatchMouseEvent", { type: "mouseMoved", ...hoverAt }, s);
+  await delay(300);
+  await shot("01b-row-order-hover", s);
+  await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 700, y: 500 }, s);
+  result.checks.push("D1a row order is title, archive, unread dot with the dot in one edge slot (Main included)");
   result.checks.push("D1 one dot per chat: working (Main), unread (Scout), needs you (Failing), idle (Idle)");
   const labels = await evaluate(
     `[...document.querySelectorAll('#tree .tree-project.selected [data-chat] .dot:not(.idle)')].map(n => ({ cls: n.className, label: n.getAttribute('aria-label') }))`,
@@ -580,6 +613,19 @@ try {
   if ((await evaluate(`document.scrollingElement.scrollWidth`, s)) > 391) throw Error("Narrow view overflows");
   result.checks.push("N1 390px: no horizontal overflow");
   await shot("08-narrow-390", s);
+  // Narrow, keyboard focus on a row shows its archive button between the title and the edge (a touch screen cannot be emulated here).
+  await evaluate(`document.querySelector('[data-cmd="toggle-list"]').click()`, s);
+  await waitFor(`document.querySelector('#app').dataset.sheet === "list"`, s, "list sheet");
+  await delay(500);
+  await evaluate(`document.querySelector('#tree .tree-row .tree-archive').closest('.tree-row').querySelector('.tree-chat').focus()`, s);
+  await delay(300);
+  const touch = await evaluate(
+    `(() => { const row = document.querySelector('#tree .tree-row .tree-archive').closest('.tree-row'), name = row.querySelector('.name').getBoundingClientRect(), archive = row.querySelector('.tree-archive').getBoundingClientRect(); return { archiveShown: getComputedStyle(row.querySelector('.tree-archive')).opacity, gap: archive.left - name.right, inside: archive.right <= row.getBoundingClientRect().right }; })()`,
+    s,
+  );
+  if (touch.archiveShown !== "1" || touch.gap < -0.5 || !touch.inside) throw Error("Touch row order is wrong: " + JSON.stringify(touch));
+  await shot("08a-narrow-rows", s);
+  await evaluate(`document.querySelector('#app').dataset.sheet = ""`, s);
   await waitFor(`!!document.querySelector('#workers .worker.working [data-open-worker]')`, s, "narrow worker row");
   await evaluate(`document.querySelector('#workers .worker.working [data-open-worker]').click()`, s);
   await waitFor(`!!document.querySelector('#focus-view #worker-feed')`, s, "narrow worker view");

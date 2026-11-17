@@ -28,16 +28,16 @@ export const SECTIONS = [
   { id: "storage", label: "Storage", scope: "project", group: "Project", render: storage },
   { id: "plugins", label: "Plugins", scope: "project", group: "Project", render: pluginsSection },
   { id: "tiers", label: "Model tiers", scope: "host", group: "Host", render: tiersSection },
-  { id: "theme", label: "Theme", scope: "host", group: "Host", render: theme },
-  { id: "animations", label: "Animations", scope: "host", group: "Host", render: animations },
-  { id: "display", label: "Chat display", scope: "host", group: "Host", render: chatDisplay },
-  { id: "statusline", label: "Status line", scope: "host", group: "Host", render: statusLine },
+  { id: "appearance", label: "Appearance", scope: "host", group: "Host", render: appearance },
   { id: "hotkeys", label: "Hotkeys", scope: "host", group: "Host", render: hotkeys },
   { id: "notifications", label: "Notifications", scope: "host", group: "Advanced", render: notifications },
   { id: "remote", label: "Remote access", scope: "host", group: "Advanced", render: remote },
   { id: "deploy", label: "Deploy", scope: "host", group: "Advanced", render: deploy },
   { id: "providers", label: "Providers", scope: "host", group: "Advanced", render: providers },
 ];
+/** Sections that became parts of another one: old links (the Host agent's ui_focus, saved hotkeys) still land on the right page. */
+const ALIASES = { theme: "appearance", animations: "appearance", display: "appearance", statusline: "appearance" };
+const sectionId = (id) => ALIASES[id] ?? id;
 let section = "general",
   profile = "coordinator",
   paintGen = 0,
@@ -47,6 +47,7 @@ let section = "general",
 
 export const settingsOpen = () => dialog.open;
 export function openSettings(id) {
+  id = sectionId(id);
   if (id && SECTIONS.some((item) => item.id === id)) section = id;
   if (!dialog.open) dialog.showModal();
   paint();
@@ -60,6 +61,7 @@ export const settingsBack = () => !!prompts?.back() || !!back?.();
 /** Prompt blocks changed elsewhere (another tab, the Host agent): an open Prompt section re-reads; nothing opens. */
 on("prompts-changed", () => void prompts?.refresh().catch(() => {}));
 export function showSection(id) {
+  id = sectionId(id);
   if (!dialog.open || !SECTIONS.some((item) => item.id === id)) return false;
   section = id;
   paint();
@@ -101,7 +103,7 @@ function paint(keepScroll = false) {
         `<p class="nav-group">${esc(group)}</p>${SECTIONS.filter((item) => item.group === group)
           .map(
             (item) =>
-              `<button type="button" data-section="${item.id}" data-scope="${item.scope}" aria-current="${item.id === section}"><span>${esc(item.label)}</span><span class="scope-tag ${item.scope}">${item.scope === "project" ? "proj" : "host"}</span><kbd data-hint="settings-${item.id}"></kbd></button>`,
+              `<button type="button" data-section="${item.id}" data-scope="${item.scope}" aria-current="${item.id === section}"><span>${esc(item.label)}</span><span class="scope-tag ${item.scope}">${item.scope === "project" ? "proj" : "host"}</span><kbd data-hint="settings-${item.id === "appearance" ? "theme" : item.id}"></kbd></button>`,
           )
           .join("")}`,
     )
@@ -910,6 +912,20 @@ const FONTS = [
   { id: "system-sans", label: "System sans", hint: "Your device's UI font" },
   { id: "system-mono", label: "System mono", hint: "Your device's mono font" },
 ];
+/** One page for how the app looks: theme and font, motion, what transcripts show, and the status line. Each part keeps its own stored setting. */
+const APPEARANCE_PARTS = [
+  { id: "theme", label: "Theme", render: theme },
+  { id: "animations", label: "Animations", render: animations },
+  { id: "display", label: "Chat display", render: chatDisplay },
+  { id: "statusline", label: "Status line", render: statusLine },
+];
+async function appearance(body, alive) {
+  body.innerHTML = APPEARANCE_PARTS.map(
+    (part) =>
+      `<section class="appearance-part" data-part="${part.id}" aria-labelledby="appearance-${part.id}"><h2 id="appearance-${part.id}">${part.label}</h2><div class="appearance-body"></div></section>`,
+  ).join("");
+  await Promise.all(APPEARANCE_PARTS.map((part) => part.render(body.querySelector(`[data-part="${part.id}"] .appearance-body`), alive)));
+}
 function theme(body) {
   const current = state.ui?.theme ?? "claude",
     font = state.ui?.font ?? "jetbrains-mono";
@@ -1064,7 +1080,7 @@ function hotkeys(body) {
     body.innerHTML = `${line("Every binding in one list.", "Press Edit, then the new key. Esc cancels. Settings letters work only while this overlay is open.")}<table class="hotkeys"><tbody>${rows
       .map(
         (item) =>
-          `<tr class="${clash.has(item.id) ? "clash" : ""}"><td>${esc(item.id === "chat-1" ? "Open chat 1–9" : item.id.startsWith("settings-") ? `Settings · ${SECTIONS.find((s) => `settings-${s.id}` === item.id)?.label ?? item.id}` : item.label)}</td><td><kbd>${esc(display(item.binding))}</kbd>${item.id === "chat-1" ? " … <kbd>9</kbd>" : ""}${clash.has(item.id) ? ` <span class="badge t-bad">conflict</span>` : ""}</td><td class="right">${item.id === "chat-1" ? "" : `<button type="button" class="link-btn" data-rebind="${item.id}">Edit</button>${item.changed ? `<button type="button" class="link-btn" data-reset="${item.id}">Reset</button>` : ""}`}</td></tr>`,
+          `<tr class="${clash.has(item.id) ? "clash" : ""}"><td>${esc(item.id === "chat-1" ? "Open chat 1–9" : item.id.startsWith("settings-") ? `Settings · ${SECTIONS.find((s) => `settings-${s.id}` === item.id)?.label ?? item.label}` : item.label)}</td><td><kbd>${esc(display(item.binding))}</kbd>${item.id === "chat-1" ? " … <kbd>9</kbd>" : ""}${clash.has(item.id) ? ` <span class="badge t-bad">conflict</span>` : ""}</td><td class="right">${item.id === "chat-1" ? "" : `<button type="button" class="link-btn" data-rebind="${item.id}">Edit</button>${item.changed ? `<button type="button" class="link-btn" data-reset="${item.id}">Reset</button>` : ""}`}</td></tr>`,
       )
       .join("")}</tbody></table>`;
   };

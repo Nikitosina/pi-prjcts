@@ -34,6 +34,9 @@ const {
   windowForSeconds,
   parseElizaUsage,
   parseKimiUsage,
+  parseOllamaBalance,
+  ollamaCloudProviderIds,
+  setOllamaKeyResolver,
   limitsVisibility,
   setLimitVisibility,
 } = await import("../src/usage-limits.ts");
@@ -66,14 +69,110 @@ assert.deepEqual(parseKimiUsage({ usages: { limit_5h: { used_ratio: 2, reset_tim
 });
 
 // Visibility is instance-wide, durable and independent. A damaged file fails open to the established all-visible default.
-assert.deepEqual(limitsVisibility(), { claude: true, codex: true, cursor: true, eliza: true, kimi: true });
+assert.deepEqual(limitsVisibility(), { claude: true, codex: true, cursor: true, eliza: true, kimi: true, ollama: true });
+// Ollama /api/balance: both documented `included` shapes. Remaining percent becomes used percent; nothing is invented.
+const legacy = parseOllamaBalance({
+  included: {
+    session: { remaining_percent: 70, resets_at: "2026-11-15T10:00:00Z" },
+    weekly: { remaining_percent: 25.5, resets_at: "2026-11-20T00:00:00Z" },
+  },
+  purchased: { balance_usd: 4.5 },
+});
+assert.deepEqual(
+  legacy.samples.map((s) => [s.window, Math.round(s.usedPercent * 10) / 10, s.resetsAt]),
+  [
+    ["5h", 30, Date.parse("2026-11-15T10:00:00Z")],
+    ["7d", 74.5, Date.parse("2026-11-20T00:00:00Z")],
+  ],
+);
+assert.equal(legacy.credits.purchasedUsd, 4.5);
+const credits = parseOllamaBalance({
+  included: { balance_usd: 15, allowance_usd: 20, period: { from: "2026-11-01T00:00:00Z", until: "2026-12-01T00:00:00Z" } },
+  purchased: { balance_usd: 0 },
+});
+assert.deepEqual(credits.samples, [{ window: "mo", usedPercent: 25, resetsAt: Date.parse("2026-12-01T00:00:00Z") }]);
+assert.deepEqual(credits.credits, { includedUsd: 15, allowanceUsd: 20, purchasedUsd: 0 });
+assert.deepEqual(
+  parseOllamaBalance({ included: { balance_usd: 0, allowance_usd: 0, period: {} }, purchased: {} }).samples,
+  [],
+  "no allowance, no percent",
+);
+assert.throws(() => parseOllamaBalance({ included: { session: { remaining_percent: "x" }, weekly: {} } }), /unreadable balance response/);
+assert.throws(() => parseOllamaBalance(null), /unreadable balance response/);
+// Required quota values are numbers: null, booleans and arrays never read as 0 (which would show a full bar).
+for (const bad of [null, false, true, [], {}, ""])
+  assert.throws(
+    () => parseOllamaBalance({ included: { balance_usd: bad, allowance_usd: 20 } }),
+    /unreadable balance response/,
+    JSON.stringify(bad),
+  );
+assert.throws(
+  () => parseOllamaBalance({ included: { session: { remaining_percent: null }, weekly: { remaining_percent: 50 } } }),
+  /unreadable/,
+);
+assert.throws(
+  () => parseOllamaBalance({ included: { session: { remaining_percent: [] }, weekly: { remaining_percent: 50 } } }),
+  /unreadable/,
+);
+
+// Only a provider whose every model really talks to https://ollama.com may receive the Ollama key; its name proves nothing.
+const cloud = "https://ollama.com/v1";
+assert.deepEqual(
+  ollamaCloudProviderIds([
+    { id: "ollama", baseUrls: ["http://localhost:11434/v1"] },
+    { id: "ollama-cloud", baseUrls: ["https://proxy.internal/v1"] },
+    { id: "ollama-mixed", baseUrls: [cloud, "https://proxy.internal/v1"] },
+    { id: "ollama-plain", baseUrls: ["http://ollama.com/v1"] },
+    { id: "ollama-lookalike", baseUrls: ["https://ollama.com.evil.example/v1"] },
+    { id: "ollama-nomodels", baseUrls: [] },
+    { id: "ollama-garbage", baseUrls: ["not a url"] },
+    { id: "my-cloud", baseUrls: [cloud, cloud] },
+    { id: "ollama-cloud-real", baseUrls: ["https://ollama.com/api"] },
+  ]),
+  ["my-cloud", "ollama-cloud-real"],
+);
+assert.deepEqual(
+  ollamaCloudProviderIds([{ id: "ollama", baseUrls: ["http://127.0.0.1:11434/v1"] }]),
+  [],
+  "a local server alone yields no connection",
+);
+
+// A successful refresh replaces what the provider reported before: a legacy 5h/7d reading never survives a move to the monthly plan.
+let balance = null;
+const balanceServer = createServer((req, res) => {
+  res.writeHead(200, { "content-type": "application/json" });
+  res.end(JSON.stringify(balance));
+});
+await new Promise((ok) => balanceServer.listen(0, "127.0.0.1", ok));
+process.env.PI_PROJECTS_OLLAMA_BALANCE_URL = `http://127.0.0.1:${balanceServer.address().port}/api/balance`;
+setOllamaKeyResolver(async () => "fake-key");
+resetLimitsForTest();
+const ollamaAt = async (now) => find(await limitsSnapshot(now, true), "ollama");
+const windowsOf = (item) => item.samples.map((sample) => `${sample.window}:${Math.round(sample.usedPercent)}`);
+balance = { included: { session: { remaining_percent: 10 }, weekly: { remaining_percent: 5 } }, purchased: { balance_usd: 1 } };
+assert.deepEqual(windowsOf(await ollamaAt(500_000)), ["5h:90", "7d:95"]);
+balance = { included: { balance_usd: 15, allowance_usd: 20, period: { until: "2026-12-01T00:00:00Z" } }, purchased: {} };
+let ollamaNow = await ollamaAt(500_000 + MANUAL_COOLDOWN_MS + 1);
+assert.deepEqual(windowsOf(ollamaNow), ["mo:25"], "legacy windows are gone");
+balance = { included: { balance_usd: 0, allowance_usd: 0 }, purchased: { balance_usd: 2 } };
+ollamaNow = await ollamaAt(500_000 + 2 * (MANUAL_COOLDOWN_MS + 1));
+assert.deepEqual(windowsOf(ollamaNow), [], "a plan with no allowance keeps no stale percent");
+assert.equal(ollamaNow.status, "ok");
+assert.equal(ollamaNow.credits.purchasedUsd, 2);
+balance = { included: { balance_usd: null, allowance_usd: 20 } };
+ollamaNow = await ollamaAt(500_000 + 3 * (MANUAL_COOLDOWN_MS + 1));
+assert.match(ollamaNow.reason, /unreadable balance response/);
+assert.equal(ollamaNow.credits.purchasedUsd, 2, "an unreadable reply keeps the last good reading and says so");
+setOllamaKeyResolver(null);
+balanceServer.close();
+resetLimitsForTest();
 setLimitVisibility("claude", false);
 setLimitVisibility("kimi", false);
-assert.deepEqual(limitsVisibility(), { claude: false, codex: true, cursor: true, eliza: true, kimi: false });
+assert.deepEqual(limitsVisibility(), { claude: false, codex: true, cursor: true, eliza: true, kimi: false, ollama: true });
 setLimitVisibility("claude", true);
 assert.equal(limitsVisibility().claude, true);
 writeFileSync(join(dir, "projects", "limits-visibility.json"), "not json");
-assert.deepEqual(limitsVisibility(), { claude: true, codex: true, cursor: true, eliza: true, kimi: true });
+assert.deepEqual(limitsVisibility(), { claude: true, codex: true, cursor: true, eliza: true, kimi: true, ollama: true });
 
 // Eliza: sum actual monthly cost across usage buckets. The account and UTC calendar-month bounds come from the response and documented reset rule.
 const october = Date.parse("2026-10-26T18:00:00Z");
