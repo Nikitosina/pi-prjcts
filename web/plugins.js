@@ -1,13 +1,13 @@
-// Plugin status rows and plugin panels (Settings → Plugins). A plugin's ui.js calls
-// window.piProjects.register({ name, mount(slot, panel), action?(name, node, panel) }) while it first runs. Each script and style
-// loads once per page; a panel mounts in its plugin's card while the section shows, and a project change mounts it again.
+// Plugin status rows, plugin panels (Settings → Plugins) and plugin sections (right panel, web/sidebar.js). A plugin's ui.js calls
+// window.piProjects.register({ name, mount?(slot, panel), action?(name, node, panel), sidebar?: { mount(slot, section), action? } }) while it first runs.
+// Each script and style loads once per page; a panel mounts in its plugin's card while the section shows, and a project change mounts it again.
 // Plugin code is trusted, not isolated: the API only keeps it to its own slot, methods, routes and project.
 import { call, authorizedFetch } from "./api.js";
 import { clip, esc } from "./format.js";
 
 const RETIRED = ["render", "tick", "projectChanged", "hide"]; // the classic inbox's context-panel hooks
 const scripts = new Map(); // plugin name -> { definition, error, ready }
-const mounted = new Map(); // plugin name -> shows a runtime error in its mounted panel
+const mounted = new Map(); // plugin name -> the functions that show a runtime error in each of its mounted panels and sections
 const isAbort = (error) => error?.name === "AbortError";
 const messageOf = (error) => clip(String(error?.message ?? error ?? "failed"), 500);
 const ownerOf = (src) => /^\/plugins\/([a-z][a-z0-9-]{0,39})\/ui\.js$/.exec(src ?? "")?.[1];
@@ -25,7 +25,13 @@ function register(definition) {
   if (entry.definition) refuse(`${owner} is already registered`);
   const retired = RETIRED.filter((hook) => hook in definition);
   if (retired.length) refuse(`ui.js uses the retired context-panel hooks (${retired.join(", ")}); a panel provides mount(slot, panel)`);
-  if (typeof definition.mount !== "function" || (definition.action !== undefined && typeof definition.action !== "function"))
+  const hooks = (part) => part.action === undefined || typeof part.action === "function";
+  const sidebar = definition.sidebar;
+  if (sidebar !== undefined && (typeof sidebar?.mount !== "function" || !hooks(sidebar)))
+    refuse("a sidebar section needs mount(slot, section) and an optional action(name, node, section)");
+  if (sidebar === undefined && typeof definition.mount !== "function")
+    refuse("a panel needs mount(slot, panel) and an optional action(name, node, panel)");
+  if (definition.mount !== undefined && (typeof definition.mount !== "function" || !hooks(definition)))
     refuse("a panel needs mount(slot, panel) and an optional action(name, node, panel)");
   entry.definition = definition;
 }
@@ -38,7 +44,7 @@ window.addEventListener("error", (event) => {
   if (!entry) return;
   const error = event.error ?? event.message;
   if (!entry.loaded) entry.error ??= messageOf(error);
-  else mounted.get(name)?.(error);
+  else for (const show of mounted.get(name) ?? []) show(error);
 });
 
 function load({ plugin, script, style }) {
@@ -106,12 +112,39 @@ export function mountPanels(container, projectId, web) {
       continue;
     }
     const item = web.find((entry) => entry.plugin === node.dataset.plugin && entry.script);
-    if (item) void mountOne(node, item, projectId, controller.signal);
+    if (item) void mountOne(node, item, { projectId }, controller.signal, "panel");
   }
   return () => controller.abort();
 }
 
-async function mountOne(node, item, projectId, signal) {
+/** The plugins that opted in to a right-panel section, in load order. */
+export const sidebarItems = (web) => web.filter((item) => item.script && item.sidebar);
+
+/** One empty section per opted-in plugin: a heading, an error line and the slot the plugin fills. */
+export function sectionNodes(web) {
+  return sidebarItems(web).map((item) => {
+    const node = document.createElement("section");
+    node.className = "ctx-section plugin-section";
+    node.dataset.plugin = item.plugin;
+    node.dataset.state = "loading";
+    node.setAttribute("aria-label", item.sidebar.title);
+    node.innerHTML = `<h2></h2><p class="plugin-error small" role="alert" hidden></p><div class="plugin-slot"></div>`;
+    node.querySelector("h2").textContent = item.sidebar.title;
+    return node;
+  });
+}
+
+/** Mounts the sections `sectionNodes` made for the selected project and chat; the returned function aborts them. */
+export function mountSections(nodes, web, context) {
+  const controller = new AbortController();
+  for (const node of nodes) {
+    const item = sidebarItems(web).find((entry) => entry.plugin === node.dataset.plugin);
+    if (item) void mountOne(node, item, context, controller.signal, "section");
+  }
+  return () => controller.abort();
+}
+
+async function mountOne(node, item, { projectId, chatId }, signal, kind) {
   const name = item.plugin,
     errorLine = node.querySelector(".plugin-error"),
     slot = node.querySelector(".plugin-slot");
@@ -130,6 +163,11 @@ async function mountOne(node, item, projectId, signal) {
   const { definition, error, styleError } = scripts.get(name);
   if (signal.aborted) return;
   if (!definition || error) return fail(error);
+  const part = kind === "section" ? definition.sidebar : definition.mount ? definition : null;
+  if (!part) {
+    if (kind === "section") return fail(`${name} declares a sidebar section but its ui.js registered none (sidebar: { mount })`);
+    return node.remove();
+  }
   if (styleError) show(styleError);
   // A call after the panel went away is never sent, and a late answer rejects with an AbortError, so nothing reaches the next project.
   const settled = async (send) => {
@@ -140,28 +178,31 @@ async function mountOne(node, item, projectId, signal) {
   };
   const panel = Object.freeze({
     projectId,
+    ...(chatId ? { chatId } : {}),
     signal,
     rpc: (method, params) => settled(() => call("plugin", { plugin: name, method, id: projectId, params })),
     fetch: (route, query = {}) =>
       settled(() =>
-        authorizedFetch(`/plugins/${name}/${encodeURIComponent(route)}?${new URLSearchParams({ ...query, project: projectId })}`, {
-          signal,
-        }),
+        authorizedFetch(
+          `/plugins/${name}/${encodeURIComponent(route)}?${new URLSearchParams({ ...query, project: projectId, ...(chatId ? { chat: chatId } : {}) })}`,
+          { signal },
+        ),
       ),
   });
   // Clicks inside the slot belong to the plugin: they never reach core handlers (data-cmd, data-profile, ...).
   slot.addEventListener("click", (event) => {
     event.stopPropagation();
     const target = event.target.closest("[data-action]");
-    if (!definition.action || !target || !slot.contains(target) || !target.dataset.action.startsWith(`${name}-`)) return;
+    if (!part.action || !target || !slot.contains(target) || !target.dataset.action.startsWith(`${name}-`)) return;
     Promise.resolve()
-      .then(() => definition.action(target.dataset.action, target, panel))
+      .then(() => part.action(target.dataset.action, target, panel))
       .catch(show);
   });
-  mounted.set(name, show);
-  signal.addEventListener("abort", () => mounted.get(name) === show && mounted.delete(name), { once: true });
+  if (!mounted.has(name)) mounted.set(name, new Set());
+  mounted.get(name).add(show);
+  signal.addEventListener("abort", () => mounted.get(name)?.delete(show), { once: true });
   try {
-    await definition.mount(slot, panel);
+    await part.mount(slot, panel);
     if (!signal.aborted) node.dataset.state = "ready";
   } catch (mountError) {
     fail(mountError);

@@ -487,6 +487,8 @@ export type WebContribution = {
   /** Absolute paths of the browser script and stylesheet, served unauthenticated as /plugins/<name>/ui.js and /plugins/<name>/ui.css; the script registers the plugin's Settings panel. */
   script?: string;
   style?: string;
+  /** Opt-in: the script also registers a `sidebar` section, mounted under Workers and Pull requests of the selected chat. `title` defaults to the plugin name. */
+  sidebar?: { title?: string };
   /** Bearer-authenticated GET /plugins/<name>/<route>?project=<id>. */
   routes?: Record<string, PluginRoute>;
 };

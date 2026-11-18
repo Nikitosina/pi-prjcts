@@ -9,9 +9,9 @@ Core ships Git and GitHub only. GitHub is the built-in `github` plugin (see [The
 Start with [`docs/plugins/README.md`](docs/plugins/README.md):
 
 - [Getting started](docs/plugins/getting-started.md): `npm run projects -- plugin new|check`, the scaffold's test, a private host with `--plugin`.
-- [Reference](docs/plugins/reference.md): the module shape, `HostPluginApi`, RPC methods versus `coordinatorTools` and `workerTools`, `rpcPolicy` and owner approval, state, resource leases, lifecycle, cleanup, storage, web routes and the panel in Settings → Plugins.
+- [Reference](docs/plugins/reference.md): the module shape, `HostPluginApi`, RPC methods versus `coordinatorTools` and `workerTools`, `rpcPolicy` and owner approval, state, resource leases, lifecycle, cleanup, storage, web routes and the panel in Settings → Plugins and an optional section in the chat's right panel.
 - [Development and activation](docs/plugins/development.md): testing, private verification, activation through `plugins.json` and a restart, troubleshooting, compatibility and current limits.
-- [Example plugin](docs/plugins/examples/notes/): a checked-in plugin with RPC methods, tools and a Settings panel, tested by `scripts/plugin-dev-unit.mjs` and `scripts/plugin-panels-e2e.mjs`.
+- [Example plugin](docs/plugins/examples/notes/): a checked-in plugin with RPC methods, tools, a Settings panel and a right-panel section, tested by `scripts/plugin-dev-unit.mjs`, `scripts/plugin-panels-e2e.mjs` and `scripts/plugin-sidebar-e2e.mjs`.
 
 The contract is `HostPluginApi` and `PluginCapabilities` in `src/plugin-types.ts`; the loader is `src/plugins.ts`. The rest of this file covers the provider capabilities for a new checkout kind or PR service.
 

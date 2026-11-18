@@ -19,7 +19,7 @@ Export it as the default export, or export `name`, `version` and `register` by n
 - `version` is optional. When present it is 1 to 40 characters without spaces. A plugin without it shows `version: null`.
 - Import and `register` each have to finish within `PI_PROJECTS_PLUGIN_TIMEOUT_MS` (15 seconds by default).
 - `register` calls `api.provide({...})` once or more, each capability at most once. Nothing is visible until `register` returns. If it throws, nothing it provided stays registered.
-- After `register`, the loader checks every provided capability: required methods are functions, RPC method and route names are kebab-case (`/^[a-z][a-z0-9-]{0,63}$/`), every `rpcPolicy` key names an `rpc` method, `web.script` and `web.style` are absolute paths to existing files. It also refuses a provider id or checkout kind that another plugin already provides.
+- After `register`, the loader checks every provided capability: required methods are functions, RPC method and route names are kebab-case (`/^[a-z][a-z0-9-]{0,63}$/`), every `rpcPolicy` key names an `rpc` method, `web.script` and `web.style` are absolute paths to existing files, and `web.sidebar` needs a `script` and a `title` of 1 to 60 characters when given. It also refuses a provider id or checkout kind that another plugin already provides.
 
 A plugin that fails any rule is recorded as `failed` with the reason and contributes nothing; the host keeps running.
 
@@ -80,7 +80,7 @@ Use these instead of importing your own copies. Durable tools and documents only
 | `leaseName` | canonical names for resources the plugin owns | [Resource leases](#resource-leases) |
 | `lifecycle` | hooks around project pause, resume, archive, delete and host shutdown | [Lifecycle](#lifecycle) |
 | `cleanup`, `usage` | a step of the Workspace cleanup routine and a row in Settings → Storage | [Cleanup and storage](#cleanup-and-storage) |
-| `web` | a panel in Settings → Plugins and authenticated GET routes | [Web](#web) |
+| `web` | a panel in Settings → Plugins, an optional right-panel section and authenticated GET routes | [Web](#web) |
 | `vcs`, `workspace`, `prs`, `follow`, `merge`, `uncertainWrites` | a checkout kind or PR service | [`PLUGINS.md`](../../PLUGINS.md) |
 
 ## RPC methods and agent tools
@@ -229,6 +229,7 @@ usage?: (input: { projectId: string; unusedDays: number; signal: AbortSignal }) 
 web?: {
   script?: string;   // absolute path, served as /plugins/<name>/ui.js
   style?: string;    // absolute path, served as /plugins/<name>/ui.css
+  sidebar?: { title?: string }; // opt-in: a section in the chat's right panel (see Right-panel section)
   routes?: Record<string, (input: { projectId: string; query: URLSearchParams }) => Promise<{ mime: string; bytes: Uint8Array }>>;
 };
 ```
@@ -273,3 +274,42 @@ Rules:
 The code is trusted, not isolated: it runs in the owner's page with the owner's token. The API keeps a well-behaved panel to its own slot, plugin and project; it does not stop code that ignores it. There is no hot reload, and a panel cannot place anything elsewhere in the inbox.
 
 The [example plugin](examples/notes/ui.js) lists the project's notes and adds one.
+
+### Right-panel section
+
+A plugin can also put its own section in the chat's right panel, under Workers and Pull requests. It is opt-in and independent of the Settings panel: a plugin may have either or both. Plugins that do not opt in add nothing there, not even a status row.
+
+Declare it in `web` and register it in `ui.js`:
+
+```js
+api.provide({ web: { script, style, sidebar: { title: "Notes" } } }); // title is optional, default: the plugin's name
+```
+
+```js
+window.piProjects.register({
+  name: "notes",
+  sidebar: {
+    async mount(slot, section) { ... },          // fill `slot`; may return a promise
+    async action(name, node, section) { ... },   // optional, as for the Settings panel
+  },
+});
+```
+
+`mount` is optional when `sidebar` is present, so a sidebar-only plugin has no panel in its Settings card. A plugin without `sidebar` is unchanged. A plugin that declares `web.sidebar` but registers no `sidebar` shows an error in its own section.
+
+`section` has the fields of `panel` (`projectId`, `signal`, `rpc`, `fetch`) and one more:
+
+| field | |
+| --- | --- |
+| `chatId` | the chat selected when the section mounted (`"main"` for the main chat) |
+| `fetch(route, query?)` | as for `panel`, and it also sends `chat=<chatId>`; `rpc` sends only `project`, so pass `chatId` in `params` when the method needs it |
+
+Rules, in addition to those of the Settings panel:
+
+- The section mounts once per selection of a project or chat. Selecting another chat or project aborts `signal` and mounts a fresh section in a fresh slot with the new `chatId`. Refreshes of workers, jobs, the chat and the PR list do not mount it again, and selecting the chat that is already selected does nothing.
+- Everything from the old selection is cut off after the abort: `rpc` and `fetch` send nothing and reject with an `AbortError`, also a call already sent, so a slow answer never renders into the next chat. Keep timers and polling tied to `signal`.
+- One failing section shows its error line in that section only. Other sections, Workers, Pull requests and the chat keep working.
+- Sections follow plugin load order. The panel is a narrow column (about 300 px, a sheet on small screens): wrap long text, avoid fixed widths, and scope your CSS to your own classes, as `.notes-panel` does. Core styles `.plugin-section` only for spacing, the heading and the error line.
+- The code is trusted, not isolated, as for the Settings panel. A plugin that wants to show something for a feature of its own (a task list, a status) reads its own RPC methods or routes; core has no knowledge of any plugin's data.
+
+The [example plugin](examples/notes/ui.js) shows the three latest notes and the selected chat.
