@@ -48,13 +48,14 @@
             reading = false;
           }
         };
+        let timer;
         const poll = () => {
-          const timer = setTimeout(async () => {
+          timer = setTimeout(async () => {
             if (!document.hidden) await load();
             if (!section.signal.aborted) poll();
           }, POLL_MS);
-          section.signal.addEventListener("abort", () => clearTimeout(timer), { once: true });
         };
+        section.signal.addEventListener("abort", () => clearTimeout(timer), { once: true });
         await load();
         poll();
         document.addEventListener("visibilitychange", () => !document.hidden && void load(), { signal: section.signal });
