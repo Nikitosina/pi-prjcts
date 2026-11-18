@@ -183,6 +183,36 @@ try {
   const listed = (await list(1, caps)).tasks;
   assert.ok(listed.length <= 100, `7 the oldest finished tasks are dropped: ${listed.length}`);
   assert.equal(listed.filter((task) => task.stage !== "done").length, 50, "7 open tasks are never dropped");
+  // 7: finishing the oldest task after 50 newer ones are finished keeps it, and drops the oldest completion instead
+  const cap = make("00000000-0000-4000-8000-00000000000c");
+  const early = await call("tasks_add", { title: "early" }, 1, cap);
+  const later = [];
+  for (let i = 0; i < 50; i++) {
+    later.push(await call("tasks_add", { title: `later ${i}` }, 1, cap));
+    await call("tasks_finish", { id: later[i].id }, 1, cap);
+  }
+  await call("tasks_finish", { id: early.id, note: "last note" }, 1, cap);
+  const kept = (await list(1, cap)).tasks;
+  assert.equal(kept.length, 50, "7 finished tasks are capped");
+  assert.equal(kept.at(-1).note, "last note", "7 the task just finished is kept");
+  assert.ok(!kept.some((task) => task.id === later[0].id), "7 the oldest completion is dropped");
+
+  // 12 14: attaching the same PR without a link keeps the known link
+  const linked = await call("tasks_add", { title: "linked" });
+  await call("tasks_attach_pr", { id: linked.id, provider: "arc", repository: "arcadia", number: "99", url: "https://example.test/99" });
+  assert.equal(
+    (await call("tasks_attach_pr", { id: linked.id, provider: "arc", repository: "arcadia", number: "99" })).pr.url,
+    "https://example.test/99",
+  );
+
+  // 6: a file whose tasks have the wrong shape is unreadable too
+  const shapeFile = join(stateDir, `${projectA}.json`);
+  const good = readFileSync(shapeFile, "utf8");
+  writeFileSync(shapeFile, JSON.stringify({ main: [{}] }));
+  await assert.rejects(call("tasks_add", { title: "must not overwrite" }), /unreadable/i);
+  assert.equal(readFileSync(shapeFile, "utf8"), JSON.stringify({ main: [{}] }));
+  writeFileSync(shapeFile, good);
+
   console.log("tasks-plugin-unit: ok");
 } finally {
   rmSync(stateDir, { recursive: true, force: true });

@@ -30,6 +30,18 @@ const PROVIDER = /^[a-z][a-z0-9-]{0,39}$/;
 const REPOSITORY = /^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,199}$/;
 const PR_NUMBER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
+const isTask = (value: unknown): value is Task => {
+  const task = value as Partial<Task> | null;
+  return (
+    typeof task?.id === "string" &&
+    typeof task.title === "string" &&
+    (task.stage === "done" || OPEN_STAGES.some((stage) => stage === task.stage)) &&
+    typeof task.createdAt === "string" &&
+    typeof task.updatedAt === "string"
+  );
+};
+const isTaskList = (value: unknown) => Array.isArray(value) && value.every(isTask);
+
 export const isChatId = (value: unknown): value is string => typeof value === "string" && CHAT_ID.test(value);
 
 export function checkPr(input: { provider: string; repository: string; number: string; url?: string }): TaskPr {
@@ -59,7 +71,7 @@ export function createTaskStore(dir: string, now: () => Date = () => new Date())
     if (!existsSync(path)) return {};
     try {
       const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || !Object.values(parsed).every(Array.isArray))
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || !Object.values(parsed).every(isTaskList))
         throw new Error("shape");
       return parsed as Lists;
     } catch {
@@ -132,7 +144,7 @@ export function createTaskStore(dir: string, now: () => Date = () => new Date())
         const task = open(tasks, id);
         const holder = tasks.find((item) => item.pr && samePr(item.pr, pr));
         if (holder && holder.id !== id) throw new Error(`That PR is already attached to task ${holder.id}`);
-        if (task.pr && samePr(task.pr, pr) && task.pr.url === pr.url) return clean(task);
+        if (task.pr && samePr(task.pr, pr) && (pr.url === undefined || task.pr.url === pr.url)) return clean(task);
         if (task.pr && !samePr(task.pr, pr) && !replace)
           throw new Error("This task already has another PR; pass replace: true to replace it");
         task.pr = pr;
@@ -146,6 +158,9 @@ export function createTaskStore(dir: string, now: () => Date = () => new Date())
         task.stage = "done";
         if (note !== undefined) task.note = note;
         task.finishedAt = now().toISOString();
+        // Finished tasks keep completion order, so the oldest completion is the one dropped at the cap.
+        tasks.splice(tasks.indexOf(task), 1);
+        tasks.push(task);
         return clean(stamp(task));
       });
     },

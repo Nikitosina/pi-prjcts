@@ -32,24 +32,32 @@
       async mount(slot, section) {
         slot.innerHTML = `<div class="tasks-panel"><ul data-tasks-list></ul><div class="tasks-foot"><span data-tasks-finished></span><span data-tasks-error></span></div></div>`;
         const error = slot.querySelector("[data-tasks-error]");
-        let latest = 0;
-        // An older answer never replaces a newer one; the abort already cuts off answers of a previous chat.
+        slot.querySelector("[data-tasks-list]").innerHTML = `<li class="tasks-empty">Loading…</li>`;
+        let reading = false;
+        // One read at a time: a slow host never has every answer discarded, and a failed read never stops the next one.
         const load = async () => {
-          const ask = ++latest;
-          const { tasks } = await section.rpc("list", { chatId: section.chatId });
-          if (ask !== latest || section.signal.aborted) return;
-          paint(slot, tasks);
-          error.textContent = "";
+          if (reading || section.signal.aborted) return;
+          reading = true;
+          try {
+            const { tasks } = await section.rpc("list", { chatId: section.chatId });
+            paint(slot, tasks);
+            error.textContent = "";
+          } catch (failure) {
+            if (failure?.name !== "AbortError") error.textContent = "Tasks could not be refreshed";
+          } finally {
+            reading = false;
+          }
+        };
+        const poll = () => {
+          const timer = setTimeout(async () => {
+            if (!document.hidden) await load();
+            if (!section.signal.aborted) poll();
+          }, POLL_MS);
+          section.signal.addEventListener("abort", () => clearTimeout(timer), { once: true });
         };
         await load();
-        const timer = setInterval(() => {
-          if (document.hidden) return;
-          load().catch((failure) => {
-            if (failure?.name !== "AbortError") error.textContent = "Tasks could not be refreshed";
-          });
-        }, POLL_MS);
-        document.addEventListener("visibilitychange", () => !document.hidden && void load().catch(() => {}), { signal: section.signal });
-        section.signal.addEventListener("abort", () => clearInterval(timer), { once: true });
+        poll();
+        document.addEventListener("visibilitychange", () => !document.hidden && void load(), { signal: section.signal });
       },
     },
   });
