@@ -2916,7 +2916,7 @@ const journeys = {
       if (back.expanded !== "false" || !back.moreShown) throw Error(`A → B → A did not collapse ${needle}: ${JSON.stringify(back)}`);
     }
     record("visible", "A → B → A shows both long messages collapsed again");
-    await mouse(await wordPoint("Paragraph 5", "last"), [1]);
+    await mouse(await wordPoint("Paragraph 5", "first"), [1]);
     await expectRevealed("Paragraph 5", "a click reveals after coming back");
     await page.reload();
     await page.waitFor(`!!${ownerBy("Paragraph 5")}?.querySelector('.msg-more')`, "feed after reload", 20000);
