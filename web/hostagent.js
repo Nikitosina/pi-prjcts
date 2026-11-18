@@ -4,7 +4,7 @@
 import { call, stream, uuid } from "./api.js";
 import { clip, esc, markdown, oneLine, shortModel } from "./format.js";
 import { emit, fail, inline, on, state, toast } from "./state.js";
-import { mergeGroups, morph, showThinking, thinkingHtml, transcriptClick, transcriptHtml } from "./chat.js";
+import { forgetReveals, mergeGroups, morph, showThinking, thinkingHtml, transcriptClick, transcriptFocus, transcriptHtml } from "./chat.js";
 import { hydrateMedia } from "./media.js";
 
 const THINKING = ["off", "low", "medium", "high", "max"];
@@ -28,13 +28,16 @@ let items = [],
   loads = 0;
 
 export const pendingApprovals = () => approvals.filter((item) => item.state === "pending");
+const HOST_SCOPE = "host|"; // the Host agent's reveal scope in chat.js
 export const isOpen = () => drawer.dataset.open === "1";
 
 export function toggleHostAgent(force, { at } = {}) {
-  const next = force ?? !isOpen();
+  const next = force ?? !isOpen(),
+    opening = next && !isOpen();
   drawer.dataset.open = next ? "1" : "0";
   drawer.setAttribute("aria-hidden", String(!next));
   drawer.inert = !next;
+  if (opening) forgetReveals(HOST_SCOPE, body);
   if (next) {
     void loadHostAgent();
     if (at === "approvals") setTimeout(() => approvalsBox.querySelector("button")?.focus(), 60);
@@ -165,7 +168,7 @@ function offerSettings(section, before = () => {}) {
 // ---------------------------------------------------------------------------------------------------------------- transcript
 
 function paint() {
-  const transcript = transcriptHtml(items, false, "Host agent", { fold: false, groups });
+  const transcript = transcriptHtml(items, false, "Host agent", { fold: false, groups, scope: HOST_SCOPE });
   morph(
     body,
     (before ? `<button type="button" class="earlier" data-ha-earlier>Show earlier</button>` : "") +
@@ -193,6 +196,7 @@ function paintLive() {
   node.innerHTML = `${thinking}${tools}${frame.text ? `<article class="msg agent streaming"><div class="msg-meta"><span class="who">Host agent</span></div><div class="prose">${markdown(frame.text)}</div></article>` : ""}<div class="live-status"><span class="pulse" aria-hidden="true"></span>${frame.text ? "Writing" : frame.thinking ? "Thinking" : tools ? "Using tools" : "Working"}…</div>`;
   body.scrollTop = body.scrollHeight;
 }
+body.addEventListener("focusin", (event) => transcriptFocus(event));
 body.addEventListener("click", async (event) => {
   if (event.target.closest("[data-ha-earlier]")) {
     const load = loads;

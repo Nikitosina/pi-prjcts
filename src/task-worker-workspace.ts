@@ -34,7 +34,10 @@ const TaskWorkspaceBindings = defineDoc<{ threads: Record<string, Binding> }>({
   checkpointWhen: () => false,
   initial: () => ({ threads: {} }),
 });
-type Request = { threadId: string; conversationId: number; workId: string; taskText: string };
+/** `revision`: a reader later sent to another commit gets a binding and checkout of its own; the first stays under the bare thread id. */
+type Request = { threadId: string; conversationId: number; workId: string; taskText: string; revision?: string };
+const slot = (request: Pick<Request, "threadId" | "revision">) =>
+  request.revision ? `${request.threadId}@${request.revision}` : request.threadId;
 
 /** Task allocations and borrowed attachments never own the source chat's runtime handles. */
 export function taskWorkerWorkspaces(input: {
@@ -123,7 +126,7 @@ export function taskWorkerWorkspaces(input: {
       whole: true,
       scopeBaseRevision: selected.scope.baseRevision,
       ...request,
-      allocationThread: request.threadId,
+      allocationThread: slot(request),
       allocated: binding.intent.scope,
       root: input.root(),
       controlRoot: input.controlRoot,
@@ -132,8 +135,13 @@ export function taskWorkerWorkspaces(input: {
     };
   }
   async function freeze(request: Request, chat: number, choice: TaskWorkspace, reader = false): Promise<Binding> {
-    const stored = await read(request.threadId);
-    if (stored) return stored;
+    const stored = await read(slot(request));
+    if (stored) {
+      // A frozen checkout is never reused for another commit: the turn would read code its report does not name.
+      if (reader && (stored.kind !== "isolated" || stored.intent.scope.baseRevision !== (choice as { baseCommit?: string }).baseCommit))
+        throw new Error("Reader checkout is frozen at another commit");
+      return stored;
+    }
     await active(request);
     const source = await input.source(chat);
     // A reader may be the chat's first use of its workspace; a helper only borrows one the chat already prepared.
@@ -149,7 +157,7 @@ export function taskWorkerWorkspaces(input: {
       }, BACKGROUND_CONTEXT);
       if (!sourceBinding || sourceBinding.intent.id !== ready.intentId || sourceBinding.grant !== selected.revision)
         throw new Error("Source chat repository or grant differs");
-      const id = uuid(`${selected.project.id}:${request.threadId}:task-workspace`);
+      const id = uuid(`${selected.project.id}:${slot(request)}:task-workspace`);
       const approvedRoot = currentWorktreeRoot(selected.project.id, selected.repository.approvedRoot);
       let plan: AllocationPlan;
       if (selected.plug) {
@@ -220,7 +228,7 @@ export function taskWorkerWorkspaces(input: {
     await active(request);
     return input.root().commit(async (tx) => {
       const doc = await tx.doc(TaskWorkspaceBindings, input.root().id);
-      return copy((doc.threads[request.threadId] ??= proposed));
+      return copy((doc.threads[slot(request)] ??= proposed));
     }, BACKGROUND_CONTEXT);
   }
   async function target(request: Request, binding: Binding) {
@@ -233,7 +241,7 @@ export function taskWorkerWorkspaces(input: {
       return { cwd: ready.cwd, branch: ready.branch, scope: request.threadId, guard: helperGuard() };
     }
     const owned = isolation(binding),
-      attachment = attachments.get(request.threadId);
+      attachment = attachments.get(slot(request));
     if (grant(binding).plug) {
       if (!attachment) throw new Error("Task provider attachment is unavailable");
       await attachment.checkOwned();
@@ -282,7 +290,7 @@ export function taskWorkerWorkspaces(input: {
     }
     if (!receipt || receipt.state !== "allocated" || JSON.stringify(receipt.scope) !== JSON.stringify(intent.scope))
       throw new Error(`Task allocation unavailable: ${receipt?.state ?? "missing"}; retaining frozen binding`);
-    if (selected.plug && !attachments.has(request.threadId)) {
+    if (selected.plug && !attachments.has(slot(request))) {
       const plan: AllocationPlan = {
         name: intent.scope.workspaceName,
         branch: intent.scope.branch,
@@ -297,7 +305,7 @@ export function taskWorkerWorkspaces(input: {
         receipts: (await owned.snapshot()).receipts,
         plan,
       });
-      attachments.set(request.threadId, attachment);
+      attachments.set(slot(request), attachment);
       await active(request);
       await attachment.checkOwned();
       await attachment.start();
@@ -309,7 +317,23 @@ export function taskWorkerWorkspaces(input: {
       const binding = await freeze(request, request.chat, { kind: "isolated", baseCommit: request.baseCommit }, true);
       if (binding.kind !== "isolated") throw new Error("Reader workspace must be isolated");
       await allocate(request, binding);
-      return { cwd: (await target(request, binding)).cwd };
+      const { cwd } = await target(request, binding);
+      // Every turn, first or reused, must find exactly the commit its report will name, read from the checkout and not from what was requested.
+      const attachment = attachments.get(slot(request));
+      let held: { head: string; clean: boolean };
+      if (!attachment) {
+        const [head, status] = await Promise.all([
+          git(cwd, ["rev-parse", "HEAD"]),
+          git(cwd, ["status", "--porcelain=v1", "--untracked-files=all"]),
+        ]);
+        held = { head, clean: !status };
+      } else {
+        if (!attachment.confirmRevision) throw new Error("The workspace provider cannot confirm the revision of a reader checkout");
+        const state = await attachment.confirmRevision();
+        held = { head: state.revision, clean: state.clean === true };
+      }
+      if (held.head !== request.baseCommit || !held.clean) throw new Error("Reader checkout moved off its commit or has changes");
+      return { cwd };
     });
   }
   function prepare(
@@ -379,24 +403,24 @@ export function taskWorkerWorkspaces(input: {
     });
   }
   async function validate(request: Request) {
-    const binding = await read(request.threadId);
+    const binding = await read(slot(request));
     if (!binding) throw new Error("Task workspace binding is missing");
     return target(request, binding);
   }
   async function closeThread(threadId: string) {
     for (const controller of controllers.get(threadId) ?? []) controller.abort(new Error("Task worker stopped"));
     await queues.get(threadId)?.catch(() => {});
-    const attachment = attachments.get(threadId);
-    if (attachment) {
-      await attachment.detach();
-      attachments.delete(threadId);
+    // A reader's later revisions keep their attachments under `<thread>@<commit>`.
+    for (const key of [...attachments.keys()].filter((key) => key === threadId || key.startsWith(`${threadId}@`))) {
+      await attachments.get(key)?.detach();
+      attachments.delete(key);
     }
   }
   async function close() {
     closed = true;
     for (const pending of controllers.values()) for (const controller of pending) controller.abort(new Error("Task workspaces closed"));
     await Promise.allSettled([...operations]);
-    const results = await Promise.allSettled([...attachments.keys()].map(closeThread));
+    const results = await Promise.allSettled([...new Set([...attachments.keys()].map((key) => key.split("@")[0]!))].map(closeThread));
     const errors = results.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
     if (errors.length) throw new AggregateError(errors, "Task workspace detach failed");
   }

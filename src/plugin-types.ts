@@ -178,7 +178,21 @@ export type TaskPlanContext = Omit<BindContext, "continued"> & {
   baseCommit: string;
 };
 export type TaskAttachContext = Omit<BindContext, "continued"> & Pick<AttachContext, "receipt" | "receipts" | "plan">;
-export type TaskAttachment = CoordinatorAttachment & { instructions: string };
+/** What a task checkout holds right now, read from the checkout itself (never from the plan, the receipt or the requested commit). */
+export type TaskCheckoutState = {
+  /** The full commit the mounted checkout is at. */
+  revision: string;
+  /** No uncommitted, untracked or in-progress changes anywhere in the checkout. */
+  clean: boolean;
+};
+export type TaskAttachment = CoordinatorAttachment & {
+  instructions: string;
+  /**
+   * Reads the bound checkout's actual commit and cleanliness. The host calls it on every read turn of a scout or reviewer of a full commit, first and reused
+   * alike, and only reports a read when it returns the requested commit and `clean`. Without it, or when it throws, a reader of this provider is refused.
+   */
+  confirmRevision?(): Promise<TaskCheckoutState>;
+};
 export type SetupCard = {
   id: string;
   state: "connected" | "available" | "blocked";

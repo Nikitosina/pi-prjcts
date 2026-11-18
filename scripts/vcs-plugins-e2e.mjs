@@ -1,7 +1,7 @@
 // E2E: VCS / PR provider plugin API with a FAKE plugin (scripts/fixtures). Fake model, private HOME, browser (inbox at `/`). No real VCS, PR service, gh or live host.
 // Failure cases written first: vcs-plugins-failures.md (numbers in check labels). Artifact: artifacts/vcs-plugins-<stamp>/ (report.json, screenshots, host logs).
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createKit, call, say, randomUUID, delay } from "./lib/e2e-kit.mjs";
 
@@ -27,6 +27,19 @@ const handler = ({ role, user, results }) => {
         ...JSON.parse(delegate),
       });
     if (lookup) return call("fake_pr_lookup", { id: Number(lookup) });
+    const reviewer = /MARK-REVIEWER (\S+)/.exec(user)?.[1];
+    if (reviewer)
+      return call("agents", { action: "spawn", role: "reviewer", readRef: reviewer, requestId: randomUUID(), brief: `REVIEW ${reviewer}` });
+    const reread = /MARK-REREAD (\S+) (\S*)/.exec(user);
+    if (reread)
+      return call("agents", {
+        action: "send",
+        id: reread[1],
+        message: `REVIEW again ${reread[2] || "same"}`,
+        followUp: true,
+        requestId: randomUUID(),
+        ...(reread[2] ? { readRef: reread[2] } : {}),
+      });
     return undefined;
   }
   if (role === "worker" && user.includes("PUBLISH-FAKE") && results.length === 0) return call("fake_publish", { title: "Fake PR title" });
@@ -705,6 +718,151 @@ await kit.run(async () => {
     cleanedBack.removed.some((item) => item.path === treePath) && !existsSync(treePath),
     cleanedBack,
   );
+
+  // ---- 31-37: a reviewer's checkout of a plugin provider is confirmed from the checkout itself ----
+  {
+    const [A, B, C, D, E] = ["b", "c", "d", "e", "f"].map((letter) => letter.repeat(40));
+    const treeRoot = `${checkout}-worktrees`;
+    // The reports the Coordinator received, one per report ref (the chat view clips old messages).
+    const chatText = async () =>
+      result.calls
+        .filter((item) => item.role === "coordinator" && /^\[reviewer /.test(item.user))
+        .map((item) => item.user)
+        .join("\n--\n");
+    const CONFIRMED = "confirmed in its checkout before the review began; not locked, and not checked again after it";
+    const count = async (needle) =>
+      new Set(
+        result.calls
+          .filter((item) => item.role === "coordinator" && item.user.includes(needle))
+          .map((item) => /Report ref: (\d+)/.exec(item.user)?.[1]),
+      ).size;
+    const reads = (sha) => count(`Read revision: ${sha}`);
+    const confirmedReads = (sha) => count(`Read revision: ${sha}, ${CONFIRMED}.`);
+    const misses = (sha) => count(`Revision ${sha} was not read.`);
+    const checkoutsOf = (sha) =>
+      readdirSync(treeRoot).filter(
+        (name) =>
+          name.startsWith("fake-task-") &&
+          existsSync(join(treeRoot, name, ".fake-revision")) &&
+          readFileSync(join(treeRoot, name, ".fake-revision"), "utf8").trim() === sha,
+      );
+    const reviewers = async () => (await rpc({ action: "jobs-snapshot", id })).agents.filter((agent) => agent.role === "reviewer");
+    // One turn: ask, then wait until the reviewer's report names the commit (read) or says it was not read.
+    const turn = async (message, sha) => {
+      const before = (await reads(sha)) + (await misses(sha));
+      await kit.ask(id, message);
+      await kit.waitFor(async () => (await reads(sha)) + (await misses(sha)) > before, `report for ${sha.slice(0, 7)}`, { timeout: 60000 });
+    };
+    const send = (agent, sha) => turn(`MARK-REREAD ${agent.id} ${sha}`, sha);
+
+    await turn(`MARK-REVIEWER ${A}`, A);
+    const first = (await reviewers())[0];
+    check(
+      "31 a clean reader checkout at the requested commit is reported as read",
+      (await reads(A)) === 1 && (await confirmedReads(A)) === 1 && checkoutsOf(A).length === 1,
+      await chatText(),
+    );
+    await send(first, B);
+    check(
+      "32 the same reviewer reads B in a checkout of its own; A's checkout and report stay at A",
+      (await reads(B)) === 1 &&
+        (await reads(A)) === 1 &&
+        checkoutsOf(A).length === 1 &&
+        checkoutsOf(B).length === 1 &&
+        (await reviewers()).length === 1,
+      { a: checkoutsOf(A), b: checkoutsOf(B), agents: (await reviewers()).length },
+    );
+    await send(first, A);
+    check("32 reading A again reuses its checkout and says so", (await reads(A)) === 2 && checkoutsOf(A).length === 1, await chatText());
+
+    // 33/34: a reused checkout changed after its first report: another commit, then extra files.
+    const [bDir] = checkoutsOf(B);
+    writeFileSync(join(treeRoot, bDir, ".fake-revision"), C);
+    await send(first, B);
+    check(
+      "33 a reused checkout at another commit is not read and its report does not name B or C",
+      (await misses(B)) === 1 && (await reads(B)) === 1 && (await reads(C)) === 0,
+      await chatText(),
+    );
+    writeFileSync(join(treeRoot, bDir, ".fake-revision"), B);
+    writeFileSync(join(treeRoot, bDir, "stray.txt"), "edited after the report");
+    await send(first, B);
+    check(
+      "34 a reused checkout with extra files is not read or reported as the commit",
+      (await misses(B)) === 2 && (await reads(B)) === 1,
+      await chatText(),
+    );
+    rmSync(join(treeRoot, bDir, "stray.txt"));
+    await send(first, B);
+    check("34 once restored, the same checkout is read and reported again", (await reads(B)) === 2, await chatText());
+
+    // 35: the provider materialized another commit than the plan on the first read.
+    patchData((data) => {
+      data.taskCheckoutRevision = C;
+    });
+    await turn(`MARK-REVIEWER ${D}`, D);
+    check(
+      "35 an initial checkout at another commit than requested is not reported as read",
+      (await reads(D)) === 0 && (await misses(D)) === 1 && (await reads(C)) === 0,
+      await chatText(),
+    );
+    // 36: a provider that cannot confirm the revision.
+    patchData((data) => {
+      delete data.taskCheckoutRevision;
+      data.noConfirmRevision = true;
+    });
+    await turn(`MARK-REVIEWER ${E}`, E);
+    check(
+      "36 a provider that cannot confirm the revision never gets a read reported",
+      (await reads(E)) === 0 && (await misses(E)) === 1,
+      await chatText(),
+    );
+    patchData((data) => {
+      delete data.noConfirmRevision;
+    });
+    // 37: the first reviewer is unaffected by the other reviewers' failures.
+    await send(first, B);
+    check(
+      "37 a reviewer keeps reading clean checkouts after others failed",
+      (await reads(B)) === 3 && (await reads(C)) === 0,
+      await chatText(),
+    );
+  }
+
+  // ---- 38: a provider that rejects with an empty message is a failure, not a success ----
+  {
+    const F = "9".repeat(40);
+    const G = "8".repeat(40);
+    const CONFIRMED = "confirmed in its checkout before the review began; not locked, and not checked again after it";
+    const reviewerCalls = (sha) => result.calls.filter((item) => item.role === "reviewer" && item.user.includes(`REVIEW ${sha}`)).length;
+    const reportsFor = (sha) =>
+      result.calls
+        .filter((item) => item.role === "coordinator" && /^\[reviewer /.test(item.user) && item.user.includes(sha))
+        .map((item) => item.user);
+    const settled = async (sha) => {
+      await kit.ask(id, `MARK-REVIEWER ${sha}`);
+      await kit.waitFor(async () => reportsFor(sha).length > 0, `report for ${sha.slice(0, 7)}`, { timeout: 60000 });
+    };
+    patchData((data) => {
+      data.confirmFailure = "";
+    });
+    await settled(F);
+    const failed = reportsFor(F).join("\n");
+    check(
+      "38 a provider rejecting with an empty message fails the reviewer: no read, no attested revision, readable report",
+      reviewerCalls(F) === 0 && !failed.includes(`Read revision`) && /failed to start/.test(failed) && /no message/i.test(failed),
+      failed,
+    );
+    patchData((data) => {
+      delete data.confirmFailure;
+    });
+    await settled(G);
+    check(
+      "38 the same provider without the failure is read and reported",
+      reviewerCalls(G) === 1 && reportsFor(G).some((text) => text.includes(`Read revision: ${G}, ${CONFIRMED}.`)),
+      reportsFor(G),
+    );
+  }
 
   // ---- 24: the core tree is provider-neutral ----
   const forbidden = [

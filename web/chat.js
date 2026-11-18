@@ -20,6 +20,15 @@ let live = null,
   loading = null,
   held = null; // live text and thinking of a step the host just committed, shown until a transcript read that includes it renders
 const expanded = new Set(); // tool callIds and group keys the owner opened
+const revealed = new Set(); // long owner messages opened during this chat visit, keyed by transcript scope; they stay open until the owner navigates away
+const CHAT_SCOPE = "msg:"; // the coordinator chat's keys have no scope prefix
+let renderScope = ""; // the transcript `transcriptHtml` is drawing: "" for the chat, `w:<id>|` for a worker, `host|` for the Host agent
+
+/** Collapses again the messages of one transcript scope (a worker or the Host agent being opened); `root` is its retained DOM, if any. */
+export function forgetReveals(scope, root) {
+  for (const key of [...revealed]) if (key.startsWith(scope)) revealed.delete(key);
+  for (const hint of root?.querySelectorAll('.msg-more[aria-expanded="true"]') ?? []) hint.setAttribute("aria-expanded", "false");
+}
 const reportPattern = /^\[(worker|scout|reviewer) ([0-9a-f-]{36}) ([\w-]+(?: to start)?): ([^\]\n]*)\]([\s\S]*)$/;
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/;
 
@@ -62,6 +71,7 @@ on("select", () => {
   olderGroups = null;
   follow.follow();
   expanded.clear();
+  for (const key of revealed) if (key.startsWith(CHAT_SCOPE)) revealed.delete(key);
   feed.replaceChildren();
   document.querySelector("#questions").replaceChildren();
   state.live = null;
@@ -170,6 +180,25 @@ function failureHtml() {
 }
 /** Where this chat's images come from (see media.js). */
 const mediaSource = () => (state.projectId ? { project: state.projectId, chatId: state.chatId } : null);
+// An owner message clamps to CLAMP_LINES once it runs past ENGAGE_LINES, so opening it always reveals more than the hint costs (see .msg-body).
+const ENGAGE_LINES = 8,
+  CLAMP_LINES = 6; // keep in step with `max-height` of .msg-body in styles.css
+const messageSizes = new ResizeObserver((entries) => entries.forEach(({ target }) => measureMessage(target)));
+/** Marks the message whose text overflows the clamp (`data-overflow`); a hidden transcript keeps the mark it had. */
+function measureMessage(body) {
+  const article = body.closest(".msg");
+  if (!article || !body.getClientRects().length) return;
+  const line = parseFloat(getComputedStyle(body).lineHeight) || 21;
+  if (body.scrollHeight > line * ENGAGE_LINES) article.dataset.overflow = "1";
+  else delete article.dataset.overflow;
+}
+function watchMessages(parent) {
+  for (const body of parent.querySelectorAll(".msg-body:not([data-watched])")) {
+    body.dataset.watched = "1";
+    measureMessage(body);
+    messageSizes.observe(body);
+  }
+}
 /** Replaces children while keeping nodes whose key and html did not change, so rows only animate in when they are new. */
 export function morph(parent, html) {
   const next = document.createElement("div");
@@ -188,6 +217,7 @@ export function morph(parent, html) {
     const at = parent.children[index];
     if (at !== node) parent.insertBefore(node, at ?? null);
   });
+  watchMessages(parent);
 }
 
 const PROGRESS = { collecting: 0, pending: 1, ready: 2, failed: 2 };
@@ -204,10 +234,15 @@ export function mergeGroups(older, newer) {
 }
 /** Turn sections for a list of transcript items (also used for worker transcripts in the center). `groups` are the host's tool
  * groups of the loaded calls (`{ groups, calls }`); they show only while the owner has summaries on. */
-export function transcriptHtml(items, busy, who = "Coordinator", { fold = true, groups = null } = {}) {
+export function transcriptHtml(items, busy, who = "Coordinator", { fold = true, groups = null, scope = "" } = {}) {
   const all = Array.isArray(items[0]?.items) ? items : turns(items);
   const shown = state.ui?.toolSummaries?.enabled ? groups : null;
-  return all.map((turn, index) => turnHtml(turn, busy && index === all.length - 1, who, fold, shown)).join("");
+  renderScope = scope;
+  try {
+    return all.map((turn, index) => turnHtml(turn, busy && index === all.length - 1, who, fold, shown)).join("");
+  } finally {
+    renderScope = "";
+  }
 }
 function turnHtml(turn, liveTurn, who, fold = true, groups = null) {
   const { start } = turn,
@@ -254,7 +289,9 @@ function turnHtml(turn, liveTurn, who, fold = true, groups = null) {
   }
   flush();
   const html = head + body.map((part) => (typeof part === "string" ? part : summaryHtml(part, runHtml))).join("");
-  return `<section class="turn${liveTurn ? " live" : ""}" data-key="${esc(key)}" data-sig="${hash(html + liveTurn)}">${html}</section>`;
+  // A message opens in place, so its state stays out of the signature: the turn is kept, with its focus and selection.
+  const sigHtml = html.replace(/(class="msg-more"[^>]*aria-expanded=)"true"/g, '$1"false"');
+  return `<section class="turn${liveTurn ? " live" : ""}" data-key="${esc(key)}" data-sig="${hash(sigHtml + liveTurn)}">${html}</section>`;
 }
 function hash(text) {
   let h = 0;
@@ -262,21 +299,29 @@ function hash(text) {
   return String(h);
 }
 const approvalPattern = /^\[approval ([0-9a-f-]{36})\] The owner (approved|denied) "([^"]*)" \(([\w-]+)\)(, and it failed)?/;
+/** An owner bubble whose long text clamps (`measureMessage` marks the overflow) and is revealed for the rest of the chat visit by a click or the hint button. */
+function ownerMessageHtml(message, className, who, text) {
+  const meta = `<div class="msg-meta"><span class="who">${who}</span>${who === "Earlier input" ? "" : `<time>${esc(clock(message.at))}</time>`}</div>`;
+  if (message.entryId == null)
+    return `<article class="${className}">${meta}<div class="bubble">${markdown(text)}${imagesHtml(message.images)}</div></article>`;
+  const key = `${renderScope}msg:${message.entryId}`,
+    open = revealed.has(key);
+  const hint = `<button type="button" class="msg-more" data-reveal="${esc(key)}" aria-expanded="${open}">Show more ▾ · ${text.length.toLocaleString("en-US")} chars</button>`;
+  return `<article class="${className}">${meta}<div class="bubble"><div class="msg-body" tabindex="-1">${markdown(text)}</div>${imagesHtml(message.images)}</div>${hint}</article>`;
+}
 function inputHtml(message, who = "Coordinator") {
   const text = message.text ?? "";
   const approval = message.origin !== "owner" ? approvalPattern.exec(text) : null;
   if (approval) return approvalRowHtml(approval);
-  if (who !== "Coordinator" && message.origin !== "owner")
-    return `<article class="msg owner brief"><div class="msg-meta"><span class="who">Brief</span><time>${esc(clock(message.at))}</time></div><div class="bubble">${markdown(text)}${imagesHtml(message.images)}</div></article>`;
-  if (message.origin === "owner")
-    return `<article class="msg owner"><div class="msg-meta"><span class="who">You</span><time>${esc(clock(message.at))}</time></div><div class="bubble">${markdown(text)}${imagesHtml(message.images)}</div></article>`;
+  if (who !== "Coordinator" && message.origin !== "owner") return ownerMessageHtml(message, "msg owner brief", "Brief", text);
+  if (message.origin === "owner") return ownerMessageHtml(message, "msg owner", "You", text);
   const report = reportPattern.exec(text);
   if (report) return reportRowHtml(message, report);
   const event = /^\[Owner-local event ([\w.-]+)\]\n/.exec(text);
   if (event) return `<div class="sys-row"><span class="sys-icon" aria-hidden="true">⚑</span>Event <code>${esc(event[1])}</code></div>`;
   if (message.origin === "internal")
     return `<div class="sys-row muted"><span class="sys-icon" aria-hidden="true">↻</span>${esc(clip(oneLine(text), 120))}</div>`;
-  return `<article class="msg owner earlier-input"><div class="msg-meta"><span class="who">Earlier input</span></div><div class="bubble">${markdown(text)}${imagesHtml(message.images)}</div></article>`;
+  return ownerMessageHtml(message, "msg owner earlier-input", "Earlier input", text);
 }
 /** The outcome the host posts back after an owner decision (`[approval <id>] The owner …`), as one row instead of a bubble. */
 function approvalRowHtml([, id, decision, summary, action, failed]) {
@@ -589,8 +634,47 @@ export function toggleSteer() {
 
 // ---------------------------------------------------------------------------------------------------------------- clicks
 
+/** The hint of the collapsed owner message a plain click landed on; null for links, buttons, images, a selection, revealed and unclamped messages. */
+function collapsedMessageHint(event) {
+  const article = event.target.closest(".msg[data-overflow]");
+  if (!article || event.target.closest("a, button, summary, input, textarea, select, img, [data-media]")) return null;
+  const selection = getSelection();
+  if (selection && !selection.isCollapsed && selection.containsNode(article, true)) return null;
+  const hint = article.querySelector(".msg-more");
+  return hint?.getAttribute("aria-expanded") === "false" ? hint : null;
+}
+
+/** Reveals an owner message in place (`aria-expanded` drives the CSS), so selection and scroll stay where they are. There is no way back until the next chat visit. */
+function revealMessage(hint, follow) {
+  revealed.add(hint.dataset.reveal);
+  follow?.stop();
+  hint.setAttribute("aria-expanded", "true");
+  // The hint disappears with the reveal, so a keyboard user's focus moves into the text.
+  if (hint === document.activeElement) hint.closest(".msg").querySelector(".msg-body").focus({ preventScroll: true });
+}
+/** Whether a point is on text the clamp shows; a link below it is hidden. */
+function insideClamp(article, y) {
+  const body = article.querySelector(".msg-body");
+  return y < body.getBoundingClientRect().top + parseFloat(getComputedStyle(body).lineHeight) * CLAMP_LINES;
+}
+/** Keyboard focus reaching a link the clamp hides reveals the message instead of leaving focus on invisible text; `follow` is the transcript's follower. */
+export function transcriptFocus({ target }, follow) {
+  const body = target.closest?.(".msg[data-overflow] .msg-body"),
+    hint = body?.closest(".msg").querySelector(".msg-more");
+  if (!hint || hint.getAttribute("aria-expanded") !== "false") return;
+  // Focusing scrolls the clipped body to the link, so its position is taken from the unscrolled top.
+  if (insideClamp(body.closest(".msg"), target.getBoundingClientRect().top + body.scrollTop)) return;
+  revealMessage(hint, follow);
+  target.scrollIntoView({ block: "nearest" });
+}
+
 /** Clicks inside any transcript (chat feed, a worker in the center, the Host agent); `rerender` repaints that transcript, `follow` is its follower. */
 export async function transcriptClick(event, root, rerender, follow) {
+  const hint = event.target.closest(".msg-more") ?? collapsedMessageHint(event);
+  if (hint) {
+    revealMessage(hint, follow);
+    return true;
+  }
   const toggle = event.target.closest("[data-toggle]");
   if (toggle) {
     const key = toggle.dataset.toggle,
@@ -641,6 +725,7 @@ export async function transcriptClick(event, root, rerender, follow) {
   }
   return false;
 }
+feed.addEventListener("focusin", (event) => transcriptFocus(event, follow));
 feed.addEventListener("click", async (event) => {
   const starter = event.target.closest("[data-starter]");
   if (starter) {
