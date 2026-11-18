@@ -21,6 +21,7 @@ let live = null,
   held = null; // live text and thinking of a step the host just committed, shown until a transcript read that includes it renders
 const expanded = new Set(); // tool callIds and group keys the owner opened
 const revealed = new Set(); // long owner messages opened during this chat visit, keyed by transcript scope; they stay open until the owner navigates away
+const CHAT_SCOPE = "msg:"; // the coordinator chat's keys have no scope prefix
 let renderScope = ""; // the transcript `transcriptHtml` is drawing: "" for the chat, `w:<id>|` for a worker, `host|` for the Host agent
 
 /** Collapses again the messages of one transcript scope (a worker or the Host agent being opened); `root` is its retained DOM, if any. */
@@ -70,7 +71,7 @@ on("select", () => {
   olderGroups = null;
   follow.follow();
   expanded.clear();
-  revealed.clear();
+  for (const key of revealed) if (key.startsWith(CHAT_SCOPE)) revealed.delete(key);
   feed.replaceChildren();
   document.querySelector("#questions").replaceChildren();
   state.live = null;

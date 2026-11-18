@@ -32,12 +32,13 @@ const HOST_SCOPE = "host|"; // the Host agent's reveal scope in chat.js
 export const isOpen = () => drawer.dataset.open === "1";
 
 export function toggleHostAgent(force, { at } = {}) {
-  const next = force ?? !isOpen();
+  const next = force ?? !isOpen(),
+    opening = next && !isOpen();
   drawer.dataset.open = next ? "1" : "0";
   drawer.setAttribute("aria-hidden", String(!next));
   drawer.inert = !next;
+  if (opening) forgetReveals(HOST_SCOPE, body);
   if (next) {
-    forgetReveals(HOST_SCOPE, body);
     void loadHostAgent();
     if (at === "approvals") setTimeout(() => approvalsBox.querySelector("button")?.focus(), 60);
     else setTimeout(() => input.focus(), 30);
