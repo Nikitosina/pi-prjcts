@@ -878,6 +878,7 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
         const state = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
         const agent = state.agents[reporter.input.agentId];
         if (agent && endedJobAgent(state, agent) && (agent.sends ?? 0) <= (reporter.input.seq ?? 0)) agent.endedAt = Date.now();
+        await settleTurn(tx, reporter.input.agentId, reporter.input.seq ?? 0);
         return { status: "terminal", outcome: { status: "aborted" } };
       }, taskContext),
   });
@@ -1576,6 +1577,8 @@ export function createJobs(host: JobsHost) {
       const now = clock();
       if (job) Object.assign(job, { status: "stopped", reason, endedAt: now, stalledAt: null, resume: null });
       if (!helper) agent.endedAt = now;
+      // A reader's turn stopped before its checkout was prepared reads nothing, so the next plain send must not inherit its commit.
+      for (const turn of agent.reads ?? []) if (!turn.state) turn.state = "failed";
       return { conversationId: agent.conversationId, helper };
     }, context);
     if (!target.conversationId) return target.text!;

@@ -1445,13 +1445,34 @@ assert.deepEqual(await jobs.stallTick(harness, T + 21 * 60_000), [gate.id], "an 
   await say_(root, `Resend ${reviewer.id} ${REV_A} abandoned`);
   await until(() => prepareRuns.length > abandonedRuns, "held prepare of the abandoned turn");
   await say_(root, `Stopit ${reviewer.id}`);
+  await say_(root, `Resend ${reviewer.id} - at-once`);
   prepareHeld.delete("BRIEF-REVREAD");
   await quiet(harness);
+  assert.equal(readerSaw, REV_B, "V12 a plain send right after the stop does not inherit the abandoned commit");
   await say_(root, `Resend ${reviewer.id} - after-abandon`);
   await quiet(harness);
   assert.equal(readerSaw, REV_B, "V5 a stopped, never prepared turn does not become the reviewer's commit");
   const abandoned = await reportsOf(reviewer);
   assert.match(abandoned.at(-1), new RegExp(`Read revision: ${REV_B}`));
+
+  // V10: a pause aborts the reporter of a turn in flight; after the resume the reviewer still takes a new commit.
+  const pausedRuns = prepareRuns.length;
+  prepareHeld.add("BRIEF-REVREAD");
+  await say_(root, `Resend ${reviewer.id} - paused-turn`);
+  await until(() => prepareRuns.length > pausedRuns, "held prepare before pause");
+  await jobs.pause(harness);
+  const aborting = root.abort(context, { background: true });
+  await delay(100);
+  prepareHeld.delete("BRIEF-REVREAD");
+  await aborting;
+  await quiet(harness);
+  await jobs.resume(harness);
+  await quiet(harness);
+  await say_(root, `Resend ${reviewer.id} - after-pause`);
+  await quiet(harness);
+  await say_(root, `Resend ${reviewer.id} ${REV_C} paused-new`);
+  await quiet(harness);
+  assert.equal(readerSaw, REV_C, "V10 a pause that aborted a turn does not shut the reviewer's commit for good");
 
   // V5: an older message still being prepared keeps the commit shut even when a newer one has been reported.
   holdNextPrepare = true;
