@@ -577,7 +577,9 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
             });
         } catch (error) {
           if (runtime.signal.aborted) throw error;
-          failure = (error instanceof Error ? error.message : String(error)) || "Workspace preparation failed with no message";
+          failure =
+            (error instanceof Error ? error.message : typeof error === "string" ? error : "") ||
+            "Workspace preparation failed with no message";
         }
         await runtime.commit(async (tx) => {
           const state = await tx.doc(Jobs, ROOT_CONVERSATION_ID);

@@ -736,7 +736,8 @@ await kit.run(async () => {
           .filter((item) => item.role === "coordinator" && item.user.includes(needle))
           .map((item) => /Report ref: (\d+)/.exec(item.user)?.[1]),
       ).size;
-    const reads = (sha) => count(`Read revision: ${sha}, ${CONFIRMED}.`);
+    const reads = (sha) => count(`Read revision: ${sha}`);
+    const confirmedReads = (sha) => count(`Read revision: ${sha}, ${CONFIRMED}.`);
     const misses = (sha) => count(`Revision ${sha} was not read.`);
     const checkoutsOf = (sha) =>
       readdirSync(treeRoot).filter(
@@ -758,7 +759,7 @@ await kit.run(async () => {
     const first = (await reviewers())[0];
     check(
       "31 a clean reader checkout at the requested commit is reported as read",
-      (await reads(A)) === 1 && checkoutsOf(A).length === 1,
+      (await reads(A)) === 1 && (await confirmedReads(A)) === 1 && checkoutsOf(A).length === 1,
       await chatText(),
     );
     await send(first, B);
