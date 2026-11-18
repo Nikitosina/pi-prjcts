@@ -2630,7 +2630,6 @@ const journeys = {
     const withPanel = mine.filter((item) => status.web.some((entry) => entry.plugin === item.name && entry.script));
     // The Plugins list lives in Settings, which the steps above already opened.
     await page.waitFor(`document.querySelector('#settings').open`, "Settings open");
-    await page.click('#settings nav [data-section="plugins"]');
     await page.waitFor(
       `${JSON.stringify(withPanel.map((item) => item.name))}.every((name) => { const panel = document.querySelector('#settings .plugin-panel[data-plugin="' + name + '"]'); return !panel || ['ready', 'failed'].includes(panel.dataset.state); })`,
       "plugin panels settled",
