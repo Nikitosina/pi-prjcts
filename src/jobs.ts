@@ -575,7 +575,7 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
             });
         } catch (error) {
           if (runtime.signal.aborted) throw error;
-          failure = error instanceof Error ? error.message : String(error);
+          failure = (error instanceof Error ? error.message : String(error)) || "Workspace preparation failed with no message";
         }
         await runtime.commit(async (tx) => {
           const state = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
@@ -583,7 +583,7 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
           const job = agent?.jobId ? state.jobs[agent.jobId] : undefined;
           if (!agent || state.paused || agent.endedAt !== null || (job && job.status !== "running"))
             return { status: "running", checkpoint: { phase: "report" } } as const;
-          if (!failure) {
+          if (failure === null) {
             if (change?.readHead) agent.readHead = change.readHead;
             if (change) {
               const { prompt, readHead: _readHead, ...built } = change;
