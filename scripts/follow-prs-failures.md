@@ -46,6 +46,7 @@ When Follow PRs sees a PR become merged (whoever merged it), the host fast-forwa
 24. One merge pulls more than once: on the next poll, on a replayed pending batch, or once per item instead of once per transition.
 25. Two pulls of the same checkout run at once (two merges, or Follow PRs and Approve together), so one fails on git's lock.
 26. A provider whose follow state has no base branch (the Arc plugin) pulls nothing or the wrong branch: the base comes from the merge provider's `inspect`.
+31. A merge whose pull was skipped (dirty checkout, other branch, failure) leaves the checkout behind forever: it must be retried each poll, say so once when it succeeds, stay silent and untouched while it still cannot pull, and never repeat.
 
 ## A GitHub write with an unknown outcome (owner request 2026-11-12)
 A GitHub write whose outcome is unknown (`uncertain` in `projects.github-writes`) blocks automatic admission, so Follow PRs cannot deliver its batch. In Mari two such writes for PRs merged weeks earlier (their bodies had no marker) kept the first batch pending for five days: every poll replayed it, failed, and read nothing new, and nothing showed why.

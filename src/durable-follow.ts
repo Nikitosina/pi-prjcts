@@ -437,8 +437,34 @@ export function followRuntime(
             .catch((error): MainPull => ({ pulled: false, reason: clip(error instanceof Error ? error.message : String(error), 200) })));
         if (once) shared.set(once, outcome);
         pulls.set(key, describeMainPull(outcome));
+        if (!outcome.pulled) repoStates[merge.repositoryId].prs[merge.number].pullSkipped = true;
         if (!items.some((item) => item.id.startsWith(`${key}:merged:`) || item.id === `${key}:opened`))
           items.push({ id: `${key}:merged:${merge.head}`, line: `PR #${merge.number} “${clip(merge.title, 120)}” merged` });
+      }
+      // A skipped pull is retried while the PR stays in the state, so a checkout cleaned up later still catches up; only success speaks.
+      for (const [repositoryId, repo] of Object.entries(repoStates)) {
+        const prior = own(state.repos, repositoryId);
+        for (const [number, pr] of Object.entries(repo.prs)) {
+          const was = own(prior?.prs ?? {}, number);
+          if (!was?.pullSkipped || pr.state !== "merged") continue;
+          const key = `${repositoryId}#${number}`,
+            once = pr.base ? `${repositoryId}\n${pr.base}` : null;
+          const outcome =
+            (once && shared.get(once)) ||
+            (await fixer
+              .pullMain({ repositoryId, pr: Number(number), base: pr.base || undefined, signal: controller.signal })
+              .catch((error): MainPull => ({ pulled: false, reason: clip(error instanceof Error ? error.message : String(error), 200) })));
+          if (once) shared.set(once, outcome);
+          if (!outcome.pulled) {
+            pr.pullSkipped = true;
+            continue;
+          }
+          delete pr.pullSkipped;
+          items.push({
+            id: `${key}:pulled:${pr.head}`,
+            line: `PR #${number} “${clip(pr.title, 120)}” merged earlier — ${describeMainPull(outcome).replace("main checkout pulled", "main checkout pulled now")}`,
+          });
+        }
       }
       if (isClosed() || controller.signal.aborted) return { skipped: "closed" };
       const target = await fixer.target(),

@@ -769,9 +769,9 @@ try {
   await poll();
   await settleAll();
   const lastLine = async () => (await events()).at(-1).text;
-  const pullsBefore = pulls().length,
-    headBefore = git(workspace, "rev-parse", "HEAD");
-  land("merge-9");
+  let pullsBefore = pulls().length;
+  const headBefore = git(workspace, "rev-parse", "HEAD");
+  const landed9 = land("merge-9");
   writeFileSync(join(workspace, "scratch.txt"), "owner work\n");
   ghSet((state) => Object.assign(pull(state, 9), { state: "closed", merged: true }));
   await poll();
@@ -792,9 +792,32 @@ try {
     git(workspace, "rev-parse", "HEAD") !== headBefore
   )
     throw Error("Other branch not skipped: " + side);
+  const stillSkipped = await poll();
+  if (stillSkipped.result.events || git(workspace, "rev-parse", "HEAD") !== headBefore)
+    throw Error("A retry of a skipped pull spoke or moved a checkout that is still on another branch: " + JSON.stringify(stillSkipped));
   git(workspace, "checkout", "-q", "main");
   result.checks.push("P2/P3 a dirty checkout or one on another branch stays as it is; the event says why it was not pulled");
   await settleAll();
+  // P7: skipped pulls are retried once the checkout is clean on the base again, announced once, with no new merge to trigger it.
+  const retried = await poll();
+  const retryLine = await lastLine();
+  if (
+    !retried.result.events ||
+    git(workspace, "rev-parse", "HEAD") !== landed9 ||
+    !retryLine.includes("PR #9 “Dirty merge” merged earlier — main checkout pulled now") ||
+    !retryLine.includes("PR #10 “Side merge” merged earlier — main checkout pulled now")
+  )
+    throw Error(
+      "A skipped pull was not retried: " + JSON.stringify({ retried, head: git(workspace, "rev-parse", "HEAD"), landed9, retryLine }),
+    );
+  const afterRetry = pulls().length;
+  await poll();
+  if (pulls().length !== afterRetry || (await lastLine()) !== retryLine) throw Error("A retried pull repeated on the next poll");
+  result.checks.push(
+    "P7 a pull skipped for a dirty or other-branch checkout is retried once it is clean on the base; announced once, then idempotent",
+  );
+  await settleAll();
+  pullsBefore = pulls().length;
   git(workspace, "config", "--unset", `url.${bare}.insteadOf`);
   git(workspace, "config", `url.${join(root, "missing.git")}.insteadOf`, "https://github.com/acme/mari.git");
   ghSet((state) => Object.assign(pull(state, 11), { state: "closed", merged: true }));
