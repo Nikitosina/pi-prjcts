@@ -27,7 +27,7 @@ await kit.run(async () => {
   await setTheme("light");
   const page = await kit.openPage("about:blank");
   await page.cdp("Page.addScriptToEvaluateOnNewDocument", {
-    source: `window.__atBody = null; new MutationObserver(() => { if (document.body && window.__atBody === null) window.__atBody = document.documentElement.dataset.theme ?? ''; }).observe(document, { childList: true, subtree: true });`,
+    source: `window.__atBody = null; window.__chatAtBody = null; new MutationObserver(() => { if (document.body && window.__atBody === null) { window.__atBody = document.documentElement.dataset.theme ?? ''; window.__chatAtBody = document.documentElement.dataset.chatSize ?? ''; } }).observe(document, { childList: true, subtree: true });`,
   });
   const url = await kit.webUrl(id);
   await page.navigate(url);
@@ -282,16 +282,21 @@ await kit.run(async () => {
     [small, base, large].every((p) => p.overflow && p.bodyHeight <= p.lineHeight * 6 + 1),
     { small, base, large },
   );
-  await page.evaluate(`document.querySelector('[data-reveal]:not([aria-expanded="true"])')?.click()`);
+  const reveal = `[...document.querySelectorAll('#feed .msg.owner')].find((n) => n.textContent.includes('LONG-START'))`;
+  await page.evaluate(`${reveal}.querySelector('.msg-more').click()`);
+  await page.waitFor(`${reveal}.querySelector('.msg-more').getAttribute('aria-expanded') === 'true'`, "long message revealed");
   check(
-    "C4 Show more still opens the long message at the larger size",
-    await page.evaluate(`!!document.querySelector('.msg.owner .msg-more[aria-expanded="true"]')`),
+    "C4 Show more opens the whole long message at the larger size",
+    await page.evaluate(
+      `(() => { const body = ${reveal}.querySelector('.msg-body'); return body.getBoundingClientRect().height > parseFloat(getComputedStyle(body).lineHeight) * 12; })()`,
+    ),
   );
   await page.reload();
   await page.waitFor(`document.body.dataset.ready === "1"`, "reloaded with large text");
   check(
     "C5 the chosen size survives a reload and is set before <body> is inserted",
     (await page.evaluate(`window.__atBody`)) === "midnight" &&
+      (await page.evaluate(`window.__chatAtBody`)) === "large" &&
       (await probe()).size === "large" &&
       (await rpc({ action: "ui-get" })).ui.chatTextSize === "large",
   );

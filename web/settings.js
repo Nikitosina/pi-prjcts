@@ -931,7 +931,7 @@ async function appearance(body, alive) {
   ).join("");
   await Promise.all(APPEARANCE_PARTS.map((part) => part.render(body.querySelector(`[data-part="${part.id}"] .appearance-body`), alive)));
 }
-function theme(body) {
+function theme(body, alive) {
   const current = state.ui?.theme ?? "claude",
     font = state.ui?.font ?? "jetbrains-mono",
     size = state.ui?.chatTextSize ?? "default";
@@ -943,7 +943,6 @@ function theme(body) {
     if (sizePick) {
       const choice = CHAT_SIZES.find((item) => item.id === sizePick.dataset.chatSizeOption);
       void setUi({ chatTextSize: choice.id }).then((ok) => ok && say(`Chat text size: ${choice.label}`));
-      body.querySelectorAll("[data-chat-size-option]").forEach((node) => node.setAttribute("aria-checked", String(node === sizePick)));
     }
     if (pick) {
       void setUi({ theme: pick.dataset.themeOption }).then((ok) => ok && say(`Theme: ${pick.querySelector("b").textContent}`));
@@ -954,6 +953,13 @@ function theme(body) {
       void setUi({ font: fontPick.dataset.fontOption }).then((ok) => ok && say(`Font: ${choice.label}`));
       body.querySelectorAll("[data-font-option]").forEach((node) => node.setAttribute("aria-checked", String(node === fontPick)));
     }
+  });
+  // The checkmark follows the applied setting, so a refused save or a change from the Host agent shows what chat really uses.
+  const off = on("ui", (ui) => {
+    if (!alive()) return off();
+    body
+      .querySelectorAll("[data-chat-size-option]")
+      .forEach((node) => node.setAttribute("aria-checked", String(node.dataset.chatSizeOption === ui.chatTextSize)));
   });
 }
 function animations(body) {
