@@ -171,7 +171,8 @@ function failureHtml() {
 /** Where this chat's images come from (see media.js). */
 const mediaSource = () => (state.projectId ? { project: state.projectId, chatId: state.chatId } : null);
 // An owner message clamps to CLAMP_LINES once it runs past ENGAGE_LINES, so opening it always reveals more than the hint costs (see .msg-body).
-const ENGAGE_LINES = 8;
+const ENGAGE_LINES = 8,
+  CLAMP_LINES = 6; // keep in step with `max-height` of .msg-body in styles.css
 const messageSizes = new ResizeObserver((entries) => entries.forEach(({ target }) => measureMessage(target)));
 /** Marks the message whose text overflows the clamp (`data-overflow`); a hidden transcript keeps the mark it had. */
 function measureMessage(body) {
@@ -629,9 +630,7 @@ function clampedMessageHint(event) {
   return article.querySelector(".msg-more");
 }
 
-const DOUBLE_CLICK_MS = 300;
-let messageClick = null, // the message the current click sequence started on, and whether it was open
-  pendingClose = null; // a collapse by a click on the text waits out a possible double click, which would select a word instead
+let messageClick = null; // the message the current click sequence started on, and whether it was open
 /** Opens or closes an owner message in place (`aria-expanded` drives the CSS), so selection, focus and scroll stay where they are. */
 function setMessageOpen(hint, open, follow) {
   const key = hint.dataset.toggle;
@@ -640,30 +639,35 @@ function setMessageOpen(hint, open, follow) {
   follow?.stop();
   hint.setAttribute("aria-expanded", String(open));
 }
+/** Whether a point is on text a collapse keeps in place; a click below the clamp would hide the text a double click then selects. */
+function insideClamp(article, y) {
+  const body = article.querySelector(".msg-body");
+  return y < body.getBoundingClientRect().top + parseFloat(getComputedStyle(body).lineHeight) * CLAMP_LINES;
+}
 function toggleMessage(hint, event, follow) {
   const key = hint.dataset.toggle;
   if (event.detail > 1) {
-    // The later clicks of a double or triple click select words: drop a collapse still waiting, undo an open already done.
-    if (pendingClose?.key === key) {
-      clearTimeout(pendingClose.timer);
-      pendingClose = null;
-    } else if (messageClick?.key === key) setMessageOpen(hint, messageClick.was, follow);
+    // The later clicks of a double or triple click select words: undo the toggle the first click made.
+    if (messageClick?.key === key) setMessageOpen(hint, messageClick.was, follow);
     return;
   }
-  clearTimeout(pendingClose?.timer);
-  pendingClose = null;
   const open = !expanded.has(key);
   messageClick = { key, was: !open };
-  if (open || hint.contains(event.target)) return setMessageOpen(hint, open, follow);
-  // The feed may repaint the turn meanwhile, so the hint is looked up again when the wait ends.
-  const timer = setTimeout(() => {
-    pendingClose = null;
-    const current = document.querySelector(`.msg-more[data-toggle="${CSS.escape(key)}"]`);
-    if (current) setMessageOpen(current, false, follow);
-    else expanded.delete(key);
-  }, DOUBLE_CLICK_MS);
-  pendingClose = { key, timer };
+  if (!open && !hint.contains(event.target) && !insideClamp(hint.closest(".msg"), event.clientY)) return;
+  setMessageOpen(hint, open, follow);
 }
+// Keyboard focus reaching a link the clamp hides opens the message instead of leaving focus on invisible text.
+document.addEventListener("focusin", ({ target }) => {
+  const article = target.closest?.(".msg[data-overflow]"),
+    hint = article?.querySelector(".msg-more");
+  if (
+    hint &&
+    target !== hint &&
+    hint.getAttribute("aria-expanded") === "false" &&
+    !insideClamp(article, target.getBoundingClientRect().top)
+  )
+    setMessageOpen(hint, true);
+});
 
 /** Clicks inside any transcript (chat feed, a worker in the center, the Host agent); `rerender` repaints that transcript, `follow` is its follower. */
 export async function transcriptClick(event, root, rerender, follow) {

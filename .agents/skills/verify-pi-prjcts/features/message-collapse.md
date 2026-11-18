@@ -1,6 +1,6 @@
 # Long owner messages
 
-A long message the owner sent is clamped to six lines with a fade and a "Show more ▾ · N chars" hint. A click on the message, or Enter or Space on the hint, opens it; the same again closes it. Short messages stay plain.
+A long message the owner sent is clamped to six lines with a fade and a "Show more ▾ · N chars" hint. A click on the message, or Enter or Space on the hint, opens it. Closing is a click on the first six lines, the hint, or Enter or Space. A click on text below the six lines of an open message does not close it, because the text under the pointer would vanish before a double click could select a word. Short messages stay plain.
 
 ## Sub-features
 
@@ -22,4 +22,4 @@ Scripted: `node .agents/skills/verify-pi-prjcts/scripts/verify.mjs drive --run <
 - The fake provider answers `VERIFY-LONG` with a long reply; do not put that word in these messages.
 - Opening is done in place (`aria-expanded`, the CSS reads it with `:has`), not by re-rendering, so selection, focus and scroll stay put.
 - A message without an `entryId` (not yet stored) renders plain and never clamps.
-- A click on the text of an open message collapses it after 300 ms, so a double click can select a word instead; the hint collapses at once.
+- No timer: a click on the text of an open message collapses it at once only in the first six lines, where a collapse leaves the text under the pointer in place. Focusing a link the clamp hides (Tab, Shift+Tab) opens the message.
