@@ -37,6 +37,7 @@ type ProfileSettings = {
 type UiSettings = {
   theme: ThemeId;                       // default "claude"
   font: FontId;                         // default "jetbrains-mono", including documents saved before this field
+  chatTextSize: "small" | "default" | "large"; // default "default" (scale 0.9 / 1 / 1.15 of message text only), including older documents
   animations: AnimationLevel;           // default "subtle"
   hotkeys: Record<string, string>;      // command id -> binding, only overrides of the defaults
   panels: { list: boolean; context: boolean; hostAgent: boolean };

@@ -14,6 +14,8 @@ kit.initRepo();
 await kit.run(async () => {
   const id = await kit.createProject("Theme demo");
   await kit.ask(id, "MARK-MD show markdown");
+  const LONG = `LONG-START\n${Array.from({ length: 16 }, (_, i) => `long line ${i + 1}`).join("\n")}\nLONG-END`;
+  await kit.ask(id, LONG);
   const setTheme = async (theme) => {
     const ui = await rpc({ action: "ui-get" });
     await rpc({ action: "ui-set", revision: ui.revision, patch: { theme } });
@@ -201,8 +203,102 @@ await kit.run(async () => {
     saved.theme === "true" && saved.motion === "true" && saved.thinking === false,
     saved,
   );
+
   await page.shot("05-appearance-reloaded", { force: true });
   await page.evaluate(`document.querySelector('#settings [data-part="statusline"]').scrollIntoView({ block: "end" })`);
   await page.shot("05-appearance-reloaded-lower", { force: true });
   await page.evaluate(`document.querySelector('#settings [data-part="theme"]').scrollIntoView({ block: "start" })`);
+
+  // C1-C5: chat text size scales message text (prose, lists, code, tables, the owner bubble) and nothing around it.
+  const probe = () =>
+    page.evaluate(`(() => {
+      const px = (node) => (node ? parseFloat(getComputedStyle(node).fontSize) : null);
+      const feed = document.querySelector('#feed');
+      const long = [...feed.querySelectorAll('.msg.owner')].find((n) => n.textContent.includes('LONG-START'));
+      const body = long.querySelector('.msg-body');
+      return {
+        size: document.documentElement.dataset.chatSize,
+        prose: px(feed.querySelector('.msg.agent .prose')),
+        item: px(feed.querySelector('.msg.agent .prose li')),
+        code: px(feed.querySelector('.msg.agent .prose pre')),
+        owner: px(long.querySelector('.bubble')),
+        meta: px(feed.querySelector('.msg-meta')),
+        composer: px(document.querySelector('#composer-input')),
+        top: px(document.querySelector('#topbar')),
+        overflow: long.dataset.overflow === '1',
+        bodyHeight: body.getBoundingClientRect().height,
+        lineHeight: parseFloat(getComputedStyle(body).lineHeight),
+        horizontal: document.scrollingElement.scrollWidth > innerWidth + 1,
+      };
+    })()`);
+  const openAppearance = async () => {
+    if (!(await page.evaluate(`document.querySelector('#settings').open`)))
+      await page.evaluate(`document.querySelector('[data-cmd="settings"]').click()`);
+    await page.evaluate(`document.querySelector('nav [data-section="appearance"]').click()`);
+    await page.waitFor(`!!document.querySelector('[data-chat-size-option]')`, "chat size options");
+  };
+  await page.evaluate(`document.querySelector('#settings').close()`);
+  await kit.delay(200);
+  const base = await probe();
+  check(
+    "C1 the default is unchanged: 14.5 px prose, 12.5 px code, 14 px owner text",
+    base.prose === 14.5 && base.code === 12.5 && base.owner === 14 && (base.size ?? "default") === "default",
+    base,
+  );
+  check("C1 the stored default is 'default'", (await rpc({ action: "ui-get" })).ui.chatTextSize === "default");
+  await openAppearance();
+  check(
+    "C2 Settings offers Smaller, Default and Larger, Default selected",
+    await page.evaluate(
+      `JSON.stringify([...document.querySelectorAll('[data-chat-size-option]')].map((n) => [n.dataset.chatSizeOption, n.getAttribute('aria-checked')])) === JSON.stringify([["small","false"],["default","true"],["large","false"]])`,
+    ),
+  );
+  await page.shot("06-chat-size-default", { force: true });
+  const sizes = {};
+  for (const option of ["small", "large"]) {
+    await openAppearance();
+    await page.evaluate(`document.querySelector('[data-chat-size-option="${option}"]').click()`);
+    await page.waitFor(`document.documentElement.dataset.chatSize === "${option}"`, `${option} applied at once`);
+    await kit.eventually(async () => (await rpc({ action: "ui-get" })).ui.chatTextSize === option, `${option} not saved`, 100);
+    await page.shot(`06-chat-size-${option}-settings`, { force: true });
+    await page.evaluate(`document.querySelector('#settings').close()`);
+    await kit.delay(300);
+    sizes[option] = await probe();
+    await page.shot(`06-chat-size-${option}-chat`, { force: true });
+  }
+  const { small, large } = sizes;
+  check(
+    "C3 small and large scale prose, list items, code and the owner bubble in the right direction",
+    ["prose", "item", "code", "owner"].every((key) => small[key] < base[key] && base[key] < large[key]),
+    { small, base, large },
+  );
+  check(
+    "C3 the surrounding UI keeps its size",
+    [small, large].every((p) => p.meta === base.meta && p.composer === base.composer && p.top === base.top),
+    { small, base, large },
+  );
+  check(
+    "C4 a long owner message stays clamped to six lines at every size",
+    [small, base, large].every((p) => p.overflow && p.bodyHeight <= p.lineHeight * 6 + 1),
+    { small, base, large },
+  );
+  await page.evaluate(`document.querySelector('[data-reveal]:not([aria-expanded="true"])')?.click()`);
+  check(
+    "C4 Show more still opens the long message at the larger size",
+    await page.evaluate(`!!document.querySelector('.msg.owner .msg-more[aria-expanded="true"]')`),
+  );
+  await page.reload();
+  await page.waitFor(`document.body.dataset.ready === "1"`, "reloaded with large text");
+  check(
+    "C5 the chosen size survives a reload and is set before <body> is inserted",
+    (await page.evaluate(`window.__atBody`)) === "midnight" &&
+      (await probe()).size === "large" &&
+      (await rpc({ action: "ui-get" })).ui.chatTextSize === "large",
+  );
+  await page.viewport(390, 844, true);
+  await kit.delay(300);
+  const narrow = await probe();
+  check("C5 at 390 px the large text does not overflow sideways", narrow.horizontal === false && narrow.prose > 14.5, narrow);
+  await page.shot("06-chat-size-large-390", { force: true });
+  await page.viewport(1440, 1000);
 });

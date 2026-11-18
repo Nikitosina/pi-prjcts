@@ -7,6 +7,7 @@ import { emit, fail, state } from "./state.js";
 export const DEFAULT_UI = {
   theme: "claude",
   font: "jetbrains-mono",
+  chatTextSize: "default",
   animations: "subtle",
   hotkeys: {},
   panels: { list: true, context: true, hostAgent: false },

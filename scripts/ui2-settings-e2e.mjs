@@ -318,6 +318,7 @@ await kit.run(async () => {
     ui.ui.theme === "claude" &&
       ui.ui.animations === "subtle" &&
       ui.ui.font === "jetbrains-mono" &&
+      ui.ui.chatTextSize === "default" &&
       ui.ui.statusLine === true &&
       ui.ui.panels.list === true,
     ui,
@@ -333,6 +334,10 @@ await kit.run(async () => {
   check(
     "U2 an unknown font is refused",
     await fails({ action: "ui-set", revision: ui.revision, patch: { font: "comic-sans" } }, /font|must|expected/i),
+  );
+  check(
+    "U2 an unknown chat text size is refused",
+    await fails({ action: "ui-set", revision: ui.revision, patch: { chatTextSize: "huge" } }, /chatTextSize|must|expected/i),
   );
   const font = await rpc({ action: "ui-set", revision: ui.revision, patch: { font: "system-sans" } });
   const rereadFont = await rpc({ action: "ui-get" });

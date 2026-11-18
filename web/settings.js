@@ -912,6 +912,11 @@ const FONTS = [
   { id: "system-sans", label: "System sans", hint: "Your device's UI font" },
   { id: "system-mono", label: "System mono", hint: "Your device's mono font" },
 ];
+const CHAT_SIZES = [
+  { id: "small", label: "Smaller", hint: "90%" },
+  { id: "default", label: "Default", hint: "100%" },
+  { id: "large", label: "Larger", hint: "115%" },
+];
 /** One page for how the app looks: theme and font, motion, what transcripts show, and the status line. Each part keeps its own stored setting. */
 const APPEARANCE_PARTS = [
   { id: "theme", label: "Theme", render: theme },
@@ -928,11 +933,18 @@ async function appearance(body, alive) {
 }
 function theme(body) {
   const current = state.ui?.theme ?? "claude",
-    font = state.ui?.font ?? "jetbrains-mono";
-  body.innerHTML = `${line("Same in every browser; the Host agent can change it too.")}<div class="theme-grid" role="radiogroup" aria-label="Theme">${THEMES.map((item) => `<button type="button" role="radio" class="theme-card" data-theme-option="${item.id}" aria-checked="${item.id === current}"><span class="swatch sw-${item.id}" aria-hidden="true"><i></i><i></i><i></i></span><b>${item.label}</b><span class="muted small">${item.hint}</span></button>`).join("")}</div><div class="font-picker"><span class="label" id="font-label">Font</span><div class="font-options" role="radiogroup" aria-labelledby="font-label">${FONTS.map((item) => `<button type="button" role="radio" data-font-option="${item.id}" aria-checked="${item.id === font}"><span>${item.label}</span><span class="muted small">${item.hint}</span></button>`).join("")}</div></div>`;
+    font = state.ui?.font ?? "jetbrains-mono",
+    size = state.ui?.chatTextSize ?? "default";
+  body.innerHTML = `${line("Same in every browser; the Host agent can change it too.")}<div class="theme-grid" role="radiogroup" aria-label="Theme">${THEMES.map((item) => `<button type="button" role="radio" class="theme-card" data-theme-option="${item.id}" aria-checked="${item.id === current}"><span class="swatch sw-${item.id}" aria-hidden="true"><i></i><i></i><i></i></span><b>${item.label}</b><span class="muted small">${item.hint}</span></button>`).join("")}</div><div class="font-picker"><span class="label" id="font-label">Font</span><div class="font-options" role="radiogroup" aria-labelledby="font-label">${FONTS.map((item) => `<button type="button" role="radio" data-font-option="${item.id}" aria-checked="${item.id === font}"><span>${item.label}</span><span class="muted small">${item.hint}</span></button>`).join("")}</div></div><div class="font-picker"><span class="label" id="chat-size-label">Chat text size</span><div class="font-options" role="radiogroup" aria-labelledby="chat-size-label">${CHAT_SIZES.map((item) => `<button type="button" role="radio" data-chat-size-option="${item.id}" aria-checked="${item.id === size}"><span>${item.label}</span><span class="muted small">${item.hint}</span></button>`).join("")}</div></div>`;
   body.addEventListener("click", (event) => {
     const pick = event.target.closest("[data-theme-option]"),
-      fontPick = event.target.closest("[data-font-option]");
+      fontPick = event.target.closest("[data-font-option]"),
+      sizePick = event.target.closest("[data-chat-size-option]");
+    if (sizePick) {
+      const choice = CHAT_SIZES.find((item) => item.id === sizePick.dataset.chatSizeOption);
+      void setUi({ chatTextSize: choice.id }).then((ok) => ok && say(`Chat text size: ${choice.label}`));
+      body.querySelectorAll("[data-chat-size-option]").forEach((node) => node.setAttribute("aria-checked", String(node === sizePick)));
+    }
     if (pick) {
       void setUi({ theme: pick.dataset.themeOption }).then((ok) => ok && say(`Theme: ${pick.querySelector("b").textContent}`));
       body.querySelectorAll("[data-theme-option]").forEach((node) => node.setAttribute("aria-checked", String(node === pick)));
