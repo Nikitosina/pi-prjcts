@@ -2835,6 +2835,29 @@ const journeys = {
     if ((await state("Paragraph 5")).expanded !== "false") throw Error("a drag selection toggled the message");
     record("visible", `a drag selected ${selected} characters and did not toggle the message`);
 
+    // Double click: selecting a word ends with the message as it was, and the word stays selected.
+    await page.evaluate(`getSelection().removeAllRanges()`);
+    const word = await page.evaluate(`(() => {
+      const p = ${ownerBy("Paragraph 5")}.querySelector('.bubble p'), r = document.createRange();
+      p.scrollIntoView({ block: 'center' });
+      r.setStart(p.lastChild, 12); r.setEnd(p.lastChild, 18);
+      const box = r.getBoundingClientRect();
+      return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+    })()`);
+    for (const [type, extra] of [
+      ["mouseMoved", {}],
+      ["mousePressed", { button: "left", clickCount: 1 }],
+      ["mouseReleased", { button: "left", clickCount: 1 }],
+      ["mousePressed", { button: "left", clickCount: 2 }],
+      ["mouseReleased", { button: "left", clickCount: 2 }],
+    ])
+      await page.cdp("Input.dispatchMouseEvent", { type, x: word.x, y: word.y, ...extra });
+    await page.evaluate(`new Promise((ok) => setTimeout(ok, 150))`);
+    const picked = await page.evaluate(`getSelection().toString().trim().length`);
+    if (picked < 2) throw Error(`double click did not select a word (${picked})`);
+    if ((await state("Paragraph 5")).expanded !== "false") throw Error("a double click left the message toggled");
+    record("visible", `a double click selected a word (${picked} characters) and left the message collapsed`);
+
     // Links: the click goes to the link, the message stays as it was, and the app does not cancel the navigation.
     await page.evaluate(`(() => {
       window.__linkClicks = [];
