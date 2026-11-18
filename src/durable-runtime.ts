@@ -43,7 +43,7 @@ import { CodemodeSandbox } from "@earendil-works/pi-codemode";
 import { Type } from "typebox";
 import type { Context } from "@earendil-works/chord";
 import { DEFAULT_REVIEW_RECHECKS, DEFAULT_STALL_MINUTES, DEFAULT_VERIFY_ROUNDS } from "./state.ts";
-import { FULL_COMMIT, Jobs, createJobs, sharedHandoff, type JobsRuntime, type JobsSnapshot, type SpawnArgs } from "./jobs.ts";
+import { Jobs, createJobs, readRevision, sharedHandoff, type JobsRuntime, type JobsSnapshot, type SpawnArgs } from "./jobs.ts";
 import { changedFiles, headCommit } from "./vcs.ts";
 import { checkProofRefs, proofTools } from "./proof.ts";
 import { createApprover, describeAcceptance, fileAcceptanceLog, githubMergeProvider } from "./result-acceptance.ts";
@@ -1327,15 +1327,17 @@ export async function openDurableProject(input: {
               );
             return { cwd, ...reader, readHead: head };
           }
-          if (!FULL_COMMIT.test(agent.readRef))
-            throw new Error(`readRef ${JSON.stringify(agent.readRef)} is not an agent id or a full commit SHA`);
+          const read = readRevision(agent);
+          if (!read) throw new Error(`readRef ${JSON.stringify(agent.readRef)} is not an agent id or a full commit SHA`);
           const { cwd } = await taskWorkspaces.prepareReader({
             threadId: agent.id,
             conversationId: conversation,
             workId: agent.id,
             taskText: agent.brief,
             chat: Number(agent.chat),
-            baseCommit: agent.readRef,
+            baseCommit: read.sha,
+            // A later revision gets a checkout of its own; the first one keeps the reviewer's id.
+            ...(read.revised ? { revision: read.sha } : {}),
           });
           return { cwd, ...reader };
         }

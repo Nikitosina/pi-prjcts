@@ -29,7 +29,7 @@ const modern = (name, args) =>
         },
       ]
     : name === "projects_worker_control"
-      ? ["agents", { action: "send", id: args.threadId, message: args.text, followUp: true }]
+      ? ["agents", { action: "send", id: args.threadId, message: args.text, followUp: true, ...(args.ref ? { readRef: args.ref } : {}) }]
       : name === "projects_delegate_child"
         ? [
             "subagent",

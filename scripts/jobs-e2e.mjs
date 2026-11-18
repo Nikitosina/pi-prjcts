@@ -13,13 +13,14 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { createRegistry, defineExtension, defineTool, Harness, LiveDoc } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { createJobs, Jobs, liveAgentIds, planEta } from "../src/jobs.ts";
+import { createJobs, Jobs, liveAgentIds, planEta, readRevision } from "../src/jobs.ts";
 import { guardedStream } from "../src/model-guard.ts";
 import { DEFAULT_ROLE_PROMPTS, TASK_HELPER_PROMPT } from "../src/role-prompts.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "jobs-e2e-"));
 const model = { provider: "faux", modelId: "faux-1" };
 const sha = "a".repeat(40);
+const [REV_A, REV_B, REV_C, UNAVAILABLE] = ["1", "2", "3", "c"].map((digit) => digit.repeat(40));
 const longAnswer = "Full exact retained evidence. ".repeat(300) + "END-OF-EXACT-ANSWER";
 const review = (kind) => ["subagent", { role: "reviewer", kind, task: "REVIEW" }];
 // A recheck before any full review, three axis reviewers, a fourth, a scout, two rechecks, a third, a full after rechecks, Ready.
@@ -67,6 +68,7 @@ for (const prompt of [DEFAULT_ROLE_PROMPTS.worker, TASK_HELPER_PROMPT])
 // ── Scripted model: the system prompt names the role, the last message decides the move.
 const requests = [];
 let quotaFailed = false;
+let readerSaw = null;
 const text = (content) =>
   typeof content === "string" ? content : content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
 const call = (name, args) => fauxAssistantMessage([fauxToolCall(name, args)], { stopReason: "toolUse" });
@@ -108,6 +110,32 @@ function route(request) {
       return call("agents", { action: "report", id, ...(ref ? { ref: Number(ref) } : {}) });
     }
     if (user.startsWith("Scout")) return call("agents", { action: "spawn", role: "scout", brief: "Look around", requestId: "scout-1" });
+    // V1-V9 (jobs-failures.md): a reviewer reads a new revision in the same conversation.
+    if (user.startsWith("Review ")) {
+      return call("agents", {
+        action: "spawn",
+        role: "reviewer",
+        brief: "BRIEF-REVREAD",
+        readRef: user.slice(7),
+        requestId: `rev-${user.slice(7)}`,
+      });
+    }
+    if (user.startsWith("Resend ")) {
+      const [id, ref, requestId] = user.slice(7).split(" ");
+      return call("agents", {
+        action: "send",
+        id,
+        message: "Read it again",
+        ...(ref === "-" ? {} : { readRef: ref }),
+        ...(requestId ? { requestId } : {}),
+      });
+    }
+    if (user.startsWith("Race ")) {
+      const [id, first, second] = user.slice(5).split(" ");
+      const send = (ref) =>
+        fauxToolCall("agents", { action: "send", id, message: "Read it again", readRef: ref, requestId: `race-${ref[0]}` });
+      return fauxAssistantMessage([send(first), send(second)], { stopReason: "toolUse" });
+    }
     if (user === "Spawn glued")
       return call("agents", { action: "spawn", role: "scout", brief: `Check ${GLUED} please`, requestId: "glued-scout" });
     if (user.startsWith("Send glued ")) return call("agents", { action: "send", id: user.slice(11), message: `Also ${GLUED}` });
@@ -266,6 +294,7 @@ function route(request) {
   }
   if (role === "reviewer" && user === "REVIEW-FAIL")
     return fauxAssistantMessage([], { stopReason: "error", errorMessage: "scripted reviewer failure" });
+  if (role === "reviewer" && tag === "BRIEF-REVREAD") return say(`SAW ${readerSaw}`);
   return say(user === "LONG-SCOUT" ? longAnswer : role === "reviewer" ? "REVIEW-OK" : "Scouted.");
 }
 
@@ -365,6 +394,11 @@ async function open() {
       for (const id of ids) processes.delete(id);
     },
     prepare: async ({ agent }) => {
+      if (agent.title === "BRIEF-REVREAD") {
+        const read = readRevision(agent);
+        if (read?.sha === UNAVAILABLE) throw new Error(`Commit ${read.sha} is not in the local repository`);
+        readerSaw = read?.sha ?? null;
+      }
       if (agent.title === "LONGPREPFAIL") throw new Error(longAnswer);
       if (agent.title === "Job STARTFAIL") {
         while (prepareHeld.has(agent.title)) await delay(20);
@@ -1248,6 +1282,84 @@ assert.deepEqual(await jobs.stallTick(harness, T + 21 * 60_000), [gate.id], "an 
     true,
     "a sleeping task is work",
   );
+}
+
+// V1-V9: one reviewer reads A, then B, in the same conversation; the old report still identifies A.
+{
+  const reviewers = async () => (await jobs.snapshot(harness)).agents.filter((item) => item.role === "reviewer" && item.readRef === REV_A);
+  const reportsOf = async (agent) =>
+    (await (await harness.conversation(agent.conversationId, context)).entries({}, 200, undefined, context)).items
+      .toReversed()
+      .filter((entry) => entry.kind === "projects.agent-report")
+      .map((entry) => entry.data.text);
+  const lastTool = () => requests.findLast((item) => item.role === "coordinator" && item.result)?.result ?? "";
+  await say_(root, `Review ${REV_A}`);
+  await quiet(harness);
+  const [reviewer] = await reviewers();
+  let reports = await reportsOf(reviewer);
+  assert.equal(reports.length, 1);
+  assert.match(reports[0], new RegExp(`Read revision: ${REV_A}`), "V3 the first report names A");
+  assert.equal(readerSaw, REV_A);
+
+  await say_(root, `Resend ${reviewer.id} ${REV_B} send-b`);
+  await quiet(harness);
+  assert.equal((await reviewers()).length, 1, "the same reviewer is reused");
+  assert.equal(readerSaw, REV_B, "V1 the new turn reads B");
+  reports = await reportsOf(reviewer);
+  assert.equal(reports.length, 2);
+  assert.match(reports[0], new RegExp(`Read revision: ${REV_A}`), "V3 the old report still identifies A");
+  assert.doesNotMatch(reports[0], new RegExp(REV_B), "V3 the old report never names B");
+  assert.match(reports[1], new RegExp(`Read revision: ${REV_B}`), "V3 the new report names B");
+  const told = requests.findLast((item) => item.role === "reviewer").user;
+  assert.match(told, new RegExp(`${REV_B}`), "V9 the reviewer is told its checkout is now B");
+  assert.match(told, new RegExp(REV_A), "V9 and what it read before");
+
+  await say_(root, `Resend ${reviewer.id} ${REV_B} send-b`);
+  await quiet(harness);
+  assert.match(lastTool(), /Already sent/, "V6 a retried request returns the same send");
+  assert.equal((await reportsOf(reviewer)).length, 2, "V6 a retry starts no turn");
+
+  // V4: an unavailable SHA reads nothing and leaves the reviewer on B.
+  await say_(root, `Resend ${reviewer.id} ${UNAVAILABLE} send-c`);
+  await quiet(harness);
+  reports = await reportsOf(reviewer);
+  assert.equal(reports.length, 3);
+  assert.match(reports[2], /failed to start/);
+  assert.match(reports[2], new RegExp(`${UNAVAILABLE} was not read`), "V4 the failed turn names the SHA it could not read");
+  assert.doesNotMatch(reports[2], new RegExp(`Read revision: ${REV_B}`), "V4 a failed turn does not claim B");
+  await say_(root, `Resend ${reviewer.id} - plain-1`);
+  await quiet(harness);
+  reports = await reportsOf(reviewer);
+  assert.equal(readerSaw, REV_B, "V4 a plain send after a failed one reads the last good revision");
+  assert.match(reports[3], new RegExp(`Read revision: ${REV_B}`));
+  assert.doesNotMatch(reports[3], new RegExp(UNAVAILABLE));
+
+  // V7: refused without widening access, and a refusal does not consume its requestId.
+  for (const bad of ["main", "--upload-pack=x", "pull/1", "F".repeat(40), REV_B.slice(0, 12)]) {
+    await say_(root, `Resend ${reviewer.id} ${bad} bad-${bad.length}`);
+    assert.match(lastTool(), /full lowercase commit SHA/, `V4 ${bad} is refused`);
+  }
+  await say_(root, "Scout again");
+  await quiet(harness);
+  const scout = (await jobs.snapshot(harness)).agents.find((item) => item.role === "scout");
+  await say_(root, `Resend ${scout.id} ${REV_C}`);
+  assert.match(lastTool(), /reviewer/i, "V7 a scout cannot change revision");
+  await say_(root, `Resend ${reviewer.id} ${REV_C} send-c2`);
+  await quiet(harness);
+  assert.equal(readerSaw, REV_C, "a refused request id is not consumed");
+
+  // V5: two sends with different SHAs while the reviewer prepares: neither starts a turn.
+  const turns = (await reportsOf(reviewer)).length;
+  const runs = prepareRuns.length;
+  prepareHeld.add("BRIEF-REVREAD");
+  await say_(root, `Resend ${reviewer.id} - held-1`);
+  await until(() => prepareRuns.length > runs, "held prepare");
+  await say_(root, `Race ${reviewer.id} ${REV_A} ${REV_B}`);
+  assert.match(lastTool(), /still working/i, "V5 a revision change on a working reviewer is refused");
+  prepareHeld.delete("BRIEF-REVREAD");
+  await quiet(harness);
+  assert.equal((await reportsOf(reviewer)).length, turns + 1, "V5 only the plain send started a turn");
+  assert.equal(readerSaw, REV_C, "V5 the refused races changed nothing");
 }
 
 await harness.close(context);

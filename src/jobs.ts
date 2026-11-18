@@ -43,6 +43,19 @@ import { BACKGROUND_WAIT_TOOL } from "./worker-environment-tools.ts";
 
 export const FULL_COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 
+/** The commit a reader of a full SHA reads now: its latest revision that started, else the one it was spawned with. `revised` says it is not the spawn one. */
+export function readRevision(agent: Pick<Agent, "readRef" | "revisions">): { sha: string; revised: boolean } | null {
+  const latest = agent.revisions?.findLast((item) => !item.failed);
+  if (latest) return { sha: latest.sha, revised: true };
+  return agent.readRef && FULL_COMMIT.test(agent.readRef) ? { sha: agent.readRef, revised: false } : null;
+}
+/** The commit the turn started by message `seq` read (or, when `failed`, could not read). */
+function turnRevision(agent: Pick<Agent, "readRef" | "revisions">, seq: number): { sha: string; failed: boolean } | null {
+  const found = agent.revisions?.findLast((item) => item.seq <= seq && (!item.failed || item.seq === seq));
+  if (found) return { sha: found.sha, failed: found.failed === true };
+  return agent.readRef && FULL_COMMIT.test(agent.readRef) ? { sha: agent.readRef, failed: false } : null;
+}
+
 const context = BACKGROUND_CONTEXT;
 
 // "verifier" remains only so recorded verifier subagents still read; new turns cannot start one.
@@ -166,6 +179,8 @@ export type Job = JobFacts &
         checkpoint?: null;
       }
   );
+/** A commit a reviewer was sent to read from message `seq` on; `failed` when that turn could not start, so nothing was read. */
+export type ReadRevision = { seq: number; sha: string; failed?: true };
 /** An agent the coordinator spawned: a Job's worker, or a scout or reviewer answering one brief. */
 export type Agent = {
   id: string;
@@ -186,6 +201,8 @@ export type Agent = {
   readRef: string | null;
   /** The commit of the agent worktree this reader reads, recorded when its current message started. */
   readHead?: string;
+  /** Commits a reviewer of a full SHA was later sent to read, oldest first; each has its own frozen checkout, `readRef` stays the first. */
+  revisions?: ReadRevision[];
   /** The host prepared this agent's environment (workspace, tools). */
   prepared: boolean;
   /** Messages sent to it since it was created; a reporter that finishes while a newer message is queued does not settle the Job. */
@@ -580,6 +597,8 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
             agent.prepared = true;
             return { status: "running", checkpoint: { phase: "deliver", attempt: 0 } } as const;
           }
+          const turn = agent.revisions?.find((item) => item.seq === (reporter.input.seq ?? 0));
+          if (turn) turn.failed = true;
           if (job && job.status === "running")
             Object.assign(job, { status: "failed", failure: "start", reason: `Did not start: ${failure}`, endedAt: Date.now() });
           agent.endedAt = job?.workspace ? null : Date.now();
@@ -798,9 +817,13 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
         if (report !== undefined && reportRef === undefined) {
           const agent = (await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext))?.agents[reporter.input.agentId];
           const drift = agent?.readHead ? await host.readDrift?.(agent as Agent) : null;
-          // The warning goes right under the report's first line, so a clipped preview still shows it.
+          const read = agent ? turnRevision(agent, reporter.input.seq ?? 0) : null;
+          const notes = [read && (read.failed ? `Revision ${read.sha} was not read.` : `Read revision: ${read.sha}`), drift].filter(
+            Boolean,
+          );
+          // The notes go right under the report's first line, so a clipped preview still shows them.
           const flagged = (text: string) =>
-            drift ? text.replace(/^([^\n]*)(?:\n|$)/, (_, first: string) => `${first}\n${drift}\n`) : text;
+            notes.length ? text.replace(/^([^\n]*)(?:\n|$)/, (_, first: string) => `${first}\n${notes.join("\n")}\n`) : text;
           await runtime.commit(async (tx) => {
             const entry = await tx.appendEntry(reporter.input.conversationId, {
               kind: "projects.agent-report",
@@ -1188,7 +1211,12 @@ export function createJobs(host: JobsHost) {
         if (!args.message?.trim()) return reply("send needs a message.");
         const glued = gluedWordsDiagnostic(args.message);
         if (glued) api.diagnostic(glued);
-        return reply(await sendTo(api, agent!.id, args.message, args.followUp === true, args.requestId));
+        return reply(
+          await sendTo(api, agent!.id, args.message, args.followUp === true, args.requestId, {
+            chat: api.conversationId,
+            readRef: args.readRef,
+          }),
+        );
       }
       // spawn
       if (!args.role) return reply("spawn needs a role and a brief.");
@@ -1410,7 +1438,14 @@ export function createJobs(host: JobsHost) {
 
   // ── Operations ─────────────────────────────────────────────────────────────
   /** Send a message to an agent (steer, or queue after its answer); a finished Job runs again. */
-  async function sendTo(api: Pick<Session, "commit">, id: string, message: string, followUp: boolean, requestId?: string): Promise<string> {
+  async function sendTo(
+    api: Pick<Session, "commit">,
+    id: string,
+    message: string,
+    followUp: boolean,
+    requestId?: string,
+    revision?: { chat: ConversationId; readRef?: string },
+  ): Promise<string> {
     return api.commit(async (tx) => {
       const doc = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
       const agent = doc.agents[id];
@@ -1421,6 +1456,18 @@ export function createJobs(host: JobsHost) {
       const refusal = job?.workspace ? null : host.refuseSend?.(agent);
       if (refusal) return refusal;
       if (doc.paused) return "The project is paused.";
+      const next = revision?.readRef?.trim();
+      const before = readRevision(agent);
+      // A new revision is a new checkout for the next turn, so only the owning chat may ask, and only of an idle reviewer of a full SHA.
+      if (next !== undefined && next !== "") {
+        if (agent.role !== "reviewer" || !before)
+          return "readRef on send changes the commit of a reviewer that reads a full commit SHA; spawn a new reader instead.";
+        if (revision!.chat !== agent.chat) return `Reviewer ${id} belongs to another chat.`;
+        if (!FULL_COMMIT.test(next))
+          return "readRef must be a full lowercase commit SHA. Resolve a branch or PR to its commit first and pass that SHA.";
+        if (agent.endedAt === null)
+          return `Reviewer ${id} is still working; its revision changes only between turns. Wait for its answer, or stop it.`;
+      }
       const borrower = job?.workspace?.kind === "shared" ? sharedHandoff(doc, agent.chat, id) : undefined;
       if (borrower) return `Shared workspace is still handed to ${borrower.id}; wait for it to settle.`;
       if (job?.workspace && job.status !== "running" && agent.endedAt === null)
@@ -1428,6 +1475,11 @@ export function createJobs(host: JobsHost) {
       if (key) doc.requests[key] = id;
       // An agent that never received its brief (it failed or was stopped while preparing) gets it first, so a send retries the task.
       if (!agent.briefed && agent.brief && message !== agent.brief) message = `${agent.brief}\n\nOwner's follow-up: ${message}`;
+      const moved = next && before && next !== before.sha ? before.sha : undefined;
+      if (moved && next) {
+        agent.revisions = [...(agent.revisions ?? []), { seq: (agent.sends ?? 0) + 1, sha: next }];
+        message = `[The commit under review changed: your working directory now holds ${next}; before you read ${moved}. Read the files again and do not rely on what you saw earlier.]\n\n${message}`;
+      }
       if (job) {
         if (job.status === "ready" || job.status === "ready-with-gaps")
           job.resume = { status: job.status, ready: job.ready!, endedAt: job.endedAt };
