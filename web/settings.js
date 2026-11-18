@@ -951,17 +951,20 @@ function theme(body, alive) {
     if (invalid) percentInput.setAttribute("aria-invalid", "true");
     else percentInput.removeAttribute("aria-invalid");
   };
+  let submissions = 0;
   body.querySelector("#chat-size-form").addEventListener("submit", (event) => {
     event.preventDefault();
+    submissions++;
     const percent = parseChatPercent(percentInput.value);
     if (percent === null) {
       percentInput.value = String(state.ui?.chatTextPercent ?? 100);
-      showPercent(`Enter a whole number from ${CHAT_PERCENT.min} to ${CHAT_PERCENT.max}. Kept ${percentInput.value}%.`, true);
+      showPercent(`Enter a whole number from ${CHAT_PERCENT.min} to ${CHAT_PERCENT.max}. Nothing changed.`, true);
       return;
     }
     showPercent("", false);
+    const submission = ++submissions;
     void setUi({ chatTextSize: "custom", chatTextPercent: percent }).then((ok) => {
-      if (ok) showPercent(`Chat text size: ${percent}%`, false);
+      if (ok && submission === submissions) showPercent(`Chat text size: ${percent}%`, false);
     });
   });
   body.addEventListener("click", (event) => {
@@ -970,6 +973,7 @@ function theme(body, alive) {
       sizePick = event.target.closest("[data-chat-size-option]");
     if (sizePick) {
       const choice = CHAT_SIZES.find((item) => item.id === sizePick.dataset.chatSizeOption);
+      submissions++;
       showPercent("", false);
       void setUi({ chatTextSize: choice.id }).then((ok) => ok && say(`Chat text size: ${choice.label}`));
     }

@@ -27,7 +27,7 @@ await kit.run(async () => {
   await setTheme("light");
   const page = await kit.openPage("about:blank");
   await page.cdp("Page.addScriptToEvaluateOnNewDocument", {
-    source: `window.__atBody = null; window.__chatAtBody = null; new MutationObserver(() => { if (document.body && window.__atBody === null) { window.__atBody = document.documentElement.dataset.theme ?? ''; window.__chatAtBody = document.documentElement.dataset.chatSize ?? ''; } }).observe(document, { childList: true, subtree: true });`,
+    source: `window.__atBody = null; window.__chatAtBody = null; new MutationObserver(() => { if (document.body && window.__atBody === null) { window.__atBody = document.documentElement.dataset.theme ?? ''; window.__chatAtBody = document.documentElement.dataset.chatSize ?? ''; window.__scaleAtBody = document.documentElement.style.getPropertyValue('--chat-scale'); } }).observe(document, { childList: true, subtree: true });`,
   });
   const url = await kit.webUrl(id);
   await page.navigate(url);
@@ -387,6 +387,7 @@ await kit.run(async () => {
   check(
     "C6 custom 107% survives a reload, set before <body>, with the field showing it",
     (await page.evaluate(`window.__chatAtBody`)) === "custom" &&
+      (await page.evaluate(`window.__scaleAtBody`)) === "1.07" &&
       Math.abs(reloaded.prose - 14.5 * 1.07) < 0.01 &&
       (await page.evaluate(`document.documentElement.style.getPropertyValue('--chat-scale')`)) === "1.07",
     reloaded,
