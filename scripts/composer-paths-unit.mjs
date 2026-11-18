@@ -84,6 +84,10 @@ const cases = [
     "P6 a note above a file URL in text/plain is not dropped",
     () => assert.equal(paths({ "text/plain": "# Keep this note\nfile:///tmp/a" }).source, PathSource.None),
   ],
+  [
+    "P1 single-slash absolute file URL",
+    () => assert.deepEqual(paths({ "text/uri-list": "file:/tmp/My%20File.txt" }).paths, ["/tmp/My File.txt"]),
+  ],
   ["empty transfer", () => assert.deepEqual(paths({}), { source: PathSource.None, paths: [] })],
 ];
 let failed = 0;
