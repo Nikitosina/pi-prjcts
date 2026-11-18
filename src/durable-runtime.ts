@@ -1144,8 +1144,9 @@ export async function openDurableProject(input: {
     // Scouts and reviewers read the cwd they were configured with: their own worktree at a commit, a worker's worktree or the checkout.
     const readOnlyCode = readOnlyCodeTools(project.cwd, async (api, context) => {
       const cwd = (await api.agent(context)).cwd;
-      if (cwd && !existsSync(cwd))
-        throw new Error(`This thread's checkout ${cwd} no longer exists; it is not read from the project checkout instead.`);
+      const ofWorker = (await api.snapshot(Jobs, ROOT_CONVERSATION_ID, context))?.subagents[String(api.conversationId)] !== undefined;
+      if ((ofWorker && !cwd) || (cwd && !existsSync(cwd)))
+        throw new Error(`This thread's checkout ${cwd || "(none)"} is missing; it is not read from the project checkout instead.`);
       return cwd;
     });
     /** The safe worktree rule and the cache sweep; caches the sweep could not remove are listed. */
