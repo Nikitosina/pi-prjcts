@@ -130,13 +130,17 @@ export const plugins = {
     await Promise.allSettled(each((caps) => caps.lifecycle).map((hooks) => hooks.close?.()));
   },
   /** Browser contributions of loaded plugins (asset URLs only). */
-  web: (): Array<{ plugin: string; script: string | null; style: string | null }> =>
+  web: (): Array<{ plugin: string; script: string | null; style: string | null; sidebar: { title: string } | null }> =>
     loaded
       .filter((item) => item.capabilities.web?.script || item.capabilities.web?.style)
       .map((item) => ({
         plugin: item.plugin,
         script: item.capabilities.web?.script ? `/plugins/${item.plugin}/ui.js` : null,
         style: item.capabilities.web?.style ? `/plugins/${item.plugin}/ui.css` : null,
+        sidebar:
+          item.capabilities.web?.script && item.capabilities.web.sidebar
+            ? { title: item.capabilities.web.sidebar.title ?? item.plugin }
+            : null,
       })),
   /** The declared browser file for /plugins/<name>/ui.js|ui.css; nothing else below a plugin is served. */
   webAsset: (plugin: string, file: string): WebFile | undefined => {
@@ -277,6 +281,16 @@ function validate(caps: PluginCapabilities): void {
     const path = caps.web?.[file];
     if (path !== undefined && (typeof path !== "string" || !isAbsolute(path) || !existsSync(path)))
       throw new Error(`web.${file} must be an absolute path to an existing file`);
+  }
+  const sidebar = caps.web?.sidebar;
+  if (sidebar !== undefined) {
+    if (!caps.web?.script) throw new Error("web.sidebar needs web.script");
+    if (
+      typeof sidebar !== "object" ||
+      sidebar === null ||
+      (sidebar.title !== undefined && (typeof sidebar.title !== "string" || !sidebar.title.trim() || sidebar.title.length > 60))
+    )
+      throw new Error("web.sidebar must be { title?: string of 1 to 60 characters }");
   }
   for (const [route, handler] of Object.entries(caps.web?.routes ?? {}))
     if (!/^[a-z][a-z0-9-]{0,63}$/.test(route) || route === "ui.js" || route === "ui.css" || typeof handler !== "function")

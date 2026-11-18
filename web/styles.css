@@ -1899,9 +1899,19 @@ a.pr-link:hover .pr-title {
   content: "Loading…";
   color: var(--muted);
 }
-.plugin-panel .plugin-error {
+.plugin-panel .plugin-error,
+.plugin-section .plugin-error {
   margin: 0 0 6px;
   overflow-wrap: anywhere;
+}
+/* Right panel: one .ctx-section per plugin that opted in; the slot belongs to the plugin and its width is the panel's. */
+.plugin-section {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.plugin-section[data-state="loading"] .plugin-slot:empty::before {
+  content: "Loading…";
+  color: var(--muted);
 }
 
 /* ------------------------------------------------------------------------------------------------ focus views */
