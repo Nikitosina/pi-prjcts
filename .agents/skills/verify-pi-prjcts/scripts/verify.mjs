@@ -2917,7 +2917,11 @@ const journeys = {
       10000,
     );
     await page.click(`#tree [data-chat="main"]`);
-    await page.waitFor(`!!${ownerBy("Paragraph 5")}?.querySelector('.msg-more')`, "chat A shown again", 10000);
+    await page.waitFor(
+      `!!${ownerBy("Paragraph 5")}?.dataset.overflow && !!${ownerBy("item 10")}?.dataset.overflow`,
+      "chat A shown again",
+      10000,
+    );
     for (const needle of ["Paragraph 5", "item 10"]) {
       const back = await state(needle);
       if (back.expanded !== "false" || !back.moreShown) throw Error(`A → B → A did not collapse ${needle}: ${JSON.stringify(back)}`);
@@ -2926,7 +2930,11 @@ const journeys = {
     await mouse(await wordPoint("Paragraph 5", "first"), [1]);
     await expectRevealed("Paragraph 5", "a click reveals after coming back");
     await page.reload();
-    await page.waitFor(`!!${ownerBy("Paragraph 5")}?.querySelector('.msg-more')`, "feed after reload", 20000);
+    await page.waitFor(
+      `!!${ownerBy("Paragraph 5")}?.dataset.overflow && !!${ownerBy("item 10")}?.dataset.overflow`,
+      "feed after reload",
+      20000,
+    );
     for (const needle of ["Paragraph 5", "item 10"]) {
       const again = await state(needle);
       if (again.expanded !== "false" || !again.moreShown) throw Error(`reload did not collapse ${needle}: ${JSON.stringify(again)}`);
