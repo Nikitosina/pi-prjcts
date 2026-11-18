@@ -439,7 +439,13 @@ export type MergeProvider = {
 // ---- coordinator tools / rpc / writes ----
 export type CoordinatorToolsProvider = {
   /** Installed always (recorded calls resolve), offered only where `applies`. */
-  create(input: { projectId: string; root: () => Conversation | undefined; isCoordinator: (id: Conversation["id"]) => boolean }): {
+  create(input: {
+    projectId: string;
+    root: () => Conversation | undefined;
+    isCoordinator: (id: Conversation["id"]) => boolean;
+    /** The chat of a Coordinator conversation (`main` or the chat id); undefined for any other conversation. Trust it, never a chat named by the model. */
+    chatIdOf: (id: Conversation["id"]) => string | undefined;
+  }): {
     tools: ToolRegistration[];
     extension: Extension;
   };

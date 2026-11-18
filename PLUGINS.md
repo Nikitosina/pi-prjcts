@@ -2,7 +2,7 @@
 
 A plugin is a module the host loads at its start to add capabilities: RPC methods, coordinator or worker tools, cleanup and storage steps, browser routes, or a whole provider for a checkout kind or PR service. There is one plugin mechanism; "extension" is only the upstream Pi and Pi Durable term (Pi packages, `defineExtension`), never a separate kind of pi-prjcts add-on.
 
-Core ships Git and GitHub only. GitHub is the built-in `github` plugin (see [The built-in GitHub plugin](#the-built-in-github-plugin)); no config. Other checkout kinds and PR services (an internal VCS, GitLab, ...) are separate plugins loaded at host start. Bundled: `plugins/simulator` (iOS simulators per project; not loaded unless configured).
+Core ships Git and GitHub only. GitHub is the built-in `github` plugin (see [The built-in GitHub plugin](#the-built-in-github-plugin)); no config. Other checkout kinds and PR services (an internal VCS, GitLab, ...) are separate plugins loaded at host start. Bundled: `plugins/simulator` (iOS simulators per project; not loaded unless configured) and `plugins/tasks` (a task list per project and chat for the Coordinator with a right-panel section; not loaded unless configured).
 
 ## Author guide
 

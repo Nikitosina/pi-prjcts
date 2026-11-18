@@ -133,6 +133,7 @@ coordinatorTools?: {
     projectId: string;
     root: () => Conversation | undefined;
     isCoordinator: (id: Conversation["id"]) => boolean;
+    chatIdOf: (id: Conversation["id"]) => string | undefined;
   }): { tools: ToolRegistration[]; extension: Extension };
   applies(project: Project): boolean;
   prompt?: { name: string; text: string; on?(project: Project): boolean };
@@ -144,6 +145,7 @@ coordinatorTools?: {
 - `extension` is the Pi Durable registration of the same tools: `api.lib.durable.defineExtension({ name, tools })`. Give it a stable, unique name such as `projects.<plugin name>`.
 - Check `isCoordinator(toolApi.conversationId)` in `execute`, as the simulator plugin does, so a call from any conversation other than a coordinator's is refused.
 - `prompt` adds the coordinator's rules for the tools as an editable integration block, `plugin:<plugin name>` in Settings → Prompt. It shows while `applies` and `on` are true. `text` may use `{project}`, `{projectId}` and `{githubRepos}`.
+- `chatIdOf(toolApi.conversationId)` is the chat of the calling Coordinator conversation (`main` or the chat id), `undefined` for any other conversation. A tool that keeps per-chat data takes the chat from it and never from an argument. The [tasks plugin](../../plugins/tasks/README.md) does this.
 - Prefix tool names with the plugin name; tool names share one namespace with core tools.
 
 A tool returns Durable output, not Pi coding-agent `content`:
