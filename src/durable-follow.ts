@@ -166,6 +166,7 @@ export function followRuntime(
         lastReview: was?.lastReview ?? 0,
         lastComment: was?.lastComment ?? 0,
         lastLineComment: was?.lastLineComment ?? 0,
+        ...(was?.pullSkipped ? { pullSkipped: true as const } : {}),
       };
       if (baselined && !was)
         items.push({
@@ -242,7 +243,9 @@ export function followRuntime(
     }
     // Keep the newest 200 PRs; older ones are re-baselined silently if they ever change.
     const keys = Object.keys(prs);
-    if (keys.length > 200) for (const key of keys.sort((a, b) => Number(a) - Number(b)).slice(0, keys.length - 200)) delete prs[key];
+    // A PR whose checkout pull is still owed is kept past the cap.
+    const evictable = keys.filter((key) => !prs[key].pullSkipped).sort((a, b) => Number(a) - Number(b));
+    if (keys.length > 200) for (const key of evictable.slice(0, keys.length - 200)) delete prs[key];
     return { state: { baselined: true, prs }, items, failed };
   }
 
