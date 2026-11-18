@@ -1536,17 +1536,28 @@ export function notes(dir: string): Note[] {
     .map((name) => parse(Note, readJson(join(path, name))));
 }
 
+// Parsed job files by inbox folder and file name. The folder holds a file per message ever sent, so reading all of them on every
+// call stalled the host's single thread for as long as the project was old (scripts/job-ledger-failures.md). The host is the only
+// writer and goes through `saveJob`; a name added to or removed from the folder is still seen on the next read.
+const jobCache = new Map<string, Map<string, Job>>();
+
 export function jobs(id: string): Job[] {
   const dir = join(projectDir(id), "inbox");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  return readdirSync(dir)
-    .filter((name) => name.endsWith(".json"))
-    .map((name) => parse(Job, readJson(join(dir, name))))
-    .sort((a, b) => a.at.localeCompare(b.at));
+  const known = jobCache.get(dir),
+    current = new Map<string, Job>();
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith(".json")) continue;
+    current.set(name, known?.get(name) ?? parse(Job, readJson(join(dir, name))));
+  }
+  jobCache.set(dir, current);
+  return [...current.values()].map((job) => ({ ...job })).sort((a, b) => a.at.localeCompare(b.at));
 }
 
 export function saveJob(id: string, job: Job): void {
-  saveJson(join(projectDir(id), "inbox", `${job.id}.json`), parse(Job, job));
+  const saved = parse(Job, job);
+  saveJson(join(projectDir(id), "inbox", `${job.id}.json`), saved);
+  jobCache.get(join(projectDir(id), "inbox"))?.set(`${job.id}.json`, { ...saved });
 }
 
 export function errorText(error: unknown): string {
