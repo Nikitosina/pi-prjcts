@@ -7,3 +7,6 @@ Measured at 6d6847f: `show` and every ledger consumer (`settleProject`, `durable
 - L3 A cached ledger keeps a job whose file was removed, or misses a file added to the folder.
 - L4 A caller that edits a returned job (the settle loop does) changes what the next read returns without a save.
 - L5 One project's ledger is shown for another project.
+- L6 A file replaced under the same name by another process (write temp, rename) is not noticed because only names are compared.
+- L7 A job returned or saved shares its attachments array with the cache, so editing it changes the ledger without a save.
+- L8 The cache keeps every project's ledger for the life of the host.
