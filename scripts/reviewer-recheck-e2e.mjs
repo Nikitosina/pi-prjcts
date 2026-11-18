@@ -90,7 +90,7 @@ await kit.run(async () => {
   const gone = kit.result.calls.filter((item) => item.role === "worker" && item.user.includes("GONE")).at(-1);
   check(
     "D1 a worktree that is gone is refused for a full review; no reviewer runs, so none reads the owner checkout",
-    /cannot be read|no working directory|no worktree/i.test(gone.results[3] ?? "") && !reviewerRuns("REVIEW-GONE").length,
+    /does not exist|cannot be read|no working directory/i.test(gone.results[3] ?? "") && !reviewerRuns("REVIEW-GONE").length,
     gone.results,
   );
 

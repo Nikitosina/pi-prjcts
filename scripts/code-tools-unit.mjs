@@ -223,7 +223,7 @@ try {
   mkdirSync(tree);
   const inTree = (...args) =>
     execFileSync("/usr/bin/git", ["-C", tree, "-c", "user.email=t@example.invalid", "-c", "user.name=t", ...args], { encoding: "utf8" });
-  assert.match((await confirmCheckout(undefined)).refusal, /no working directory/, "W3 no directory is refused");
+  assert.match((await confirmCheckout(join(base, "missing"))).refusal, /does not exist/, "W3 a missing directory is refused");
   inTree("init", "-q", "-b", "main");
   assert.match((await confirmCheckout(tree)).refusal, /HEAD cannot be read/, "W3 a repository with no commit is refused");
   writeFileSync(join(tree, "f.txt"), "1\n");

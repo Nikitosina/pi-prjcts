@@ -62,8 +62,8 @@ export async function changedFiles(cwd: string): Promise<string[] | null> {
   return result.code === 0 ? result.stdout.split("\n").filter(Boolean) : null;
 }
 /** A worktree's HEAD commit when it is readable and has no uncommitted changes (git or a plugin kind), else why a reviewer must not read it. */
-export async function confirmCheckout(cwd: string | undefined): Promise<{ sha: string } | { refusal: string }> {
-  if (!cwd) return { refusal: "The worker has no working directory to confirm" };
+export async function confirmCheckout(cwd: string): Promise<{ sha: string } | { refusal: string }> {
+  if (!existsSync(cwd)) return { refusal: `The checkout ${cwd} does not exist` };
   const head = await readHead(cwd);
   if (head.kind !== "commit") return { refusal: `The checkout's HEAD cannot be read (${head.reason})` };
   const dirty = await changedFiles(cwd);

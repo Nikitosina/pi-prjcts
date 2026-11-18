@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { pruneRunLogs, runScript, type ScriptRun } from "./routine-script.ts";
 import { setTimeout as sleep } from "node:timers/promises";
 import { DatabaseSync } from "node:sqlite";
@@ -43,7 +43,7 @@ import { CodemodeSandbox } from "@earendil-works/pi-codemode";
 import { Type } from "typebox";
 import type { Context } from "@earendil-works/chord";
 import { DEFAULT_REVIEW_RECHECKS, DEFAULT_STALL_MINUTES, DEFAULT_VERIFY_ROUNDS } from "./state.ts";
-import { Jobs, createJobs, readRevision, sharedHandoff, type JobsRuntime, type JobsSnapshot, type SpawnArgs } from "./jobs.ts";
+import { FULL_COMMIT, Jobs, createJobs, readRevision, sharedHandoff, type JobsRuntime, type JobsSnapshot, type SpawnArgs } from "./jobs.ts";
 import { changedFiles, confirmCheckout, headCommit } from "./vcs.ts";
 import { checkProofRefs, proofTools } from "./proof.ts";
 import { createApprover, describeAcceptance, fileAcceptanceLog, githubMergeProvider } from "./result-acceptance.ts";
@@ -1144,7 +1144,9 @@ export async function openDurableProject(input: {
     // Scouts and reviewers read the cwd they were configured with: their own worktree at a commit, a worker's worktree or the checkout.
     const readOnlyCode = readOnlyCodeTools(project.cwd, async (api, context) => {
       const cwd = (await api.agent(context)).cwd;
-      return cwd && existsSync(cwd) ? cwd : project.cwd;
+      if (cwd && !existsSync(cwd))
+        throw new Error(`This thread's checkout ${cwd} no longer exists; it is not read from the project checkout instead.`);
+      return cwd;
     });
     /** The safe worktree rule and the cache sweep; caches the sweep could not remove are listed. */
     type WorktreeCleanup = Awaited<ReturnType<typeof cleanupWorktrees>> & { unremovedCaches: string[] };
@@ -1428,7 +1430,19 @@ export async function openDurableProject(input: {
       checkProof: (job, refs) => checkProofRefs(dir, job, refs),
       stallMinutes: () => loadProject(project.id).stallMinutes ?? DEFAULT_STALL_MINUTES,
       reviewRechecks: () => loadProject(project.id).review?.rechecks ?? DEFAULT_REVIEW_RECHECKS,
-      confirmRevision: confirmCheckout,
+      confirmRevision: async ({ conversationId, cwd }) => {
+        const state = harness ? await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context) : undefined;
+        const worker = Object.values(state?.agents ?? {}).find((item) => Number(item.conversationId) === Number(conversationId));
+        // A plugin's task helper is confirmed by its own attachment, never by a guess from the directory.
+        const held = worker ? await taskWorkspaces.confirmWorker(worker.id) : undefined;
+        if (!held) return confirmCheckout(cwd);
+        if (!existsSync(cwd) || !existsSync(held.workDir) || realpathSync(held.workDir) !== realpathSync(cwd))
+          return { refusal: "The directory is not the task checkout its provider attached" };
+        if (!FULL_COMMIT.test(held.state.revision)) return { refusal: "The task checkout's provider reported no commit" };
+        return held.state.clean
+          ? { sha: held.state.revision }
+          : { refusal: "The task checkout has uncommitted changes; commit them first" };
+      },
       approver: {
         approve: async (job) => {
           const current = loadProject(project.id),

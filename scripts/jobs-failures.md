@@ -85,10 +85,12 @@ A worker's `subagent` call with kind recheck may carry `continues`: the id of a 
 
 - W1 `continues` starts a new conversation anyway, so the reviewer has no history of the first review.
 - W2 `continues` is accepted with kind full (an independent full review must stay fresh), for a scout, or for a conversation that is not a reviewer of this Job (another Job's reviewer, the worker, a coordinator-started reader).
-- W3 The re-check starts although the checkout cannot be confirmed (no confirmation by the host, unreadable HEAD, uncommitted changes) or is not the recorded candidate (`job candidate`): the reviewer reads unverified or dirty code.
+- W3 The re-check (or any worker's reviewer, full too) starts although the checkout cannot be confirmed (no confirmation by the host, unreadable HEAD, uncommitted changes) or is not the recorded candidate (`job candidate`): the reviewer reads unverified or dirty code.
 - W4 The re-check starts on the commit the reviewer already read: it spends a re-check on nothing new, or the old report passes as a new review.
 - W5 The reviewer is not told the commit changed and answers from the files it saw before.
 - W6 The reviewer has no record of the commit it read, so the next re-check cannot tell fresh from stale; the record keeps only the latest commit and loses A.
 - W7 A refused re-check (stale, dirty, unknown reviewer) still spends the budget; a re-check that does not answer keeps its place; a replayed call (restart) spends twice or sends the task twice.
-- W8 Two re-checks continue the same reviewer at once, or a reviewer that did not answer its last turn is continued.
+- W8 Two re-checks continue the same reviewer at once, a reviewer still working is continued, or a reviewer whose last turn failed (and was given back) is stranded instead of continuing from its last answered commit.
 - W9 A continued re-check gets the budget around it: it counts as a re-check, never as a free turn, and the full round is not reopened.
+
+PR #60 repair: scripts/reviewer-recheck-failures.md (X1-X10), driven by scripts/reviewer-recheck-e2e.mjs and case 39 of vcs-plugins-e2e.

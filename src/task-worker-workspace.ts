@@ -6,7 +6,7 @@ import { defineDoc, defineExtension, type Conversation } from "@earendil-works/p
 import type { Project } from "./state.ts";
 import type { TaskWorkspace } from "./jobs.ts";
 import type { DurablePreparedWorkerEnvironment } from "./durable-types.ts";
-import type { AllocationPlan, TaskAttachment, TaskPlanContext } from "./plugin-types.ts";
+import type { AllocationPlan, TaskAttachment, TaskCheckoutState, TaskPlanContext } from "./plugin-types.ts";
 import { CoordinatorWorkspaceBindings, type CoordinatorWorkspaceRequest } from "./coordinator-workspace-state.ts";
 import type { coordinatorWorkspaces } from "./coordinator-workspace.ts";
 import { coordinatorExecutionTools } from "./coordinator-execution.ts";
@@ -407,6 +407,13 @@ export function taskWorkerWorkspaces(input: {
     if (!binding) throw new Error("Task workspace binding is missing");
     return target(request, binding);
   }
+  /** What a task helper's own provider attachment holds right now; undefined for a helper without one (a git checkout). Refuses a provider that cannot confirm. */
+  async function confirmWorker(threadId: string): Promise<{ workDir: string; state: TaskCheckoutState } | undefined> {
+    const attachment = attachments.get(threadId);
+    if (!attachment) return undefined;
+    if (!attachment.confirmRevision) throw new Error("The workspace provider cannot confirm the revision of a task checkout");
+    return { workDir: attachment.workDir, state: await attachment.confirmRevision() };
+  }
   async function closeThread(threadId: string) {
     for (const controller of controllers.get(threadId) ?? []) controller.abort(new Error("Task worker stopped"));
     await queues.get(threadId)?.catch(() => {});
@@ -424,7 +431,7 @@ export function taskWorkerWorkspaces(input: {
     const errors = results.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
     if (errors.length) throw new AggregateError(errors, "Task workspace detach failed");
   }
-  return { prepare, prepareReader, validate, closeThread, close };
+  return { prepare, prepareReader, validate, confirmWorker, closeThread, close };
 }
 function hash(value: string) {
   return createHash("sha256").update(value).digest("hex");
