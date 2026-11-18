@@ -3,7 +3,7 @@
 import { call, uuid } from "./api.js";
 import { clip, dur, esc, oneLine, shortModel, tokens } from "./format.js";
 import { emit, fail, on, project, stale, state, toast } from "./state.js";
-import { morph, transcriptClick, transcriptHtml } from "./chat.js";
+import { morph, transcriptClick, transcriptFocus, transcriptHtml } from "./chat.js";
 import { follower } from "./follow.js";
 import { hydrateMedia } from "./media.js";
 
@@ -597,6 +597,7 @@ export async function renderWorker(root, id, { steer = false } = {}) {
   await load();
   if (!alive()) return;
   node.addEventListener("click", (event) => void transcriptClick(event, root, paint, follow));
+  node.addEventListener("focusin", (event) => transcriptFocus(event, follow));
   const unsub = on("jobs", () => {
     if (!alive()) return unsub();
     void load();

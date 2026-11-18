@@ -656,15 +656,16 @@ function toggleMessage(hint, event, follow) {
   if (!open && !hint.contains(event.target) && !insideClamp(hint.closest(".msg"), event.clientY)) return;
   setMessageOpen(hint, open, follow);
 }
-// Keyboard focus reaching a link the clamp hides opens the message instead of leaving focus on invisible text.
-document.addEventListener("focusin", ({ target }) => {
-  const article = target.closest?.(".msg[data-overflow]"),
-    hint = article?.querySelector(".msg-more");
-  if (!hint || target === hint || hint.getAttribute("aria-expanded") !== "false") return;
+/** Keyboard focus reaching a link the clamp hides opens the message instead of leaving focus on invisible text; `follow` is the transcript's follower. */
+export function transcriptFocus({ target }, follow) {
+  const body = target.closest?.(".msg[data-overflow] .msg-body"),
+    hint = body?.closest(".msg").querySelector(".msg-more");
+  if (!hint || hint.getAttribute("aria-expanded") !== "false") return;
   // Focusing scrolls the clipped body to the link, so its position is taken from the unscrolled top.
-  const scrolled = article.querySelector(".msg-body").scrollTop;
-  if (!insideClamp(article, target.getBoundingClientRect().top + scrolled)) setMessageOpen(hint, true);
-});
+  if (insideClamp(body.closest(".msg"), target.getBoundingClientRect().top + body.scrollTop)) return;
+  setMessageOpen(hint, true, follow);
+  target.scrollIntoView({ block: "nearest" });
+}
 
 /** Clicks inside any transcript (chat feed, a worker in the center, the Host agent); `rerender` repaints that transcript, `follow` is its follower. */
 export async function transcriptClick(event, root, rerender, follow) {
@@ -723,6 +724,7 @@ export async function transcriptClick(event, root, rerender, follow) {
   }
   return false;
 }
+feed.addEventListener("focusin", (event) => transcriptFocus(event, follow));
 feed.addEventListener("click", async (event) => {
   const starter = event.target.closest("[data-starter]");
   if (starter) {

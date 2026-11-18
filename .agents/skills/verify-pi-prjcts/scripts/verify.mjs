@@ -2912,7 +2912,12 @@ const journeys = {
     // A link the clamp hides opens the message when keyboard focus reaches it.
     await page.evaluate(`${ownerBy("Paragraph 5")}.querySelector('a[href$="/deep"]').focus()`);
     await expectState("Paragraph 5", "true", "focus on a hidden link opens the message");
-    record("visible", "focusing a link the clamp hides opens the message");
+    const linkBox = await page.evaluate(`(() => {
+      const r = ${ownerBy("Paragraph 5")}.querySelector('a[href$="/deep"]').getBoundingClientRect(), f = document.querySelector('#feed').getBoundingClientRect();
+      return r.top >= f.top && r.bottom <= f.bottom;
+    })()`);
+    if (!linkBox) throw Error("the opened message left the focused link outside the feed");
+    record("visible", "focusing a link the clamp hides opens the message and keeps the link in view");
     // A click inside the clamp collapses at once, and a slow double click there selects the word and leaves the message open.
     const pickedTop = await doubleClickWord("first", 500);
     if ((await state("Paragraph 5")).expanded !== "true") throw Error("a slow double click inside the clamp changed the open message");
