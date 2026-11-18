@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { Type, type Static, type TSchema } from "typebox";
@@ -1536,17 +1536,40 @@ export function notes(dir: string): Note[] {
     .map((name) => parse(Note, readJson(join(path, name))));
 }
 
+// Parsed job files by inbox folder, then file name, kept with the file's identity. The folder holds a file per message ever sent, so
+// reading all of them on every call stalled the host's single thread for as long as the project was old
+// (scripts/job-ledger-failures.md). The identity (inode, size, mtime) catches a file another process replaced under the same name,
+// as `saveJson` does. Only the most recently used folders stay cached.
+type CachedJob = { stamp: string; job: Job };
+const JOB_CACHE_PROJECTS = 8;
+const jobCache = new Map<string, Map<string, CachedJob>>();
+
 export function jobs(id: string): Job[] {
   const dir = join(projectDir(id), "inbox");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  return readdirSync(dir)
-    .filter((name) => name.endsWith(".json"))
-    .map((name) => parse(Job, readJson(join(dir, name))))
-    .sort((a, b) => a.at.localeCompare(b.at));
+  const known = jobCache.get(dir),
+    current = new Map<string, CachedJob>();
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith(".json")) continue;
+    const path = join(dir, name),
+      stat = statSync(path, { bigint: true }),
+      stamp = `${stat.ino}:${stat.size}:${stat.mtimeNs}`,
+      hit = known?.get(name);
+    current.set(name, hit?.stamp === stamp ? hit : { stamp, job: parse(Job, readJson(path)) });
+  }
+  jobCache.delete(dir);
+  jobCache.set(dir, current);
+  for (const oldest of jobCache.keys()) {
+    if (jobCache.size <= JOB_CACHE_PROJECTS) break;
+    jobCache.delete(oldest);
+  }
+  return [...current.values()].map(({ job }) => structuredClone(job)).sort((a, b) => a.at.localeCompare(b.at));
 }
 
 export function saveJob(id: string, job: Job): void {
-  saveJson(join(projectDir(id), "inbox", `${job.id}.json`), parse(Job, job));
+  const dir = join(projectDir(id), "inbox");
+  saveJson(join(dir, `${job.id}.json`), parse(Job, job));
+  jobCache.get(dir)?.delete(`${job.id}.json`);
 }
 
 export function errorText(error: unknown): string {
