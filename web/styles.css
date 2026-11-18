@@ -653,10 +653,10 @@ a {
   display: block;
 }
 .msg.owner .msg-more .less,
-.msg.owner.open .msg-more .more {
+.msg.owner:has(.msg-more[aria-expanded="true"]) .msg-more .more {
   display: none;
 }
-.msg.owner.open .msg-more .less {
+.msg.owner:has(.msg-more[aria-expanded="true"]) .msg-more .less {
   display: inline;
 }
 .msg-body > :first-child {
@@ -665,7 +665,7 @@ a {
 .msg-body > :last-child {
   margin-bottom: 0;
 }
-.msg.owner[data-overflow]:not(.open) .msg-body {
+.msg.owner[data-overflow]:not(:has(.msg-more[aria-expanded="true"])) .msg-body {
   max-height: 6lh;
   overflow: hidden;
   -webkit-mask-image: linear-gradient(#000 70%, transparent);

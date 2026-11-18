@@ -273,7 +273,9 @@ function turnHtml(turn, liveTurn, who, fold = true, groups = null) {
   }
   flush();
   const html = head + body.map((part) => (typeof part === "string" ? part : summaryHtml(part, runHtml))).join("");
-  return `<section class="turn${liveTurn ? " live" : ""}" data-key="${esc(key)}" data-sig="${hash(html + liveTurn)}">${html}</section>`;
+  // A message opens in place, so its state stays out of the signature: the turn is kept, with its focus and selection.
+  const sigHtml = html.replace(/(class="msg-more"[^>]*aria-expanded=)"true"/g, '$1"false"');
+  return `<section class="turn${liveTurn ? " live" : ""}" data-key="${esc(key)}" data-sig="${hash(sigHtml + liveTurn)}">${html}</section>`;
 }
 function hash(text) {
   let h = 0;
@@ -289,7 +291,7 @@ function ownerMessageHtml(message, className, who, text) {
   const key = `msg:${message.entryId}`,
     open = expanded.has(key);
   const hint = `<button type="button" class="msg-more" data-toggle="${esc(key)}" aria-expanded="${open}"><span class="more">Show more ▾ · ${text.length.toLocaleString("en-US")} chars</span><span class="less">Show less ▴</span></button>`;
-  return `<article class="${className}${open ? " open" : ""}">${meta}<div class="bubble"><div class="msg-body">${markdown(text)}</div>${imagesHtml(message.images)}</div>${hint}</article>`;
+  return `<article class="${className}">${meta}<div class="bubble"><div class="msg-body">${markdown(text)}</div>${imagesHtml(message.images)}</div>${hint}</article>`;
 }
 function inputHtml(message, who = "Coordinator") {
   const text = message.text ?? "";
@@ -627,18 +629,34 @@ function clampedMessageHint(event) {
   return article.querySelector(".msg-more");
 }
 
-let messageClick = null; // the message the current click sequence started on, and whether it was open
-/** Opens or closes an owner message in place, so a selection, focus and the scroll position stay where they are. */
-function toggleMessage(hint, event, follow) {
+const DOUBLE_CLICK_MS = 300;
+let messageClick = null, // the message the current click sequence started on, and whether it was open
+  pendingClose = null; // a collapse by a click on the text waits out a possible double click, which would select a word instead
+/** Opens or closes an owner message in place (`aria-expanded` drives the CSS), so selection, focus and scroll stay where they are. */
+function setMessageOpen(hint, open, follow) {
   const key = hint.dataset.toggle;
-  // A double or triple click selects words: the first click already toggled, so the sequence ends where it began.
-  if (event.detail <= 1) messageClick = { key, was: expanded.has(key) };
-  const open = event.detail > 1 && messageClick?.key === key ? messageClick.was : !expanded.has(key);
   if (open) expanded.add(key);
   else expanded.delete(key);
   follow?.stop();
-  hint.closest(".msg").classList.toggle("open", open);
   hint.setAttribute("aria-expanded", String(open));
+}
+function toggleMessage(hint, event, follow) {
+  const key = hint.dataset.toggle;
+  if (event.detail > 1) {
+    // The later clicks of a double or triple click select words: drop a collapse still waiting, undo an open already done.
+    if (pendingClose?.key === key) {
+      clearTimeout(pendingClose.timer);
+      pendingClose = null;
+    } else if (messageClick?.key === key) setMessageOpen(hint, messageClick.was, follow);
+    return;
+  }
+  const open = !expanded.has(key);
+  messageClick = { key, was: !open };
+  if (open || hint.contains(event.target)) setMessageOpen(hint, open, follow);
+  else {
+    clearTimeout(pendingClose?.timer);
+    pendingClose = { key, timer: setTimeout(() => ((pendingClose = null), setMessageOpen(hint, false, follow)), DOUBLE_CLICK_MS) };
+  }
 }
 
 /** Clicks inside any transcript (chat feed, a worker in the center, the Host agent); `rerender` repaints that transcript, `follow` is its follower. */
