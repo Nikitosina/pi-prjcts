@@ -2724,8 +2724,12 @@ const journeys = {
   async "message-collapse"(run, page, record, dir) {
     const composer = "#composer textarea",
       owner = "#feed .msg.owner";
-    const paragraph = (n) => `Paragraph ${n}: the stack trace repeats itself and the log keeps going so this message must overflow the clamp. `.repeat(3);
-    const longText = [1, 2, 3, 4, 5].map(paragraph).join("\n\n").replace("Paragraph 1:", "Paragraph 1 [docs](https://example.invalid/docs):");
+    const paragraph = (n) =>
+      `Paragraph ${n}: the stack trace repeats itself and the log keeps going so this message must overflow the clamp. `.repeat(3);
+    const longText = [1, 2, 3, 4, 5]
+      .map(paragraph)
+      .join("\n\n")
+      .replace("Paragraph 1:", "Paragraph 1 [docs](https://example.invalid/docs):");
     const listText = `Fix these first:\n\n${[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => `- item ${n} needs a long enough line of text to wrap`).join("\n")}`;
     const send = async (text) => {
       await page.click(composer);
@@ -2743,7 +2747,11 @@ const journeys = {
           html: a?.outerHTML.length ?? 0, focusOnMore: document.activeElement === more };
       })()`);
     const expectState = async (needle, want, what) => {
-      await page.waitFor(`(() => { const a = ${ownerBy(needle)}; return a?.querySelector('.msg-more')?.getAttribute('aria-expanded') === ${JSON.stringify(want)}; })()`, what, 5000);
+      await page.waitFor(
+        `(() => { const a = ${ownerBy(needle)}; return a?.querySelector('.msg-more')?.getAttribute('aria-expanded') === ${JSON.stringify(want)}; })()`,
+        what,
+        5000,
+      );
     };
     const tap = (selector) => page.click(selector);
     await page.navigate(run.webUrl);
@@ -2752,7 +2760,11 @@ const journeys = {
       "inbox ready",
     );
     await send("Short answer: yes");
-    await page.waitFor(`!!${ownerBy("Short answer: yes")} && document.querySelectorAll('#feed .msg.agent').length >= 1`, "short exchange", 60000);
+    await page.waitFor(
+      `!!${ownerBy("Short answer: yes")} && document.querySelectorAll('#feed .msg.agent').length >= 1`,
+      "short exchange",
+      60000,
+    );
     await send(longText);
     await page.waitFor(`!!${ownerBy("Paragraph 5")} && document.querySelectorAll('#feed .msg.agent').length >= 2`, "long exchange", 60000);
     await send(listText);
@@ -2764,11 +2776,13 @@ const journeys = {
 
     // Short text stays plain: no marker, no hint, and a click changes nothing.
     const short = await state("Short answer: yes");
-    if (short.overflow || short.moreShown || short.expanded !== null && short.moreShown) throw Error(`short message is clamped: ${JSON.stringify(short)}`);
+    if (short.overflow || short.moreShown || (short.expanded !== null && short.moreShown))
+      throw Error(`short message is clamped: ${JSON.stringify(short)}`);
     const shortBefore = await page.evaluate(`${ownerBy("Short answer: yes")}.outerHTML`);
     await tap(`#feed .msg.owner .bubble`);
     await page.evaluate(`new Promise((ok) => setTimeout(ok, 150))`);
-    if ((await page.evaluate(`${ownerBy("Short answer: yes")}.outerHTML`)) !== shortBefore) throw Error("clicking a short message changed it");
+    if ((await page.evaluate(`${ownerBy("Short answer: yes")}.outerHTML`)) !== shortBefore)
+      throw Error("clicking a short message changed it");
     record("visible", "short message has no overflow marker or hint, and a click leaves it untouched");
 
     // Long message: clamped with a hint; a click on the text opens it, a second click closes it.
@@ -2780,12 +2794,14 @@ const journeys = {
     await tap(textPoint);
     await expectState("Paragraph 5", "true", "click expands");
     const opened = await state("Paragraph 5");
-    if (opened.height <= collapsed.height + 40 || !/Show less/.test(opened.moreText)) throw Error(`expand did not grow: ${JSON.stringify({ collapsed, opened })}`);
+    if (opened.height <= collapsed.height + 40 || !/Show less/.test(opened.moreText))
+      throw Error(`expand did not grow: ${JSON.stringify({ collapsed, opened })}`);
     await shoot("02-long-expanded", "Paragraph 5");
     await tap(`#feed .msg.owner[data-overflow].open .bubble p`);
     await expectState("Paragraph 5", "false", "second click collapses");
     const closed = await state("Paragraph 5");
-    if (Math.abs(closed.height - collapsed.height) > 2) throw Error(`collapse did not restore height: ${JSON.stringify({ collapsed, closed })}`);
+    if (Math.abs(closed.height - collapsed.height) > 2)
+      throw Error(`collapse did not restore height: ${JSON.stringify({ collapsed, closed })}`);
     record("visible", "clicking the message text opens and closes it, height follows");
 
     // Keyboard: the hint is a real button, Enter and Space both toggle, focus stays on it.
@@ -2836,7 +2852,11 @@ const journeys = {
     await tap(textPoint);
     await expectState("Paragraph 5", "true", "expanded before refresh");
     await send("One more short line");
-    await page.waitFor(`!!${ownerBy("One more short line")} && document.querySelectorAll('#feed .msg.agent').length >= 4`, "fourth exchange", 60000);
+    await page.waitFor(
+      `!!${ownerBy("One more short line")} && document.querySelectorAll('#feed .msg.agent').length >= 4`,
+      "fourth exchange",
+      60000,
+    );
     if ((await state("Paragraph 5")).expanded !== "true") throw Error("an ordinary refresh collapsed the open message");
     record("visible", "an open message stays open after a new turn re-renders the feed");
     await tap(`#feed .msg.owner[data-overflow].open .bubble p`);

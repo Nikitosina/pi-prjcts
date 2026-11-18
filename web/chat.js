@@ -284,7 +284,8 @@ const approvalPattern = /^\[approval ([0-9a-f-]{36})\] The owner (approved|denie
 /** An owner bubble whose long text clamps (`measureMessage` marks the overflow) and opens on a click or the hint button. */
 function ownerMessageHtml(message, className, who, text) {
   const meta = `<div class="msg-meta"><span class="who">${who}</span>${who === "Earlier input" ? "" : `<time>${esc(clock(message.at))}</time>`}</div>`;
-  if (message.entryId == null) return `<article class="${className}">${meta}<div class="bubble">${markdown(text)}${imagesHtml(message.images)}</div></article>`;
+  if (message.entryId == null)
+    return `<article class="${className}">${meta}<div class="bubble">${markdown(text)}${imagesHtml(message.images)}</div></article>`;
   const key = `msg:${message.entryId}`,
     open = expanded.has(key);
   const hint = `<button type="button" class="msg-more" data-toggle="${esc(key)}" aria-expanded="${open}">${open ? "Show less ▴" : `Show more ▾ · ${text.length.toLocaleString("en-US")} chars`}</button>`;

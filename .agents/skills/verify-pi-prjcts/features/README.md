@@ -29,6 +29,7 @@ Each file: H1, one paragraph, then exactly four H2s in order: `Sub-features`, `H
 ## Features
 
 - [Message the coordinator](./message-coordinator.md) — composer, send, reply, persisted transcript. Scripted.
+- [Long owner messages](./message-collapse.md) — clamp, click and keyboard open/close, no toggle on selection, links or short text. Scripted.
 - [Create a project](./create-project.md) — New project hint and the Host agent. Recipe only.
 - [Search](./search.md) — ⌘K palette over chats, projects, commands and full-text hits. Recipe only.
 - [Memory](./knowledge.md) — read and edit Memory entries; agent writes. Partly scripted (`ui2`).
