@@ -652,9 +652,6 @@ a {
 .msg.owner[data-overflow] .msg-more[aria-expanded="false"] {
   display: block;
 }
-.msg-body:focus {
-  outline: none;
-}
 .msg-body > :first-child {
   margin-top: 0;
 }

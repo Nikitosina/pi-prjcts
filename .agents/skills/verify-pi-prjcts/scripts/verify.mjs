@@ -2929,8 +2929,13 @@ const journeys = {
     record("visible", "A → B → A shows both long messages collapsed again");
     // The feed is still scrolling to its end after the switch; aim only once it has settled.
     await settle();
-    await mouse(await wordPoint("Paragraph 5", "first"), [1]);
-    await expectRevealed("Paragraph 5", "a click reveals after coming back");
+    await page.evaluate(`getSelection().removeAllRanges()`);
+    await mouse(await wordPoint("Paragraph 5", "first"), [1, 2]);
+    await settle();
+    const pickedCollapsed = await page.evaluate(`getSelection().toString().trim().length`);
+    if (pickedCollapsed < 2) throw Error(`double click on the collapsed preview did not select a word (${pickedCollapsed})`);
+    await expectRevealed("Paragraph 5", "a double click reveals after coming back");
+    record("visible", `a double click on the collapsed preview selected a word (${pickedCollapsed} characters) and revealed the message`);
     await page.reload();
     await page.waitFor(
       `!!${ownerBy("Paragraph 5")}?.dataset.overflow && !!${ownerBy("item 10")}?.dataset.overflow`,

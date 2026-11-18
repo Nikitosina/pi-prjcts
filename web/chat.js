@@ -20,7 +20,14 @@ let live = null,
   loading = null,
   held = null; // live text and thinking of a step the host just committed, shown until a transcript read that includes it renders
 const expanded = new Set(); // tool callIds and group keys the owner opened
-const revealed = new Set(); // long owner messages opened during this chat visit; they stay open until the owner navigates away
+const revealed = new Set(); // long owner messages opened during this chat visit, keyed by transcript scope; they stay open until the owner navigates away
+let renderScope = ""; // the transcript `transcriptHtml` is drawing: "" for the chat, `w:<id>|` for a worker, `host|` for the Host agent
+
+/** Collapses again the messages of one transcript scope (a worker or the Host agent being opened); `root` is its retained DOM, if any. */
+export function forgetReveals(scope, root) {
+  for (const key of [...revealed]) if (key.startsWith(scope)) revealed.delete(key);
+  for (const hint of root?.querySelectorAll('.msg-more[aria-expanded="true"]') ?? []) hint.setAttribute("aria-expanded", "false");
+}
 const reportPattern = /^\[(worker|scout|reviewer) ([0-9a-f-]{36}) ([\w-]+(?: to start)?): ([^\]\n]*)\]([\s\S]*)$/;
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/;
 
@@ -226,10 +233,15 @@ export function mergeGroups(older, newer) {
 }
 /** Turn sections for a list of transcript items (also used for worker transcripts in the center). `groups` are the host's tool
  * groups of the loaded calls (`{ groups, calls }`); they show only while the owner has summaries on. */
-export function transcriptHtml(items, busy, who = "Coordinator", { fold = true, groups = null } = {}) {
+export function transcriptHtml(items, busy, who = "Coordinator", { fold = true, groups = null, scope = "" } = {}) {
   const all = Array.isArray(items[0]?.items) ? items : turns(items);
   const shown = state.ui?.toolSummaries?.enabled ? groups : null;
-  return all.map((turn, index) => turnHtml(turn, busy && index === all.length - 1, who, fold, shown)).join("");
+  renderScope = scope;
+  try {
+    return all.map((turn, index) => turnHtml(turn, busy && index === all.length - 1, who, fold, shown)).join("");
+  } finally {
+    renderScope = "";
+  }
 }
 function turnHtml(turn, liveTurn, who, fold = true, groups = null) {
   const { start } = turn,
@@ -291,7 +303,7 @@ function ownerMessageHtml(message, className, who, text) {
   const meta = `<div class="msg-meta"><span class="who">${who}</span>${who === "Earlier input" ? "" : `<time>${esc(clock(message.at))}</time>`}</div>`;
   if (message.entryId == null)
     return `<article class="${className}">${meta}<div class="bubble">${markdown(text)}${imagesHtml(message.images)}</div></article>`;
-  const key = `msg:${message.entryId}`,
+  const key = `${renderScope}msg:${message.entryId}`,
     open = revealed.has(key);
   const hint = `<button type="button" class="msg-more" data-reveal="${esc(key)}" aria-expanded="${open}">Show more ▾ · ${text.length.toLocaleString("en-US")} chars</button>`;
   return `<article class="${className}">${meta}<div class="bubble"><div class="msg-body" tabindex="-1">${markdown(text)}</div>${imagesHtml(message.images)}</div>${hint}</article>`;

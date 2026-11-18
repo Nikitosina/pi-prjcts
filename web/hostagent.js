@@ -4,7 +4,7 @@
 import { call, stream, uuid } from "./api.js";
 import { clip, esc, markdown, oneLine, shortModel } from "./format.js";
 import { emit, fail, inline, on, state, toast } from "./state.js";
-import { mergeGroups, morph, showThinking, thinkingHtml, transcriptClick, transcriptFocus, transcriptHtml } from "./chat.js";
+import { forgetReveals, mergeGroups, morph, showThinking, thinkingHtml, transcriptClick, transcriptFocus, transcriptHtml } from "./chat.js";
 import { hydrateMedia } from "./media.js";
 
 const THINKING = ["off", "low", "medium", "high", "max"];
@@ -28,6 +28,7 @@ let items = [],
   loads = 0;
 
 export const pendingApprovals = () => approvals.filter((item) => item.state === "pending");
+const HOST_SCOPE = "host|"; // the Host agent's reveal scope in chat.js
 export const isOpen = () => drawer.dataset.open === "1";
 
 export function toggleHostAgent(force, { at } = {}) {
@@ -36,6 +37,7 @@ export function toggleHostAgent(force, { at } = {}) {
   drawer.setAttribute("aria-hidden", String(!next));
   drawer.inert = !next;
   if (next) {
+    forgetReveals(HOST_SCOPE, body);
     void loadHostAgent();
     if (at === "approvals") setTimeout(() => approvalsBox.querySelector("button")?.focus(), 60);
     else setTimeout(() => input.focus(), 30);
@@ -165,7 +167,7 @@ function offerSettings(section, before = () => {}) {
 // ---------------------------------------------------------------------------------------------------------------- transcript
 
 function paint() {
-  const transcript = transcriptHtml(items, false, "Host agent", { fold: false, groups });
+  const transcript = transcriptHtml(items, false, "Host agent", { fold: false, groups, scope: HOST_SCOPE });
   morph(
     body,
     (before ? `<button type="button" class="earlier" data-ha-earlier>Show earlier</button>` : "") +

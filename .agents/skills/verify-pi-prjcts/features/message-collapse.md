@@ -8,7 +8,7 @@ A long message the owner sent is clamped to six lines with a fade and a "Show mo
 - `reveal`: a click on the text, or Enter or Space on the focused hint, sets `aria-expanded="true"`; the hint is hidden and keyboard focus moves to the `.msg-body`. Further clicks change nothing.
 - `no-false-reveal`: a drag selection, a click on a link, button or image, and a click on a short message do not reveal. A double click on a collapsed message reveals it with the first click and selects the word.
 - `refresh`: a revealed message stays revealed, in the same DOM node, when a new turn re-renders the feed or the same chat is selected again.
-- `visit`: selecting another chat (the `select` event) clears the revealed set, so A → B → A starts collapsed; so does a page reload. Tool rows and groups open or close as before; only messages are one-way.
+- `visit`: selecting another chat (the `select` event) clears the revealed set, so A → B → A starts collapsed; so does a page reload. Tool rows and groups open or close as before; only messages are one-way. A worker transcript (`w:<id>|` scope) and the Host agent drawer (`host|`) have their own reveal scope: opening one starts it collapsed.
 
 ## How to get to it (user POV)
 
@@ -16,7 +16,7 @@ A long message the owner sent is clamped to six lines with a fade and a "Show mo
 
 ## Driving it with browser CDP
 
-Scripted: `node .agents/skills/verify-pi-prjcts/scripts/verify.mjs drive --run <scratch> message-collapse`. It sends a short message, a five-paragraph message with a link and a ten-item list through the composer, then asserts every sub-feature with real pointer clicks, a real drag and double click, real key presses, a New chat round trip (A → B → A) and a reload. Screenshots `01-long-collapsed`, `02-long-revealed`, `03-list-collapsed`, `04-list-revealed`, `05-transcript-top` at 1440 px and `06` to `09` at 390 px. Not scripted: Brief messages in worker transcripts and the Host agent (same renderer), a message with images.
+Scripted: `node .agents/skills/verify-pi-prjcts/scripts/verify.mjs drive --run <scratch> message-collapse`. It sends a short message, a five-paragraph message with a link and a ten-item list through the composer, then asserts every sub-feature with real pointer clicks, a real drag and double click, real key presses, a New chat round trip (A → B → A) and a reload. Screenshots `01-long-collapsed`, `02-long-revealed`, `03-list-collapsed`, `04-list-revealed`, `05-transcript-top` at 1440 px and `06` to `09` at 390 px. Not scripted: Brief messages in worker transcripts and the Host agent (same renderer, scoped keys, reset on open), a message with images.
 
 ## Gotchas
 

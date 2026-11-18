@@ -3,7 +3,7 @@
 import { call, uuid } from "./api.js";
 import { clip, dur, esc, oneLine, shortModel, tokens } from "./format.js";
 import { emit, fail, on, project, stale, state, toast } from "./state.js";
-import { morph, transcriptClick, transcriptFocus, transcriptHtml } from "./chat.js";
+import { forgetReveals, morph, transcriptClick, transcriptFocus, transcriptHtml } from "./chat.js";
 import { follower } from "./follow.js";
 import { hydrateMedia } from "./media.js";
 
@@ -522,6 +522,9 @@ export async function renderWorker(root, id, { steer = false } = {}) {
     return `<div class="focus-head"><button type="button" class="back" data-cmd="leave-focus" aria-label="Back to chat">← <kbd>Esc</kbd></button><span class="w-role" aria-hidden="true">${ROLE_ICON[worker?.role ?? "worker"] ?? "⚒"}</span><h1>${esc(worker?.title ?? "Worker")}</h1>${look ? `<span class="badge t-${look.tone}">${esc(look.label)}</span>` : ""}<span class="grow"></span>${worker?.working && !nested ? `<button type="button" class="ghost-btn small" data-stop-worker>Stop</button>` : ""}</div>${promptLine(worker)}${worker?.ready ? `<div class="report-card"><b>Ready report</b><p>${esc(worker.ready.summary)}</p>${worker.ready.proof?.length ? `<ul>${worker.ready.proof.map((item) => `<li class="mono small">${esc(item)}</li>`).join("")}</ul>` : ""}</div>` : handbackCard(worker)}`;
   };
   root.innerHTML = `${head()}<div id="worker-feed" class="feed-inner"><p class="loading-line">Loading transcript…</p></div>${nested ? "" : `<form class="worker-send"><span class="glyph" aria-hidden="true">❯</span><textarea rows="1" aria-label="Message this worker" placeholder="${steer ? "Steer this worker…" : "Message this worker…"}" maxlength="24000"></textarea><button type="submit" class="send" aria-label="Send to worker">↵</button></form>`}`;
+  // Each opening of a worker starts with its long messages collapsed.
+  const scope = `w:${id}|`;
+  forgetReveals(scope);
   let items = [],
     groups = null;
   // The focus view is reused: this render lives only while its own feed is on the page.
@@ -535,7 +538,12 @@ export async function renderWorker(root, id, { steer = false } = {}) {
     if (!alive()) return;
     const worker = find();
     // Unchanged turns keep their nodes, so a summary arriving keeps focus, open lines and the reader's place (tool-summaries D6).
-    const focused = node.contains(document.activeElement) ? document.activeElement.dataset.toggle : undefined;
+    const kept = node.contains(document.activeElement) ? document.activeElement.dataset : {},
+      focused = kept.toggle
+        ? `[data-toggle="${CSS.escape(kept.toggle)}"]`
+        : kept.reveal
+          ? `[data-reveal="${CSS.escape(kept.reveal)}"]`
+          : "";
     follow.render(() => {
       morph(
         node,
@@ -543,13 +551,12 @@ export async function renderWorker(root, id, { steer = false } = {}) {
           items,
           !!worker?.working,
           worker?.role === "worker" ? "Worker" : worker?.role ? worker.role[0].toUpperCase() + worker.role.slice(1) : "Worker",
-          { groups },
+          { groups, scope },
         ) || `<p class="muted">No transcript yet.</p>`,
       );
       hydrateMedia(node, { project: state.projectId, threadId: id });
     });
-    if (focused && !node.contains(document.activeElement))
-      node.querySelector(`[data-toggle="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
+    if (focused && !node.contains(document.activeElement)) node.querySelector(focused)?.focus({ preventScroll: true });
   };
   const load = async () => {
     const page = await call("thread-history", { id: state.projectId, threadId: id, limit: 200, messageText: "full" }).catch((error) => {
