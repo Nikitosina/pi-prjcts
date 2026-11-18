@@ -9,6 +9,7 @@ export const FILE_ONLY_NOTE =
 
 /** The plain path a local `file:` URL names; null for another scheme, a remote host or an escape that does not decode. */
 function localPath(line) {
+  if (!/^file:\/\//i.test(line)) return null;
   let url;
   try {
     url = new URL(line);
@@ -16,6 +17,7 @@ function localPath(line) {
     return null;
   }
   if (url.protocol !== "file:" || (url.hostname !== "" && url.hostname !== "localhost")) return null;
+  if (/%2f/i.test(url.pathname)) return null;
   let path;
   try {
     path = decodeURIComponent(url.pathname);
@@ -27,8 +29,8 @@ function localPath(line) {
 }
 
 /** Paths when every line is a local file URL, else null (one foreign line leaves the whole transfer to the browser). */
-function pathsFrom(text) {
-  const lines = text.split(/\r?\n/).filter((line) => line.trim() && !line.startsWith("#"));
+function pathsFrom(text, comments) {
+  const lines = text.split(/\r?\n/).filter((line) => line.trim() && !(comments && line.startsWith("#")));
   const paths = lines.map((line) => localPath(line.trim()));
   return lines.length && paths.every((path) => path !== null) ? paths : null;
 }
@@ -37,9 +39,11 @@ function pathsFrom(text) {
 export function pathsFromTransfer(transfer) {
   const types = [...(transfer?.types ?? [])];
   for (const type of ["text/uri-list", "text/plain"]) {
-    const paths = types.includes(type) ? pathsFrom(transfer.getData(type)) : null;
+    const paths = types.includes(type) ? pathsFrom(transfer.getData(type), type === "text/uri-list") : null;
     if (paths) return { source: PathSource.Path, paths };
   }
+  if (types.includes("text/plain") && /^\/[^\r\n]*$/.test(transfer.getData("text/plain").trim()))
+    return { source: PathSource.None, paths: [] };
   const hasFile = types.includes("Files") || transfer?.files?.length > 0;
   return { source: hasFile ? PathSource.FileOnly : PathSource.None, paths: [] };
 }

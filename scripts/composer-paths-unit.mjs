@@ -71,6 +71,19 @@ const cases = [
     "P6 plain text, even a path, is left to the browser",
     () => assert.deepEqual(paths({ "text/plain": "/Users/a/Copy as Pathname.txt" }), { source: PathSource.None, paths: [] }),
   ],
+  ["P3 a relative file URL names no absolute path", () => assert.equal(paths({ "text/plain": "file:notes.txt" }).source, PathSource.None)],
+  [
+    "P3 an encoded slash would add a directory",
+    () => assert.equal(paths({ "text/uri-list": "file:///tmp/a%2Fb" }).source, PathSource.None),
+  ],
+  [
+    "P6 a File next to an absolute path in text/plain leaves the paste to the browser",
+    () => assert.deepEqual(paths({ "text/plain": "/Users/a/My File.txt" }, 1), { source: PathSource.None, paths: [] }),
+  ],
+  [
+    "P6 a note above a file URL in text/plain is not dropped",
+    () => assert.equal(paths({ "text/plain": "# Keep this note\nfile:///tmp/a" }).source, PathSource.None),
+  ],
   ["empty transfer", () => assert.deepEqual(paths({}), { source: PathSource.None, paths: [] })],
 ];
 let failed = 0;

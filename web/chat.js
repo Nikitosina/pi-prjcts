@@ -581,7 +581,7 @@ function grow() {
 }
 input.addEventListener("input", grow);
 form.addEventListener("dragover", (event) => {
-  if (event.dataTransfer?.types.includes("Files")) event.preventDefault();
+  if (event.dataTransfer?.types.some((type) => type === "Files" || type === "text/uri-list")) event.preventDefault();
 });
 form.addEventListener("drop", (event) => takePaths(event, event.dataTransfer, false));
 input.addEventListener("paste", (event) => takePaths(event, event.clipboardData, true));
