@@ -827,6 +827,40 @@ await kit.run(async () => {
     );
   }
 
+  // ---- 38: a provider that rejects with an empty message is a failure, not a success ----
+  {
+    const F = "9".repeat(40);
+    const G = "8".repeat(40);
+    const reviewerCalls = (sha) => result.calls.filter((item) => item.role === "reviewer" && item.user.includes(`REVIEW ${sha}`)).length;
+    const reportsFor = (sha) =>
+      result.calls
+        .filter((item) => item.role === "coordinator" && /^\[reviewer /.test(item.user) && item.user.includes(sha))
+        .map((item) => item.user);
+    const settled = async (sha) => {
+      await kit.ask(id, `MARK-REVIEWER ${sha}`);
+      await kit.waitFor(async () => reportsFor(sha).length > 0, `report for ${sha.slice(0, 7)}`, { timeout: 60000 });
+    };
+    patchData((data) => {
+      data.confirmFailure = "";
+    });
+    await settled(F);
+    const failed = reportsFor(F).join("\n");
+    check(
+      "38 a provider rejecting with an empty message fails the reviewer: no read, no attested revision, readable report",
+      reviewerCalls(F) === 0 && !failed.includes(`Read revision: ${F}`) && /failed to start/.test(failed) && /no message/i.test(failed),
+      failed,
+    );
+    patchData((data) => {
+      delete data.confirmFailure;
+    });
+    await settled(G);
+    check(
+      "38 the same provider without the failure is read and reported",
+      reviewerCalls(G) === 1 && reportsFor(G).some((text) => text.includes(`Read revision: ${G}`)),
+      reportsFor(G),
+    );
+  }
+
   // ---- 24: the core tree is provider-neutral ----
   const forbidden = [
     ["ar", "canum"],

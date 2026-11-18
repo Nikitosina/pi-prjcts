@@ -138,7 +138,7 @@ export default {
         }),
         // Chat and task checkouts are the same plain directories. A task checkout's revision lives in `.fake-revision`, so a test can move it or dirty the
         // directory; `confirmRevision` reports what the directory holds. $FAKE_PLUGIN_DATA: `taskCheckoutRevision` (first materialization differs from the plan),
-        // `noConfirmRevision` (a provider without the revision contract).
+        // `noConfirmRevision` (a provider without the revision contract), `confirmFailure` (confirmRevision rejects with this message, which may be empty).
         coordinator: {
           plan: async (context) => {
             const name = context.allocated?.workspaceName ?? `fake-chat-${context.chatId.slice(0, 8)}`;
@@ -185,10 +185,13 @@ export default {
               ...(data().noConfirmRevision
                 ? {}
                 : {
-                    confirmRevision: async () => ({
-                      revision: readFileSync(marker, "utf8").trim(),
-                      clean: readdirSync(dir).every((entry) => entry === ".fake-worktree" || entry === ".fake-revision"),
-                    }),
+                    confirmRevision: async () => {
+                      if (typeof data().confirmFailure === "string") throw new Error(data().confirmFailure);
+                      return {
+                        revision: readFileSync(marker, "utf8").trim(),
+                        clean: readdirSync(dir).every((entry) => entry === ".fake-worktree" || entry === ".fake-revision"),
+                      };
+                    },
                   }),
             };
           },

@@ -59,3 +59,4 @@ removed) and the "plugin is not loaded" note in the PR card (20; `automation-sna
 35. A first checkout the provider materialized at another commit than the plan is reported as the requested commit.
 36. A provider that cannot confirm the revision (no `confirmRevision`) is trusted anyway.
 37. After a failed turn the reviewer is stuck, or labels itself with the commit that failed.
+38. A workspace preparation that rejects with an empty message is treated as success: the reviewer turn starts, reads and its report names the requested revision. The failure report must stay readable when the message is empty.
