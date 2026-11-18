@@ -73,3 +73,8 @@ Live cause: the Coordinator answered "yes, I continue, next I start the full che
 - V7 `readRef` on send widens access: it is accepted for a worker, a scout, a reviewer of another chat, a reviewer that reads an agent's worktree or the project checkout, or a paused project.
 - V8 A frozen binding whose SHA differs from the SHA requested for the turn is used anyway.
 - V9 The reviewer is not told that its working directory now holds another commit, and answers from the file contents of the old one.
+- V10 A reviewer is stopped while its turn prepares and a new commit is accepted at once: the old turn prepares the new commit and labels its answer with the old one. A new commit is taken only after every earlier message of the reviewer has been reported, also when a newer message settled first.
+- V11 A failed first SHA, or a plain send that cannot be prepared, is reported as read. Every turn records the commit it was to read and whether its checkout was prepared; only a prepared turn says "Read revision".
+- V12 A turn stopped before its checkout was prepared becomes the commit the next plain send reads.
+- V13 A worker given a `readRef` gets revision evidence, or a reviewer's reused checkout is not at the commit its report names (git provider: HEAD moved or files changed). Plugin providers cannot be checked this way.
+- V14 Reopening the host stops on a reviewer whose new commit is unavailable instead of reporting it from its own reporter.

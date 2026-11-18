@@ -69,6 +69,12 @@ for (const prompt of [DEFAULT_ROLE_PROMPTS.worker, TASK_HELPER_PROMPT])
 const requests = [];
 let quotaFailed = false;
 let readerSaw = null;
+let holdNextPrepare = false,
+  nextHeld = false,
+  releaseNext = false;
+let holdUnavailable = false,
+  unavailableHeld = false,
+  unavailableRelease = false;
 const text = (content) =>
   typeof content === "string" ? content : content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
 const call = (name, args) => fauxAssistantMessage([fauxToolCall(name, args)], { stopReason: "toolUse" });
@@ -408,7 +414,20 @@ async function open() {
     prepare: async ({ agent, seq }) => {
       if (agent.title === "BRIEF-REVREAD") {
         const read = readRevision(agent, seq);
-        if (read?.sha === UNAVAILABLE) throw new Error(`Commit ${read.sha} is not in the local repository`);
+        if (holdNextPrepare) {
+          holdNextPrepare = false;
+          nextHeld = true;
+          while (!releaseNext) await delay(20);
+        }
+        if (read?.sha === UNAVAILABLE) {
+          // The first preparation of an unavailable commit stays open until the test restarts the host.
+          if (holdUnavailable) {
+            holdUnavailable = false;
+            unavailableHeld = true;
+            while (!unavailableRelease) await delay(20);
+          }
+          throw new Error(`Commit ${read.sha} is not in the local repository`);
+        }
         readerSaw = read?.sha ?? null;
       }
       if (agent.title === "LONGPREPFAIL") throw new Error(longAnswer);
@@ -1388,6 +1407,23 @@ assert.deepEqual(await jobs.stallTick(harness, T + 21 * 60_000), [gate.id], "an 
   assert.equal((await reportsOf(reviewer)).length, turns + 1, "V5 only the plain send started a turn");
   assert.equal(readerSaw, REV_C, "V5 the refused races changed nothing");
 
+  // V4: recovery while a new commit is still being prepared tolerates it, and the unavailable commit is reported as not read.
+  holdUnavailable = true;
+  await say_(root, `Resend ${reviewer.id} ${UNAVAILABLE} restart-1`);
+  await until(() => unavailableHeld, "unavailable commit preparing");
+  await jobs.recover(harness);
+  unavailableRelease = true;
+  await quiet(harness);
+  const afterRestart = await reportsOf(reviewer);
+  assert.match(
+    afterRestart.at(-1),
+    new RegExp(`Revision ${UNAVAILABLE} was not read\\.`),
+    "V4 the unavailable commit is reported as not read",
+  );
+  await say_(root, `Resend ${reviewer.id} - plain-after-restart`);
+  await quiet(harness);
+  assert.equal(readerSaw, REV_C, "V4 a plain send after the failed turn reads the last commit that was read");
+
   // V5: stopping a reviewer in the middle of a turn does not let another revision in before that turn has been reported.
   const stoppedRuns = prepareRuns.length;
   prepareHeld.add("BRIEF-REVREAD");
@@ -1402,6 +1438,35 @@ assert.deepEqual(await jobs.stallTick(harness, T + 21 * 60_000), [gate.id], "an 
   await say_(root, `Resend ${reviewer.id} ${REV_B} after-stop`);
   await quiet(harness);
   assert.equal(readerSaw, REV_B, "V5 once settled, a stopped reviewer takes a new revision");
+
+  // V5: a turn stopped before its checkout was prepared was never read: the next plain send keeps the last commit that was.
+  prepareHeld.add("BRIEF-REVREAD");
+  const abandonedRuns = prepareRuns.length;
+  await say_(root, `Resend ${reviewer.id} ${REV_A} abandoned`);
+  await until(() => prepareRuns.length > abandonedRuns, "held prepare of the abandoned turn");
+  await say_(root, `Stopit ${reviewer.id}`);
+  prepareHeld.delete("BRIEF-REVREAD");
+  await quiet(harness);
+  await say_(root, `Resend ${reviewer.id} - after-abandon`);
+  await quiet(harness);
+  assert.equal(readerSaw, REV_B, "V5 a stopped, never prepared turn does not become the reviewer's commit");
+  const abandoned = await reportsOf(reviewer);
+  assert.match(abandoned.at(-1), new RegExp(`Read revision: ${REV_B}`));
+
+  // V5: an older message still being prepared keeps the commit shut even when a newer one has been reported.
+  holdNextPrepare = true;
+  await say_(root, `Resend ${reviewer.id} - overlap-1`);
+  await until(() => nextHeld, "first overlapping message preparing");
+  const before = (await reportsOf(reviewer)).length;
+  await say_(root, `Resend ${reviewer.id} - overlap-2`);
+  await until(async () => (await reportsOf(reviewer)).length > before, "newer message reported");
+  await say_(root, `Resend ${reviewer.id} ${REV_A} overlap-3`);
+  assert.match(lastTool(), /still working/i, "V5 an unreported older message keeps the reviewer's commit");
+  releaseNext = true;
+  await quiet(harness);
+  await say_(root, `Resend ${reviewer.id} ${REV_A} overlap-3`);
+  await quiet(harness);
+  assert.equal(readerSaw, REV_A, "V5 once every earlier message is reported, the new commit is taken");
 }
 
 await harness.close(context);

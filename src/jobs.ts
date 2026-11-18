@@ -203,8 +203,8 @@ export type Agent = {
   readHead?: string;
   /** The commit each turn of a scout or reviewer of a full SHA reads, oldest first; a commit other than `readRef` has a frozen checkout of its own. */
   reads?: ReadTurn[];
-  /** The newest message whose reporter has filed its report; a reader changes commit only once its last message settled. */
-  settledSeq?: number;
+  /** Messages of a reader whose reporter is done; a reader changes commit only once every message it has taken settled. */
+  settled?: number[];
   /** The host prepared this agent's environment (workspace, tools). */
   prepared: boolean;
   /** Messages sent to it since it was created; a reporter that finishes while a newer message is queued does not settle the Job. */
@@ -545,7 +545,11 @@ function nextModel(host: JobsHost, role: AgentRole, from: string, moves: readonl
 /** The reporter of message `seq` is done with a reader: it may change commit for its next message. */
 async function settleTurn(tx: Tx, agentId: string, seq: number) {
   const agent = (await tx.doc(Jobs, ROOT_CONVERSATION_ID)).agents[agentId];
-  if (agent?.reads && (agent.settledSeq ?? -1) < seq) agent.settledSeq = seq;
+  if (!agent?.reads || agent.settled?.includes(seq)) return;
+  // A turn that settles without its checkout prepared (it was stopped first) read nothing.
+  const turn = agent.reads.find((item) => item.seq === seq);
+  if (turn && !turn.state) turn.state = "failed";
+  agent.settled = [...(agent.settled ?? []), seq];
 }
 
 /** Prepares an agent, delivers one message and reports its answer once, with large handbacks read on demand. */
@@ -1485,7 +1489,7 @@ export function createJobs(host: JobsHost) {
         if (!FULL_COMMIT.test(next))
           return "readRef must be a full lowercase commit SHA. Resolve a branch or PR to its commit first and pass that SHA.";
         // Its last message must be reported too: a stopped turn can still be preparing, and would prepare the new commit.
-        if (agent.endedAt !== null && agent.reads && (agent.settledSeq ?? -1) < (agent.sends ?? 0))
+        if (agent.endedAt !== null && agent.reads?.some((turn) => !agent.settled?.includes(turn.seq)))
           return `Reviewer ${id} is still working or reporting its last message; wait a moment, or send without readRef.`;
         if (agent.endedAt === null)
           return `Reviewer ${id} is still working; its commit changes only between turns. Wait for its answer, or stop it.`;
@@ -1664,14 +1668,20 @@ export function createJobs(host: JobsHost) {
     }, context);
     const doc = await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context);
     if (!doc) return;
-    for (const agent of liveAgents(doc))
-      if (agent.prepared && !(doc.paused && agent.jobId && doc.jobs[agent.jobId]?.workspace))
+    for (const agent of liveAgents(doc)) {
+      if (!agent.prepared || (doc.paused && agent.jobId && doc.jobs[agent.jobId]?.workspace)) continue;
+      try {
         await host.prepare?.({
           agent: agent as Agent,
           seq: agent.sends ?? 0,
           job: agent.jobId ? ((doc.jobs[agent.jobId] as Job | undefined) ?? null) : null,
           frame: (await harness.snapshot(AgentPrompt, agent.conversationId, context))?.frame ?? null,
         });
+      } catch (error) {
+        // A reader whose commit cannot be prepared is reported by its own reporter; it must not keep the project from opening.
+        if (agent.role === "worker") throw error;
+      }
+    }
   }
 
   async function snapshot(harness: Harness): Promise<JobsSnapshot> {
