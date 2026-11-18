@@ -660,13 +660,10 @@ function toggleMessage(hint, event, follow) {
 document.addEventListener("focusin", ({ target }) => {
   const article = target.closest?.(".msg[data-overflow]"),
     hint = article?.querySelector(".msg-more");
-  if (
-    hint &&
-    target !== hint &&
-    hint.getAttribute("aria-expanded") === "false" &&
-    !insideClamp(article, target.getBoundingClientRect().top)
-  )
-    setMessageOpen(hint, true);
+  if (!hint || target === hint || hint.getAttribute("aria-expanded") !== "false") return;
+  // Focusing scrolls the clipped body to the link, so its position is taken from the unscrolled top.
+  const scrolled = article.querySelector(".msg-body").scrollTop;
+  if (!insideClamp(article, target.getBoundingClientRect().top + scrolled)) setMessageOpen(hint, true);
 });
 
 /** Clicks inside any transcript (chat feed, a worker in the center, the Host agent); `rerender` repaints that transcript, `follow` is its follower. */
