@@ -2786,41 +2786,39 @@ const journeys = {
       throw Error("clicking a short message changed it");
     record("visible", "short message has no overflow marker or hint, and a click leaves it untouched");
 
-    // Long message: clamped with a hint; a click on the text opens it, a second click closes it.
+    // Long message: clamped with a hint; one click anywhere on the text reveals it for good.
     const collapsed = await state("Paragraph 5");
     if (!collapsed.overflow || collapsed.expanded !== "false" || !collapsed.moreShown || !/Show more/.test(collapsed.moreText))
       throw Error(`long message is not collapsed: ${JSON.stringify(collapsed)}`);
     await shoot("01-long-collapsed", "Paragraph 5");
     const textPoint = `#feed .msg.owner[data-overflow] .bubble p`;
-    await tap(textPoint);
-    await expectState("Paragraph 5", "true", "click expands");
-    const opened = await state("Paragraph 5");
-    if (opened.height <= collapsed.height + 40 || !/Show less/.test(opened.moreText))
-      throw Error(`expand did not grow: ${JSON.stringify({ collapsed, opened })}`);
-    await shoot("02-long-expanded", "Paragraph 5");
-    await tap(`#feed .msg.owner[data-overflow]:has(.msg-more[aria-expanded="true"]) .bubble p`);
-    await expectState("Paragraph 5", "false", "second click collapses");
-    const closed = await state("Paragraph 5");
-    if (Math.abs(closed.height - collapsed.height) > 2)
-      throw Error(`collapse did not restore height: ${JSON.stringify({ collapsed, closed })}`);
-    record("visible", "clicking the message text opens and closes it, height follows");
+    const wordPoint = (needle, which) =>
+      page.evaluate(`(() => {
+        const ps = ${ownerBy(needle)}.querySelectorAll('.bubble p'), p = ps[${which === "last" ? "ps.length - 1" : "0"}], r = document.createRange();
+        p.scrollIntoView({ block: 'center' });
+        r.setStart(p.lastChild, 12); r.setEnd(p.lastChild, 18);
+        const box = r.getBoundingClientRect();
+        return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+      })()`);
+    const mouse = async (point, clicks) => {
+      await page.cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y });
+      for (const count of clicks)
+        for (const type of ["mousePressed", "mouseReleased"])
+          await page.cdp("Input.dispatchMouseEvent", { type, x: point.x, y: point.y, button: "left", clickCount: count });
+    };
+    const settle = () => page.evaluate(`new Promise((ok) => setTimeout(ok, 400))`);
+    const expectRevealed = async (needle, what) => {
+      await expectState(needle, "true", what);
+      const now = await state(needle);
+      if (now.moreShown) throw Error(`${what}: a collapse affordance is still shown: ${JSON.stringify(now)}`);
+    };
 
-    // Keyboard: the hint is a real button, Enter and Space both toggle, focus stays on it.
-    await page.evaluate(`${ownerBy("Paragraph 5")}.querySelector('.msg-more').focus()`);
-    await page.press("Enter", { code: "Enter", keyCode: 13, text: "\r" });
-    await expectState("Paragraph 5", "true", "Enter expands");
-    if (!(await state("Paragraph 5")).focusOnMore) throw Error("focus left the hint after Enter");
-    await page.press(" ", { code: "Space", keyCode: 32, text: " " });
-    await expectState("Paragraph 5", "false", "Space collapses");
-    if (!(await state("Paragraph 5")).focusOnMore) throw Error("focus left the hint after Space");
-    record("visible", "Enter and Space on the focused hint expand then collapse, focus kept");
-
-    // Selection: a real drag over the text selects it and leaves the message as it was.
+    // Selection on a collapsed message: a real drag selects text and reveals nothing.
     const drag = await page.evaluate(`(() => {
       const p = ${ownerBy("Paragraph 5")}.querySelector('.bubble p'), r = document.createRange();
       p.scrollIntoView({ block: 'center' });
       r.setStart(p.firstChild, 0); r.setEnd(p.firstChild, 12);
-      const box = r.getBoundingClientRect(), end = r.getBoundingClientRect();
+      const box = r.getBoundingClientRect();
       return { x1: box.left + 1, x2: box.right + 30, y: box.top + box.height / 2 };
     })()`);
     for (const [type, x, extra] of [
@@ -2830,98 +2828,54 @@ const journeys = {
       ["mouseReleased", drag.x2, { button: "left", clickCount: 1 }],
     ])
       await page.cdp("Input.dispatchMouseEvent", { type, x, y: drag.y, ...extra });
-    await page.evaluate(`new Promise((ok) => setTimeout(ok, 150))`);
+    await settle();
     const selected = await page.evaluate(`getSelection().toString().length`);
     if (selected < 3) throw Error(`drag did not select text (${selected})`);
-    if ((await state("Paragraph 5")).expanded !== "false") throw Error("a drag selection toggled the message");
-    record("visible", `a drag selected ${selected} characters and did not toggle the message`);
+    if ((await state("Paragraph 5")).expanded !== "false") throw Error("a drag selection revealed the message");
+    record("visible", `a drag selected ${selected} characters and did not reveal the collapsed message`);
 
-    // Double click on a word: the word stays selected and the message ends as it was, collapsed or open.
-    const doubleClickWord = async (which, gapMs = 0) => {
-      await page.evaluate(`getSelection().removeAllRanges()`);
-      const word = await page.evaluate(`(() => {
-        const ps = ${ownerBy("Paragraph 5")}.querySelectorAll('.bubble p'), p = ps[${which === "last" ? "ps.length - 1" : "0"}], r = document.createRange();
-        p.scrollIntoView({ block: 'center' });
-        r.setStart(p.lastChild, 12); r.setEnd(p.lastChild, 18);
-        const box = r.getBoundingClientRect();
-        return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
-      })()`);
-      for (const [type, extra] of [
-        ["mouseMoved", {}],
-        ["mousePressed", { button: "left", clickCount: 1 }],
-        ["mouseReleased", { button: "left", clickCount: 1 }],
-        ["mousePressed", { button: "left", clickCount: 2 }],
-        ["mouseReleased", { button: "left", clickCount: 2 }],
-      ]) {
-        // A slow double click: the browser still counts it (clickCount 2) however long the pause was.
-        if (type === "mousePressed" && extra.clickCount === 2) await page.evaluate(`new Promise((ok) => setTimeout(ok, ${gapMs}))`);
-        await page.cdp("Input.dispatchMouseEvent", { type, x: word.x, y: word.y, ...extra });
-      }
-      await page.evaluate(`new Promise((ok) => setTimeout(ok, 600))`);
-      const picked = await page.evaluate(`getSelection().toString().trim().length`);
-      if (picked < 2) throw Error(`double click did not select a word (${picked})`);
-      return picked;
-    };
-    const picked = await doubleClickWord("first");
-    if ((await state("Paragraph 5")).expanded !== "false") throw Error("a double click left the collapsed message toggled");
-    record("visible", `a double click selected a word (${picked} characters) and left the collapsed message collapsed`);
-
-    // Links: the click goes to the link, the message stays as it was, and the app does not cancel the navigation.
+    // Links: the click goes to the link, the message stays collapsed, and the app does not cancel the navigation.
     await page.evaluate(`(() => {
       window.__linkClicks = [];
       window.addEventListener("click", (e) => { if (e.target.closest("a")) { window.__linkClicks.push({ prevented: e.defaultPrevented }); e.preventDefault(); } });
     })()`);
     await page.evaluate(`getSelection().removeAllRanges()`);
     await tap(`#feed .msg.owner a[href^="https://example.invalid"]`);
-    await page.evaluate(`new Promise((ok) => setTimeout(ok, 150))`);
+    await settle();
     const links = await page.evaluate(`window.__linkClicks`);
     if (links.length !== 1 || links[0].prevented) throw Error(`link click was lost or cancelled: ${JSON.stringify(links)}`);
-    if ((await state("Paragraph 5")).expanded !== "false") throw Error("a link click toggled the message");
-    record("visible", "link click reached the link, was not cancelled and did not toggle");
+    if ((await state("Paragraph 5")).expanded !== "false") throw Error("a link click revealed the message");
+    record("visible", "link click reached the link, was not cancelled and did not reveal");
 
-    // Refresh: an open message stays open when the transcript re-renders for a new turn.
-    await tap(textPoint);
-    await expectState("Paragraph 5", "true", "expanded before refresh");
-    const pickedOpen = await doubleClickWord("last");
-    if ((await state("Paragraph 5")).expanded !== "true")
-      throw Error("a double click on a word below the clamp collapsed the open message");
-    record("visible", `a double click on a word below the clamp selected it (${pickedOpen} characters) and left the message open`);
-    // Slower than the old 300 ms wait, on text a collapse would hide: the word must still be selected, the message open.
-    const pickedSlow = await doubleClickWord("last", 500);
-    if ((await state("Paragraph 5")).expanded !== "true") throw Error("a slow double click below the clamp changed the open message");
-    record("visible", `a 500 ms double click below the clamp selected a word (${pickedSlow} characters) and left the message open`);
-    // A single click below the clamp does not collapse (it would hide the text under the pointer); the hint does.
+    // A hidden link takes keyboard focus: that reveals the message and keeps the link in view.
     await page.evaluate(`getSelection().removeAllRanges()`);
-    const below = await page.evaluate(`(() => {
-      const ps = ${ownerBy("Paragraph 5")}.querySelectorAll('.bubble p'), p = ps[ps.length - 1], r = document.createRange();
-      p.scrollIntoView({ block: 'center' });
-      r.setStart(p.lastChild, 12); r.setEnd(p.lastChild, 18);
-      const box = r.getBoundingClientRect();
-      return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
-    })()`);
-    for (const [type, extra] of [
-      ["mousePressed", { button: "left", clickCount: 1 }],
-      ["mouseReleased", { button: "left", clickCount: 1 }],
-    ])
-      await page.cdp("Input.dispatchMouseEvent", { type, x: below.x, y: below.y, ...extra });
-    await page.evaluate(`new Promise((ok) => setTimeout(ok, 600))`);
-    if ((await state("Paragraph 5")).expanded !== "true") throw Error("a click below the clamp collapsed the message");
-    record("visible", "a single click on text below the clamp leaves the open message open; Show less closes it");
-    await page.evaluate(`${ownerBy("Paragraph 5")}.querySelector('.msg-more').click()`);
-    await expectState("Paragraph 5", "false", "hint collapses");
-    // A link the clamp hides opens the message when keyboard focus reaches it.
     await page.evaluate(`${ownerBy("Paragraph 5")}.querySelector('a[href$="/deep"]').focus()`);
-    await expectState("Paragraph 5", "true", "focus on a hidden link opens the message");
-    const linkBox = await page.evaluate(`(() => {
+    await expectRevealed("Paragraph 5", "focus on a hidden link reveals the message");
+    const linkInView = await page.evaluate(`(() => {
       const r = ${ownerBy("Paragraph 5")}.querySelector('a[href$="/deep"]').getBoundingClientRect(), f = document.querySelector('#feed').getBoundingClientRect();
       return r.top >= f.top && r.bottom <= f.bottom;
     })()`);
-    if (!linkBox) throw Error("the opened message left the focused link outside the feed");
-    record("visible", "focusing a link the clamp hides opens the message and keeps the link in view");
-    // A click inside the clamp collapses at once, and a slow double click there selects the word and leaves the message open.
-    const pickedTop = await doubleClickWord("first", 500);
-    if ((await state("Paragraph 5")).expanded !== "true") throw Error("a slow double click inside the clamp changed the open message");
-    record("visible", `a 500 ms double click inside the clamp selected a word (${pickedTop} characters) and left the message open`);
+    if (!linkInView) throw Error("the revealed message left the focused link outside the feed");
+    record("visible", "focusing a link the clamp hides reveals the message and keeps the link in view");
+
+    // Revealed stays revealed: repeated clicks on the first lines, the lower text and the old hint place, a double click, a refresh.
+    const opened = await state("Paragraph 5");
+    if (opened.height <= collapsed.height + 40) throw Error(`reveal did not grow: ${JSON.stringify({ collapsed, opened })}`);
+    await shoot("02-long-revealed", "Paragraph 5");
+    await page.evaluate(`getSelection().removeAllRanges()`);
+    await mouse(await wordPoint("Paragraph 5", "first"), [1]);
+    await settle();
+    await mouse(await wordPoint("Paragraph 5", "last"), [1]);
+    await settle();
+    await tap(textPoint);
+    await settle();
+    await mouse(await wordPoint("Paragraph 5", "last"), [1, 2]);
+    await settle();
+    const picked = await page.evaluate(`getSelection().toString().trim().length`);
+    if (picked < 2) throw Error(`double click did not select a word (${picked})`);
+    await expectRevealed("Paragraph 5", "repeated clicks keep the message revealed");
+    if (Math.abs((await state("Paragraph 5")).height - opened.height) > 2) throw Error("a click changed the revealed message height");
+    record("visible", `repeated clicks and a double click (word of ${picked} characters) left the message revealed, no collapse affordance`);
     await page.evaluate(`getSelection().removeAllRanges()`);
     await page.evaluate(`${ownerBy("Paragraph 5")}.__kept = true`);
     await send("One more short line");
@@ -2930,23 +2884,54 @@ const journeys = {
       "fourth exchange",
       60000,
     );
-    if ((await state("Paragraph 5")).expanded !== "true") throw Error("an ordinary refresh collapsed the open message");
+    await expectRevealed("Paragraph 5", "a new reply keeps the message revealed");
     if (!(await page.evaluate(`${ownerBy("Paragraph 5")}.__kept === true`)))
-      throw Error("a refresh replaced the toggled message node, losing its focus and selection");
-    record("visible", "an open message stays open after a new turn re-renders the feed");
-    await tap(`#feed .msg.owner[data-overflow]:has(.msg-more[aria-expanded="true"]) .bubble p`);
-    await expectState("Paragraph 5", "false", "collapsed again");
+      throw Error("a refresh replaced the revealed message node, losing its focus and selection");
+    record("visible", "a new turn re-renders the feed and the revealed message stays revealed in the same node");
 
-    // List message clamps too and keeps its bullets.
+    // Same chat selected again is not a navigation.
+    await page.click(`#tree [data-chat="main"]`);
+    await settle();
+    await expectRevealed("Paragraph 5", "reselecting the same chat keeps the message revealed");
+
+    // Keyboard: the hint is a real button; Enter reveals, the hint goes away and focus moves into the message.
     const list = await state("item 10");
     if (!list.overflow || list.expanded !== "false") throw Error(`list message is not collapsed: ${JSON.stringify(list)}`);
     await shoot("03-list-collapsed", "item 10");
-    await page.evaluate(`${ownerBy("item 10")}.querySelector('.msg-more').click()`);
-    await expectState("item 10", "true", "list expands");
+    await page.evaluate(`${ownerBy("item 10")}.querySelector('.msg-more').focus()`);
+    await page.press("Enter", { code: "Enter", keyCode: 13, text: "\r" });
+    await expectRevealed("item 10", "Enter reveals the list");
+    if (!(await page.evaluate(`${ownerBy("item 10")}.contains(document.activeElement)`))) throw Error("focus left the message after Enter");
     if ((await page.evaluate(`${ownerBy("item 10")}.querySelectorAll('li').length`)) !== 10) throw Error("list lost its items");
-    await shoot("04-list-expanded", "item 10");
-    await page.evaluate(`${ownerBy("item 10")}.querySelector('.msg-more').click()`);
-    await expectState("item 10", "false", "list collapses");
+    await shoot("04-list-revealed", "item 10");
+    record("visible", "Enter on the hint reveals the list, the hint is gone and focus stays inside the message");
+
+    // Navigation: A → B → A starts collapsed again, and so does a reload.
+    await page.click(`#tree [data-new-chat]`);
+    await page.waitFor(`document.querySelectorAll('#tree [data-chat]').length >= 2 && !document.querySelector(${JSON.stringify(owner)})`, "chat B open", 10000);
+    await page.click(`#tree [data-chat="main"]`);
+    await page.waitFor(`!!${ownerBy("Paragraph 5")}?.querySelector('.msg-more')`, "chat A shown again", 10000);
+    for (const needle of ["Paragraph 5", "item 10"]) {
+      const back = await state(needle);
+      if (back.expanded !== "false" || !back.moreShown) throw Error(`A → B → A did not collapse ${needle}: ${JSON.stringify(back)}`);
+    }
+    record("visible", "A → B → A shows both long messages collapsed again");
+    await mouse(await wordPoint("Paragraph 5", "last"), [1]);
+    await expectRevealed("Paragraph 5", "a click reveals after coming back");
+    await page.reload();
+    await page.waitFor(`!!${ownerBy("Paragraph 5")}?.querySelector('.msg-more')`, "feed after reload", 20000);
+    for (const needle of ["Paragraph 5", "item 10"]) {
+      const again = await state(needle);
+      if (again.expanded !== "false" || !again.moreShown) throw Error(`reload did not collapse ${needle}: ${JSON.stringify(again)}`);
+    }
+    record("visible", "a page reload shows both long messages collapsed");
+
+    // Space on the focused hint reveals too, and short messages stayed plain throughout.
+    await page.evaluate(`${ownerBy("item 10")}.querySelector('.msg-more').focus()`);
+    await page.press(" ", { code: "Space", keyCode: 32, text: " " });
+    await expectRevealed("item 10", "Space reveals the list");
+    const shortAfter = await state("Short answer: yes");
+    if (shortAfter.overflow || shortAfter.moreShown) throw Error(`short message is clamped after navigation: ${JSON.stringify(shortAfter)}`);
     await page.evaluate(`document.querySelector('#feed').scrollTop = 0`);
     await page.shot(dir, "05-transcript-top");
 
@@ -2956,13 +2941,13 @@ const journeys = {
     await shoot("06-mobile-short", "Short answer: yes");
     await shoot("07-mobile-long-collapsed", "Paragraph 5");
     await tap(textPoint);
-    await expectState("Paragraph 5", "true", "mobile click expands");
-    await shoot("08-mobile-long-expanded", "Paragraph 5");
+    await expectRevealed("Paragraph 5", "mobile click reveals");
+    await shoot("08-mobile-long-revealed", "Paragraph 5");
     await page.evaluate(`document.querySelector('#feed').scrollTop = 0`);
     await page.shot(dir, "09-mobile-list");
     if (await page.evaluate(`document.documentElement.scrollWidth > innerWidth`)) throw Error("390 px layout overflows sideways");
     await page.cdp("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
-    record("visible", "390 px: short plain, long collapsed then expanded, no sideways overflow");
+    record("visible", "390 px: short plain, long collapsed then revealed, no sideways overflow");
   },
 };
 
