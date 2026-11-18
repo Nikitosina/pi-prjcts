@@ -2627,12 +2627,12 @@ const journeys = {
       record("visible", `Plugins section shows ${JSON.stringify(row.text.replace(/\s+/g, " "))}`);
     }
     // Settings → Plugins: every launched plugin with a browser script mounts its panel, or shows why it could not.
-    const withPanel = mine.filter((item) => status.web.some((entry) => entry.plugin === item.name && entry.script && !entry.sidebar));
+    const withPanel = mine.filter((item) => status.web.some((entry) => entry.plugin === item.name && entry.script));
     // The Plugins list lives in Settings, which the steps above already opened.
     await page.waitFor(`document.querySelector('#settings').open`, "Settings open");
     await page.click('#settings nav [data-section="plugins"]');
     await page.waitFor(
-      `${JSON.stringify(withPanel.map((item) => item.name))}.every((name) => ['ready', 'failed'].includes(document.querySelector('#settings .plugin-panel[data-plugin="' + name + '"]')?.dataset.state))`,
+      `${JSON.stringify(withPanel.map((item) => item.name))}.every((name) => { const panel = document.querySelector('#settings .plugin-panel[data-plugin="' + name + '"]'); return !panel || ['ready', 'failed'].includes(panel.dataset.state); })`,
       "plugin panels settled",
     );
     record("entry", "opened Settings → Plugins");
@@ -2643,6 +2643,8 @@ const journeys = {
     writeFileSync(join(dir, "panels-dom.json"), JSON.stringify(panels, null, 2));
     for (const item of withPanel) {
       const panel = panels.find((candidate) => candidate.name === item.name);
+      const sidebarOnly = status.web.some((entry) => entry.plugin === item.name && entry.sidebar);
+      if (!panel && sidebarOnly) continue;
       if (panel?.state !== "ready") throw Error(`the ${item.name} panel did not mount: ${JSON.stringify(panel)}`);
       record(
         "visible",

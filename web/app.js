@@ -75,8 +75,10 @@ async function select(projectId, chatId = "main", { keepFocus = false } = {}) {
       `/changes?project=${encodeURIComponent(projectId)}`,
       (change) => {
         if (state.projectId !== projectId) return;
-        if (change.t === "sync") void refreshAll();
-        else if (change.t === "topic") onTopic(change, gen);
+        if (change.t === "sync") {
+          emit("plugins-changed");
+          void refreshAll();
+        } else if (change.t === "topic") onTopic(change, gen);
       },
       (up) => {
         state.connected = up;

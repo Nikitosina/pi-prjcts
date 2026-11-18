@@ -8,13 +8,15 @@ import { on, stale, state } from "./state.js";
 const box = document.querySelector("#plugin-sections");
 let mountedKey = null;
 let selectionKey = null;
+let refreshId = 0;
 let unmount = () => {};
 
 async function refresh({ projectId, chatId }) {
   const gen = state.generation;
+  const ask = ++refreshId;
   // With per-project plugin disable the same RPC returns each plugin's `enabled`; without it every loaded plugin is enabled.
   const status = await call("plugins", { id: projectId }).catch((error) => void console.warn(error));
-  if (!status || stale(gen)) return;
+  if (!status || stale(gen) || ask !== refreshId) return;
   const enabled = new Set(status.plugins.filter((plugin) => plugin.enabled !== false).map((plugin) => plugin.name));
   const items = status.web.filter((item) => enabled.has(item.plugin));
   const nodes = sectionNodes(items);

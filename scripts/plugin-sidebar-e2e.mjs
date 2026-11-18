@@ -115,12 +115,12 @@ await kit.run(async () => {
   await shot("02-chat-two");
 
   // ---- 6: a stale rejection is an AbortError too
-  await page.evaluate(`window.__side.failChat = ${js(one)}; window.__side.slowChat = ${js(one)}`);
+  await page.evaluate(`window.__side.failChat = ${js(one)}; window.__side.slowChat = ${js(one)}; window.__side.staleError = null`);
   await select(alpha, one);
   await page.waitFor(`window.__side.mounts.filter((mount) => mount.chatId === ${js(one)}).length === 2`, "chat one failing read mounted");
   await select(alpha, two);
   await settled("side-a");
-  await delay(2000);
+  await page.waitFor(`window.__side.staleError === "AbortError"`, "stale failing read aborted");
   check(
     "6 a read that rejects after the selection changed rejects as AbortError, never as the stale read error",
     (await log()).staleError === "AbortError",
