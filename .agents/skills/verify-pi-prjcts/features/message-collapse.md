@@ -5,7 +5,7 @@ A long message the owner sent is clamped to six lines with a fade and a "Show mo
 ## Sub-features
 
 - `clamp`: a message taller than eight lines gets `data-overflow="1"`, a visible `.msg-more` button and a clamped `.msg-body`. A shorter one has neither.
-- `toggle`: a click on the text, or Enter or Space on the focused hint, flips `aria-expanded` and the `open` class. Focus stays on the hint.
+- `toggle`: a click on the text, or Enter or Space on the focused hint, flips `aria-expanded`. Focus stays on the hint.
 - `no-false-toggle`: a drag selection, a double click on a word (open or collapsed), a click on a link, button or image, and a click on a short message do not toggle.
 - `refresh`: an open message stays open when a new turn re-renders the feed. Opening state is cleared when another chat is selected.
 

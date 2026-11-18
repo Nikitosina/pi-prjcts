@@ -650,13 +650,19 @@ function toggleMessage(hint, event, follow) {
     } else if (messageClick?.key === key) setMessageOpen(hint, messageClick.was, follow);
     return;
   }
+  clearTimeout(pendingClose?.timer);
+  pendingClose = null;
   const open = !expanded.has(key);
   messageClick = { key, was: !open };
-  if (open || hint.contains(event.target)) setMessageOpen(hint, open, follow);
-  else {
-    clearTimeout(pendingClose?.timer);
-    pendingClose = { key, timer: setTimeout(() => ((pendingClose = null), setMessageOpen(hint, false, follow)), DOUBLE_CLICK_MS) };
-  }
+  if (open || hint.contains(event.target)) return setMessageOpen(hint, open, follow);
+  // The feed may repaint the turn meanwhile, so the hint is looked up again when the wait ends.
+  const timer = setTimeout(() => {
+    pendingClose = null;
+    const current = document.querySelector(`.msg-more[data-toggle="${CSS.escape(key)}"]`);
+    if (current) setMessageOpen(current, false, follow);
+    else expanded.delete(key);
+  }, DOUBLE_CLICK_MS);
+  pendingClose = { key, timer };
 }
 
 /** Clicks inside any transcript (chat feed, a worker in the center, the Host agent); `rerender` repaints that transcript, `follow` is its follower. */
