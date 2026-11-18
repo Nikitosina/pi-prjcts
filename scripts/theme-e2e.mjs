@@ -14,6 +14,8 @@ kit.initRepo();
 await kit.run(async () => {
   const id = await kit.createProject("Theme demo");
   await kit.ask(id, "MARK-MD show markdown");
+  const LONG = `LONG-START\n${Array.from({ length: 16 }, (_, i) => `long line ${i + 1}`).join("\n")}\nLONG-END`;
+  await kit.ask(id, LONG);
   const setTheme = async (theme) => {
     const ui = await rpc({ action: "ui-get" });
     await rpc({ action: "ui-set", revision: ui.revision, patch: { theme } });
@@ -25,7 +27,7 @@ await kit.run(async () => {
   await setTheme("light");
   const page = await kit.openPage("about:blank");
   await page.cdp("Page.addScriptToEvaluateOnNewDocument", {
-    source: `window.__atBody = null; new MutationObserver(() => { if (document.body && window.__atBody === null) window.__atBody = document.documentElement.dataset.theme ?? ''; }).observe(document, { childList: true, subtree: true });`,
+    source: `window.__atBody = null; window.__chatAtBody = null; new MutationObserver(() => { if (document.body && window.__atBody === null) { window.__atBody = document.documentElement.dataset.theme ?? ''; window.__chatAtBody = document.documentElement.dataset.chatSize ?? ''; window.__scaleAtBody = document.documentElement.style.getPropertyValue('--chat-scale'); } }).observe(document, { childList: true, subtree: true });`,
   });
   const url = await kit.webUrl(id);
   await page.navigate(url);
@@ -201,8 +203,239 @@ await kit.run(async () => {
     saved.theme === "true" && saved.motion === "true" && saved.thinking === false,
     saved,
   );
+
   await page.shot("05-appearance-reloaded", { force: true });
   await page.evaluate(`document.querySelector('#settings [data-part="statusline"]').scrollIntoView({ block: "end" })`);
   await page.shot("05-appearance-reloaded-lower", { force: true });
   await page.evaluate(`document.querySelector('#settings [data-part="theme"]').scrollIntoView({ block: "start" })`);
+
+  // C1-C5: chat text size scales message text (prose, lists, code, tables, the owner bubble) and nothing around it.
+  const probe = () =>
+    page.evaluate(`(() => {
+      const px = (node) => (node ? parseFloat(getComputedStyle(node).fontSize) : null);
+      const feed = document.querySelector('#feed');
+      const long = [...feed.querySelectorAll('.msg.owner')].find((n) => n.textContent.includes('LONG-START'));
+      const body = long.querySelector('.msg-body');
+      return {
+        size: document.documentElement.dataset.chatSize,
+        prose: px(feed.querySelector('.msg.agent .prose')),
+        item: px(feed.querySelector('.msg.agent .prose li')),
+        code: px(feed.querySelector('.msg.agent .prose pre')),
+        owner: px(long.querySelector('.bubble')),
+        meta: px(feed.querySelector('.msg-meta')),
+        composer: px(document.querySelector('#composer-input')),
+        top: px(document.querySelector('#topbar')),
+        overflow: long.dataset.overflow === '1',
+        bodyHeight: body.getBoundingClientRect().height,
+        lineHeight: parseFloat(getComputedStyle(body).lineHeight),
+        horizontal: document.scrollingElement.scrollWidth > innerWidth + 1,
+      };
+    })()`);
+  const openAppearance = async () => {
+    if (!(await page.evaluate(`document.querySelector('#settings').open`)))
+      await page.evaluate(`document.querySelector('[data-cmd="settings"]').click()`);
+    await page.evaluate(`document.querySelector('nav [data-section="appearance"]').click()`);
+    await page.waitFor(`!!document.querySelector('[data-chat-size-option]')`, "chat size options");
+  };
+  await page.evaluate(`document.querySelector('#settings').close()`);
+  await kit.delay(200);
+  const base = await probe();
+  check(
+    "C1 the default is unchanged: 14.5 px prose, 12.5 px code, 14 px owner text",
+    base.prose === 14.5 && base.code === 12.5 && base.owner === 14 && (base.size ?? "default") === "default",
+    base,
+  );
+  check("C1 the stored default is 'default'", (await rpc({ action: "ui-get" })).ui.chatTextSize === "default");
+  await openAppearance();
+  check(
+    "C2 Settings offers Smaller, Default, Larger and Custom, Default selected",
+    await page.evaluate(
+      `JSON.stringify([...document.querySelectorAll('[data-chat-size-option]')].map((n) => [n.dataset.chatSizeOption, n.getAttribute('aria-checked')])) === JSON.stringify([["small","false"],["default","true"],["large","false"],["custom","false"]])`,
+    ),
+  );
+  await page.shot("06-chat-size-default", { force: true });
+  const sizes = {};
+  for (const option of ["small", "large"]) {
+    await openAppearance();
+    await page.evaluate(`document.querySelector('[data-chat-size-option="${option}"]').click()`);
+    await page.waitFor(`document.documentElement.dataset.chatSize === "${option}"`, `${option} applied at once`);
+    await kit.eventually(async () => (await rpc({ action: "ui-get" })).ui.chatTextSize === option, `${option} not saved`, 100);
+    await page.shot(`06-chat-size-${option}-settings`, { force: true });
+    await page.evaluate(`document.querySelector('#settings').close()`);
+    await kit.delay(300);
+    sizes[option] = await probe();
+    await page.shot(`06-chat-size-${option}-chat`, { force: true });
+  }
+  const { small, large } = sizes;
+  check(
+    "C3 small and large scale prose, list items, code and the owner bubble in the right direction",
+    ["prose", "item", "code", "owner"].every((key) => small[key] < base[key] && base[key] < large[key]),
+    { small, base, large },
+  );
+  check(
+    "C3 the surrounding UI keeps its size",
+    [small, large].every((p) => p.meta === base.meta && p.composer === base.composer && p.top === base.top),
+    { small, base, large },
+  );
+  check(
+    "C4 a long owner message stays clamped to six lines at every size",
+    [small, base, large].every((p) => p.overflow && p.bodyHeight <= p.lineHeight * 6 + 1),
+    { small, base, large },
+  );
+  const reveal = `[...document.querySelectorAll('#feed .msg.owner')].find((n) => n.textContent.includes('LONG-START'))`;
+  await page.evaluate(`${reveal}.querySelector('.msg-more').click()`);
+  await page.waitFor(`${reveal}.querySelector('.msg-more').getAttribute('aria-expanded') === 'true'`, "long message revealed");
+  check(
+    "C4 Show more opens the whole long message at the larger size",
+    await page.evaluate(
+      `(() => { const body = ${reveal}.querySelector('.msg-body'); return body.getBoundingClientRect().height > parseFloat(getComputedStyle(body).lineHeight) * 12; })()`,
+    ),
+  );
+  await page.reload();
+  await page.waitFor(`document.body.dataset.ready === "1"`, "reloaded with large text");
+  check(
+    "C5 the chosen size survives a reload and is set before <body> is inserted",
+    (await page.evaluate(`window.__atBody`)) === "midnight" &&
+      (await page.evaluate(`window.__chatAtBody`)) === "large" &&
+      (await probe()).size === "large" &&
+      (await rpc({ action: "ui-get" })).ui.chatTextSize === "large",
+  );
+  await page.viewport(390, 844, true);
+  await kit.delay(300);
+  const narrow = await probe();
+  check("C5 at 390 px the large text does not overflow sideways", narrow.horizontal === false && narrow.prose > 14.5, narrow);
+  await page.shot("06-chat-size-large-390", { force: true });
+  await page.viewport(1440, 1000);
+
+  // C6: Custom chat text size, a whole percent from 50 to 200 typed by the owner.
+  const storedUi = async () => (await rpc({ action: "ui-get" })).ui;
+  const customState = () =>
+    page.evaluate(`(() => {
+      const input = document.querySelector('#chat-size-percent');
+      return {
+        value: input?.value,
+        invalid: input?.getAttribute('aria-invalid'),
+        labelled: !!input && (input.labels?.length > 0 || !!input.getAttribute('aria-label')),
+        status: document.querySelector('#chat-size-status')?.textContent.trim(),
+        live: document.querySelector('#chat-size-status')?.getAttribute('aria-live'),
+        radio: document.querySelector('[data-chat-size-option="custom"]')?.getAttribute('aria-checked'),
+        inViewport: !!input && input.getBoundingClientRect().right <= innerWidth && input.getBoundingClientRect().left >= 0,
+      };
+    })()`);
+  const typePercent = async (text) => {
+    await page.evaluate(`(() => { const i = document.querySelector('#chat-size-percent'); i.focus(); i.select(); })()`);
+    if (text === "")
+      await page.cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 });
+    else await page.cdp("Input.insertText", { text });
+    await page.cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: "\r" });
+    await page.cdp("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+    await kit.delay(300);
+  };
+  await openAppearance();
+  check(
+    "C6 Settings offers Custom beside the presets, with a labelled percent field",
+    await page.evaluate(
+      `JSON.stringify([...document.querySelectorAll('[data-chat-size-option]')].map((n) => n.dataset.chatSizeOption)) === JSON.stringify(["small","default","large","custom"])`,
+    ),
+  );
+  await page.evaluate(`document.querySelector('[data-chat-size-option="custom"]').click()`);
+  await page.waitFor(`document.documentElement.dataset.chatSize === "custom"`, "custom selected");
+  const first = await customState();
+  check(
+    "C6 choosing Custom starts at 100% with the field labelled",
+    first.value === "100" && first.labelled && first.radio === "true",
+    first,
+  );
+  await typePercent("107");
+  await kit.eventually(async () => (await storedUi()).chatTextPercent === 107, "107 not saved", 100);
+  const at107 = await probe();
+  check(
+    "C6 custom 107% scales message text by exactly 1.07 and nothing around it",
+    Math.abs(at107.prose - 14.5 * 1.07) < 0.01 &&
+      Math.abs(at107.owner - 14 * 1.07) < 0.01 &&
+      at107.meta === base.meta &&
+      at107.composer === base.composer &&
+      (await storedUi()).chatTextSize === "custom",
+    at107,
+  );
+  check("C6 the field and the status confirm the applied value", /107\s?%/.test((await customState()).status ?? ""), await customState());
+  await page.shot("07-custom-107", { force: true });
+  for (const bad of ["", "abc", "49", "201", "107.5", "-5", "1e2"]) {
+    await typePercent(bad);
+    const now = await customState();
+    const saved = await storedUi();
+    check(
+      `C6 invalid ${JSON.stringify(bad)} is refused with a message, the field returns to 107 and nothing is saved`,
+      now.value === "107" &&
+        now.invalid === "true" &&
+        now.live === "polite" &&
+        !!now.status &&
+        saved.chatTextPercent === 107 &&
+        saved.chatTextSize === "custom" &&
+        (await probe()).prose === at107.prose,
+      { bad, now, saved },
+    );
+  }
+  await page.shot("07-custom-invalid", { force: true });
+  await typePercent("108");
+  check("C6 a valid value after a refusal clears the error", (await customState()).invalid !== "true", await customState());
+  await typePercent("107");
+  await kit.eventually(async () => (await storedUi()).chatTextPercent === 107, "107 not saved again", 100);
+  await page.reload();
+  await page.waitFor(`document.body.dataset.ready === "1"`, "reloaded with custom text");
+  const reloaded = await probe();
+  check(
+    "C6 custom 107% survives a reload, set before <body>, with the field showing it",
+    (await page.evaluate(`window.__chatAtBody`)) === "custom" &&
+      (await page.evaluate(`window.__scaleAtBody`)) === "1.07" &&
+      Math.abs(reloaded.prose - 14.5 * 1.07) < 0.01 &&
+      (await page.evaluate(`document.documentElement.style.getPropertyValue('--chat-scale')`)) === "1.07",
+    reloaded,
+  );
+  await openAppearance();
+  const afterReload = await customState();
+  check("C6 after a reload the field shows 107", afterReload.value === "107" && afterReload.radio === "true", afterReload);
+  await page.evaluate(`document.querySelector('[data-chat-size-option="small"]').click()`);
+  await page.waitFor(`document.documentElement.dataset.chatSize === "small"`, "preset after custom");
+  await kit.eventually(async () => (await storedUi()).chatTextSize === "small", "small not saved", 100);
+  await page.evaluate(`document.querySelector('#settings').close()`);
+  await kit.delay(300);
+  const backToSmall = await probe();
+  check(
+    "C6 switching to a preset leaves custom scale behind and keeps the last custom value",
+    Math.abs(backToSmall.prose - 14.5 * 0.9) < 0.01 &&
+      (await storedUi()).chatTextPercent === 107 &&
+      (await page.evaluate(`document.documentElement.style.getPropertyValue('--chat-scale')`)) === "",
+    backToSmall,
+  );
+  await openAppearance();
+  await page.evaluate(`document.querySelector('[data-chat-size-option="custom"]').click()`);
+  await page.waitFor(`document.documentElement.dataset.chatSize === "custom"`, "custom again");
+  check("C6 choosing Custom again returns to 107%", (await customState()).value === "107", await customState());
+  for (const extreme of ["50", "200"]) {
+    await typePercent(extreme);
+    await kit.eventually(async () => (await storedUi()).chatTextPercent === Number(extreme), `${extreme} not saved`, 100);
+    await page.evaluate(`document.querySelector('#settings').close()`);
+    await kit.delay(300);
+    const p = await probe();
+    check(
+      `C6 ${extreme}% keeps a long owner message clamped to six lines and the page from scrolling sideways`,
+      p.overflow && p.bodyHeight <= p.lineHeight * 6 + 1 && !p.horizontal && Math.abs(p.prose - (14.5 * Number(extreme)) / 100) < 0.01,
+      p,
+    );
+    await openAppearance();
+  }
+  await page.viewport(390, 844, true);
+  await kit.delay(300);
+  const phone = await customState();
+  const phoneProbe = await probe();
+  check("C6 at 390 px the 200% text and the field fit the screen", phone.inViewport && phoneProbe.horizontal === false, {
+    phone,
+    phoneProbe,
+  });
+  await page.shot("07-custom-200-390-settings", { force: true });
+  await page.evaluate(`document.querySelector('#settings').close()`);
+  await kit.delay(300);
+  await page.shot("07-custom-200-390-chat", { force: true });
+  await page.viewport(1440, 1000);
 });

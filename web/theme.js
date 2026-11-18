@@ -1,4 +1,4 @@
-// Runs before first paint (a blocking classic script; the CSP forbids inline scripts). Applies the last known theme, font and animation
+// Runs before first paint (a blocking classic script; the CSP forbids inline scripts). Applies the last known theme, font, chat text size and animation
 // level from this browser's cache of the host `ui` document. The host document stays the source.
 (() => {
   const root = document.documentElement,
@@ -13,6 +13,11 @@
     root.dataset.themePref = theme;
     root.dataset.theme = theme === "system" ? (dark.matches ? "claude" : "light") : theme;
     root.dataset.font = ["jetbrains-mono", "system-sans", "system-mono"].includes(ui.font) ? ui.font : "jetbrains-mono";
+    const percent =
+      Number.isInteger(ui.chatTextPercent) && ui.chatTextPercent >= 50 && ui.chatTextPercent <= 200 ? ui.chatTextPercent : 100;
+    root.dataset.chatSize = ["small", "default", "large", "custom"].includes(ui.chatTextSize) ? ui.chatTextSize : "default";
+    if (root.dataset.chatSize === "custom") root.style.setProperty("--chat-scale", String(percent / 100));
+    else root.style.removeProperty("--chat-scale");
     const level = ["off", "subtle", "full"].includes(ui.animations) ? ui.animations : "subtle";
     root.dataset.motion = reduced.matches ? "off" : level;
   };

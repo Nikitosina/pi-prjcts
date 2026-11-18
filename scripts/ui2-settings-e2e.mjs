@@ -318,6 +318,8 @@ await kit.run(async () => {
     ui.ui.theme === "claude" &&
       ui.ui.animations === "subtle" &&
       ui.ui.font === "jetbrains-mono" &&
+      ui.ui.chatTextSize === "default" &&
+      ui.ui.chatTextPercent === 100 &&
       ui.ui.statusLine === true &&
       ui.ui.panels.list === true,
     ui,
@@ -334,6 +336,28 @@ await kit.run(async () => {
     "U2 an unknown font is refused",
     await fails({ action: "ui-set", revision: ui.revision, patch: { font: "comic-sans" } }, /font|must|expected/i),
   );
+  check(
+    "U2 an unknown chat text size is refused",
+    await fails({ action: "ui-set", revision: ui.revision, patch: { chatTextSize: "huge" } }, /chatTextSize|must|expected/i),
+  );
+  for (const bad of [49, 201, 107.5, "107", null, Number.NaN, -10]) {
+    check(
+      `U2 a custom chat text percent of ${String(bad)} is refused`,
+      await fails(
+        { action: "ui-set", revision: ui.revision, patch: { chatTextSize: "custom", chatTextPercent: bad } },
+        /chatTextPercent|must|expected/i,
+      ),
+    );
+  }
+  check("U2 refused percents leave the document untouched", (await rpc({ action: "ui-get" })).revision === ui.revision);
+  const custom = await rpc({ action: "ui-set", revision: ui.revision, patch: { chatTextSize: "custom", chatTextPercent: 107 } });
+  const rereadCustom = (await rpc({ action: "ui-get" })).ui;
+  check(
+    "U2 custom 107% persists next to the presets",
+    rereadCustom.chatTextSize === "custom" && rereadCustom.chatTextPercent === 107 && custom.revision !== ui.revision,
+    rereadCustom,
+  );
+  ui.revision = custom.revision;
   const font = await rpc({ action: "ui-set", revision: ui.revision, patch: { font: "system-sans" } });
   const rereadFont = await rpc({ action: "ui-get" });
   check(

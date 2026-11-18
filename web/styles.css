@@ -30,6 +30,15 @@
   --font: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   --mono: var(--font);
 }
+:root {
+  --chat-scale: 1;
+}
+:root[data-chat-size="small"] {
+  --chat-scale: 0.9;
+}
+:root[data-chat-size="large"] {
+  --chat-scale: 1.15;
+}
 /* Claude: warm charcoal, coral accent (default). */
 :root[data-theme="claude"] {
   color-scheme: dark;
@@ -638,6 +647,7 @@ a {
   border: 1px solid var(--line);
   border-radius: var(--r-l) var(--r-l) 4px var(--r-l);
   padding: 8px 13px;
+  font-size: calc(14px * var(--chat-scale));
 }
 .msg.owner .msg-more {
   display: none;
@@ -673,7 +683,7 @@ a {
 }
 .msg.owner.brief .bubble {
   border-radius: var(--r-m);
-  font-size: 13px;
+  font-size: calc(13px * var(--chat-scale));
   color: var(--muted);
 }
 .bubble > :first-child,
@@ -685,7 +695,7 @@ a {
   margin-bottom: 0;
 }
 .msg.agent .prose {
-  font-size: 14.5px;
+  font-size: calc(14.5px * var(--chat-scale));
   line-height: 1.6;
 }
 .prose p {
@@ -895,6 +905,15 @@ pre.code,
   padding: 10px 12px;
   overflow: auto;
   font-size: 12.5px;
+}
+.msg pre.code,
+.msg .prose pre,
+.q-body pre.code {
+  font-size: calc(12.5px * var(--chat-scale));
+}
+.msg .table-wrap table,
+.q-body .table-wrap table {
+  font-size: calc(13px * var(--chat-scale));
 }
 .empty-chat {
   margin: 18vh auto 0;
@@ -1302,7 +1321,7 @@ pre.code,
 }
 .thinking-body {
   margin: 2px 0 4px 30px;
-  font-size: 13px;
+  font-size: calc(13px * var(--chat-scale));
   color: var(--muted);
   white-space: pre-wrap;
 }
@@ -1478,7 +1497,7 @@ pre.code,
   align-items: center;
 }
 .q-body {
-  font-size: 13.5px;
+  font-size: calc(13.5px * var(--chat-scale));
   margin-top: 6px;
 }
 .choices {
@@ -3215,6 +3234,36 @@ input.pb-title {
   border: 1px solid var(--line);
   border-radius: var(--r-m);
   text-align: left;
+}
+.font-options.chat-sizes {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.chat-size-custom {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.chat-size-custom input {
+  width: 6ch;
+  min-width: 0;
+  text-align: right;
+}
+.chat-size-custom input[aria-invalid="true"] {
+  border-color: var(--bad);
+}
+.chat-size-status {
+  min-height: 1.4em;
+  margin: 2px 0 0;
+}
+.chat-size-status.error {
+  color: var(--bad);
+}
+@media (max-width: 640px) {
+  .font-options.chat-sizes {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 .font-options button[aria-checked="true"] {
   border-color: var(--accent);

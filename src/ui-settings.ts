@@ -26,11 +26,17 @@ const ToolSummaries = Type.Object(
   { additionalProperties: false },
 );
 
+export const CHAT_TEXT_PERCENT_MIN = 50;
+export const CHAT_TEXT_PERCENT_MAX = 200;
+
 /** The host UI document (docs/ui2-contract.md): one per host, shared by every browser. */
 export const UiSettings = Type.Object(
   {
     theme: Type.Union([Type.Literal("claude"), Type.Literal("midnight"), Type.Literal("light"), Type.Literal("system")]),
     font: Type.Union([Type.Literal("jetbrains-mono"), Type.Literal("system-sans"), Type.Literal("system-mono")]),
+    /** `custom` uses `chatTextPercent`; the value stays stored while a preset is chosen, so going back to Custom restores it. */
+    chatTextSize: Type.Union([Type.Literal("small"), Type.Literal("default"), Type.Literal("large"), Type.Literal("custom")]),
+    chatTextPercent: Type.Integer({ minimum: CHAT_TEXT_PERCENT_MIN, maximum: CHAT_TEXT_PERCENT_MAX }),
     animations: Type.Union([Type.Literal("off"), Type.Literal("subtle"), Type.Literal("full")]),
     hotkeys: Type.Record(Type.String({ pattern: "^[a-z][a-zA-Z0-9.-]{0,63}$" }), Type.String({ minLength: 1, maxLength: 40 }), {
       maxProperties: 200,
@@ -50,6 +56,8 @@ export const UiPatch = Type.Partial(
     {
       theme: UiSettings.properties.theme,
       font: UiSettings.properties.font,
+      chatTextSize: UiSettings.properties.chatTextSize,
+      chatTextPercent: UiSettings.properties.chatTextPercent,
       animations: UiSettings.properties.animations,
       hotkeys: UiSettings.properties.hotkeys,
       panels: Type.Partial(UiSettings.properties.panels),
@@ -64,6 +72,8 @@ export const UiPatch = Type.Partial(
 export const DEFAULT_UI: UiSettings = {
   theme: "claude",
   font: "jetbrains-mono",
+  chatTextSize: "default",
+  chatTextPercent: 100,
   animations: "subtle",
   hotkeys: {},
   panels: { list: true, context: true, hostAgent: true },
