@@ -906,11 +906,13 @@ pre.code,
   overflow: auto;
   font-size: 12.5px;
 }
-#feed pre.code,
-#feed .prose pre {
+.msg pre.code,
+.msg .prose pre,
+.q-body pre.code {
   font-size: calc(12.5px * var(--chat-scale));
 }
-#feed .table-wrap table {
+.msg .table-wrap table,
+.q-body .table-wrap table {
   font-size: calc(13px * var(--chat-scale));
 }
 .empty-chat {
