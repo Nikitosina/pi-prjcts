@@ -288,7 +288,7 @@ function ownerMessageHtml(message, className, who, text) {
     return `<article class="${className}">${meta}<div class="bubble">${markdown(text)}${imagesHtml(message.images)}</div></article>`;
   const key = `msg:${message.entryId}`,
     open = expanded.has(key);
-  const hint = `<button type="button" class="msg-more" data-toggle="${esc(key)}" aria-expanded="${open}">${open ? "Show less ▴" : `Show more ▾ · ${text.length.toLocaleString("en-US")} chars`}</button>`;
+  const hint = `<button type="button" class="msg-more" data-toggle="${esc(key)}" aria-expanded="${open}"><span class="more">Show more ▾ · ${text.length.toLocaleString("en-US")} chars</span><span class="less">Show less ▴</span></button>`;
   return `<article class="${className}${open ? " open" : ""}">${meta}<div class="bubble"><div class="msg-body">${markdown(text)}</div>${imagesHtml(message.images)}</div>${hint}</article>`;
 }
 function inputHtml(message, who = "Coordinator") {
@@ -620,23 +620,44 @@ export function toggleSteer() {
 function clampedMessageHint(event) {
   const article = event.target.closest(".msg[data-overflow]");
   if (!article || event.target.closest("a, button, summary, input, textarea, select, img, [data-media]")) return null;
+  // The second click of a double click selects a word, so it must not hide behind the selection guard below.
+  if (event.detail > 1) return article.querySelector(".msg-more");
   const selection = getSelection();
   if (selection && !selection.isCollapsed && selection.containsNode(article, true)) return null;
   return article.querySelector(".msg-more");
 }
 
+let messageClick = null; // the message the current click sequence started on, and whether it was open
+/** Opens or closes an owner message in place, so a selection, focus and the scroll position stay where they are. */
+function toggleMessage(hint, event, follow) {
+  const key = hint.dataset.toggle;
+  // A double or triple click selects words: the first click already toggled, so the sequence ends where it began.
+  if (event.detail <= 1) messageClick = { key, was: expanded.has(key) };
+  const open = event.detail > 1 && messageClick?.key === key ? messageClick.was : !expanded.has(key);
+  if (open) expanded.add(key);
+  else expanded.delete(key);
+  follow?.stop();
+  hint.closest(".msg").classList.toggle("open", open);
+  hint.setAttribute("aria-expanded", String(open));
+}
+
 /** Clicks inside any transcript (chat feed, a worker in the center, the Host agent); `rerender` repaints that transcript, `follow` is its follower. */
 export async function transcriptClick(event, root, rerender, follow) {
-  const toggle = event.target.closest("[data-toggle]") ?? clampedMessageHint(event);
+  const hint = event.target.closest(".msg-more") ?? clampedMessageHint(event);
+  if (hint) {
+    toggleMessage(hint, event, follow);
+    return true;
+  }
+  const toggle = event.target.closest("[data-toggle]");
   if (toggle) {
     const key = toggle.dataset.toggle,
-      top = (toggle.closest(".msg") ?? toggle).getBoundingClientRect().top;
+      top = toggle.getBoundingClientRect().top;
     expanded.has(key) ? expanded.delete(key) : expanded.add(key);
     // Opening a detail is reading: following stops, and the line stays under the pointer (streaming-follow-intent-failures.md F8).
     follow?.stop();
     rerender();
     const line = root.querySelector(`[data-toggle="${CSS.escape(key)}"]`);
-    if (line) follow?.keepAt(line.closest(".msg") ?? line, top);
+    if (line) follow?.keepAt(line, top);
     line?.focus({ preventScroll: true });
     return true;
   }

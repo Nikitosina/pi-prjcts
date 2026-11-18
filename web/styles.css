@@ -652,6 +652,19 @@ a {
 .msg.owner[data-overflow] .msg-more {
   display: block;
 }
+.msg.owner .msg-more .less,
+.msg.owner.open .msg-more .more {
+  display: none;
+}
+.msg.owner.open .msg-more .less {
+  display: inline;
+}
+.msg-body > :first-child {
+  margin-top: 0;
+}
+.msg-body > :last-child {
+  margin-bottom: 0;
+}
 .msg.owner[data-overflow]:not(.open) .msg-body {
   max-height: 6lh;
   overflow: hidden;
