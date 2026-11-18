@@ -1301,7 +1301,7 @@ export async function openDurableProject(input: {
       },
       promptBehavior: (agent, job) =>
         agent.role === "worker" && job?.workspace ? workerBehavior(loadProject(project.id), "helper") : behaviorOf(agent.role),
-      prepare: async ({ agent, job, frame }) => {
+      prepare: async ({ agent, seq, job, frame }) => {
         await refreshDelegatedSkills();
         const conversation = Number(agent.conversationId);
         if (!threadSkills.has(conversation))
@@ -1327,7 +1327,7 @@ export async function openDurableProject(input: {
               );
             return { cwd, ...reader, readHead: head };
           }
-          const read = readRevision(agent);
+          const read = readRevision(agent, seq);
           if (!read) throw new Error(`readRef ${JSON.stringify(agent.readRef)} is not an agent id or a full commit SHA`);
           const { cwd } = await taskWorkspaces.prepareReader({
             threadId: agent.id,

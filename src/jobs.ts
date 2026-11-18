@@ -43,17 +43,17 @@ import { BACKGROUND_WAIT_TOOL } from "./worker-environment-tools.ts";
 
 export const FULL_COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 
-/** The commit a reader of a full SHA reads now: its latest revision that started, else the one it was spawned with. `revised` says it is not the spawn one. */
-export function readRevision(agent: Pick<Agent, "readRef" | "revisions">): { sha: string; revised: boolean } | null {
-  const latest = agent.revisions?.findLast((item) => !item.failed);
-  if (latest) return { sha: latest.sha, revised: true };
-  return agent.readRef && FULL_COMMIT.test(agent.readRef) ? { sha: agent.readRef, revised: false } : null;
-}
-/** The commit the turn started by message `seq` read (or, when `failed`, could not read). */
-function turnRevision(agent: Pick<Agent, "readRef" | "revisions">, seq: number): { sha: string; failed: boolean } | null {
-  const found = agent.revisions?.findLast((item) => item.seq <= seq && (!item.failed || item.seq === seq));
-  if (found) return { sha: found.sha, failed: found.failed === true };
-  return agent.readRef && FULL_COMMIT.test(agent.readRef) ? { sha: agent.readRef, failed: false } : null;
+/**
+ * The commit a scout or reviewer of a full SHA reads for the turn started by message `seq`, else (no `seq`) for its next one: the turn's own record,
+ * else the newest turn that did not fail, else the commit it was spawned with. `revised` marks a commit other than the spawn one, which has a checkout of its own.
+ */
+export function readRevision(agent: Pick<Agent, "role" | "readRef" | "reads">, seq?: number): { sha: string; revised: boolean } | null {
+  if (agent.role === "worker") return null;
+  const sha =
+    (seq === undefined ? undefined : agent.reads?.find((item) => item.seq === seq)?.sha) ??
+    agent.reads?.findLast((item) => item.state !== "failed")?.sha ??
+    (agent.readRef && FULL_COMMIT.test(agent.readRef) ? agent.readRef : undefined);
+  return sha ? { sha, revised: sha !== agent.readRef } : null;
 }
 
 const context = BACKGROUND_CONTEXT;
@@ -179,8 +179,8 @@ export type Job = JobFacts &
         checkpoint?: null;
       }
   );
-/** A commit a reviewer was sent to read from message `seq` on; `failed` when that turn could not start, so nothing was read. */
-export type ReadRevision = { seq: number; sha: string; failed?: true };
+/** The commit a reader's turn (message `seq`, 0 for the spawn) was to read; `state` once its checkout was prepared or could not be. */
+export type ReadTurn = { seq: number; sha: string; state?: "read" | "failed" };
 /** An agent the coordinator spawned: a Job's worker, or a scout or reviewer answering one brief. */
 export type Agent = {
   id: string;
@@ -201,8 +201,10 @@ export type Agent = {
   readRef: string | null;
   /** The commit of the agent worktree this reader reads, recorded when its current message started. */
   readHead?: string;
-  /** Commits a reviewer of a full SHA was later sent to read, oldest first; each has its own frozen checkout, `readRef` stays the first. */
-  revisions?: ReadRevision[];
+  /** The commit each turn of a scout or reviewer of a full SHA reads, oldest first; a commit other than `readRef` has a frozen checkout of its own. */
+  reads?: ReadTurn[];
+  /** The newest message whose reporter has filed its report; a reader changes commit only once its last message settled. */
+  settledSeq?: number;
   /** The host prepared this agent's environment (workspace, tools). */
   prepared: boolean;
   /** Messages sent to it since it was created; a reporter that finishes while a newer message is queued does not settle the Job. */
@@ -428,6 +430,8 @@ export type JobsHost = {
    */
   prepare?(spec: {
     agent: Agent;
+    /** The message this preparation is for (0: the spawn), so a replay prepares the turn it belongs to. */
+    seq: number;
     job: Job | null;
     frame: PromptFrame | null;
   }): Promise<(AgentChange & { prompt?: PreparedPrompt; readHead?: string }) | void>;
@@ -538,6 +542,12 @@ function nextModel(host: JobsHost, role: AgentRole, from: string, moves: readonl
   return offered && offered.label !== from && !moves.some((move) => move.from === offered.label) ? offered : null;
 }
 
+/** The reporter of message `seq` is done with a reader: it may change commit for its next message. */
+async function settleTurn(tx: Tx, agentId: string, seq: number) {
+  const agent = (await tx.doc(Jobs, ROOT_CONVERSATION_ID)).agents[agentId];
+  if (agent?.reads && (agent.settledSeq ?? -1) < seq) agent.settledSeq = seq;
+}
+
 /** Prepares an agent, delivers one message and reports its answer once, with large handbacks read on demand. */
 const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) => Promise<void>) =>
   defineTask<Delivery, DeliveryState, null>({
@@ -555,6 +565,7 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
           if (agent)
             change = await host.prepare?.({
               agent: agent as Agent,
+              seq: reporter.input.seq ?? 0,
               job: agent.jobId ? ((state!.jobs[agent.jobId] as Job | undefined) ?? null) : null,
               frame: agent.prepared ? ((await runtime.snapshot(AgentPrompt, conversationId, taskContext))?.frame ?? null) : null,
             });
@@ -595,10 +606,12 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
               }
             }
             agent.prepared = true;
+            const turn = agent.reads?.find((item) => item.seq === (reporter.input.seq ?? 0));
+            if (turn) turn.state = "read";
             return { status: "running", checkpoint: { phase: "deliver", attempt: 0 } } as const;
           }
-          const turn = agent.revisions?.find((item) => item.seq === (reporter.input.seq ?? 0));
-          if (turn) turn.failed = true;
+          const turn = agent.reads?.find((item) => item.seq === (reporter.input.seq ?? 0));
+          if (turn) turn.state = "failed";
           if (job && job.status === "running")
             Object.assign(job, { status: "failed", failure: "start", reason: `Did not start: ${failure}`, endedAt: Date.now() });
           agent.endedAt = job?.workspace ? null : Date.now();
@@ -817,14 +830,16 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
         if (report !== undefined && reportRef === undefined) {
           const agent = (await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext))?.agents[reporter.input.agentId];
           const drift = agent?.readHead ? await host.readDrift?.(agent as Agent) : null;
-          const read = agent ? turnRevision(agent, reporter.input.seq ?? 0) : null;
-          const notes = [read && (read.failed ? `Revision ${read.sha} was not read.` : `Read revision: ${read.sha}`), drift].filter(
-            Boolean,
-          );
+          const read = agent?.reads?.find((item) => item.seq === (reporter.input.seq ?? 0));
+          const notes = [
+            read?.state && (read.state === "failed" ? `Revision ${read.sha} was not read.` : `Read revision: ${read.sha}`),
+            drift,
+          ].filter(Boolean);
           // The notes go right under the report's first line, so a clipped preview still shows them.
           const flagged = (text: string) =>
             notes.length ? text.replace(/^([^\n]*)(?:\n|$)/, (_, first: string) => `${first}\n${notes.join("\n")}\n`) : text;
           await runtime.commit(async (tx) => {
+            await settleTurn(tx, reporter.input.agentId, reporter.input.seq ?? 0);
             const entry = await tx.appendEntry(reporter.input.conversationId, {
               kind: "projects.agent-report",
               data: { text: flagged(details ?? report), at: runtime.now() },
@@ -847,7 +862,10 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
             taskContext,
           );
         }
-        await runtime.commit(() => ({ status: "terminal", outcome: { status: "completed", result: null } }), taskContext);
+        await runtime.commit(async (tx) => {
+          await settleTurn(tx, reporter.input.agentId, reporter.input.seq ?? 0);
+          return { status: "terminal", outcome: { status: "completed", result: null } } as const;
+        }, taskContext);
       },
     },
     // An abort (a project pause aborts every chat with its background tasks) skips the report, so end an agent whose Job already ended here.
@@ -1013,6 +1031,7 @@ export function createJobs(host: JobsHost) {
         reported: [],
         scopeId: (role === "worker" ? args.scopeId?.trim() || host.defaultScope?.() : args.scopeId?.trim()) || null,
         readRef,
+        ...(role !== "worker" && readRef && FULL_COMMIT.test(readRef) ? { reads: [{ seq: 0, sha: readRef }] } : {}),
         prepared: false,
         brief: "",
         briefed: false,
@@ -1062,7 +1081,7 @@ export function createJobs(host: JobsHost) {
     name: "agents",
     description:
       "Run background agents. spawn: role worker (needs title, acceptance criteria; optional branch to continue), scout or reviewer, with a brief; give a fresh requestId so a retry returns the same agent. A scout or reviewer reads the project checkout, or with readRef an agent's worktree (its id; refused while it has uncommitted changes) or a full commit SHA (read in its own worktree at that commit). " +
-      "send: steer id with a message (followUp queues it after its current answer). stop: id and a reason. dismiss: clear an ended agent or Job from the list (not running; history and files stay). send to a failed or stopped worker retries it in the same Job. report: full Ready evidence and the latest closing answer for id, without waking it. status: live agents, or one id (also dismissed ones). wait: block up to timeoutSec until id is idle. " +
+      "send: steer id with a message (followUp queues it after its current answer). To have an idle reviewer of a full commit SHA read another commit in the same conversation, send with readRef (the new full SHA); its report names the commit it read.  stop: id and a reason. dismiss: clear an ended agent or Job from the list (not running; history and files stay). send to a failed or stopped worker retries it in the same Job. report: full Ready evidence and the latest closing answer for id, without waking it. status: live agents, or one id (also dismissed ones). wait: block up to timeoutSec until id is idle. " +
       "Choose workspace {kind:'shared'} for the chat's prepared workspace or {kind:'isolated',baseCommit:<full SHA>} for a task helper. Explicit workspace rejects branch/scopeId/readRef. Shared allows one live helper per chat. Omit workspace for the independent Job/PR workflow. Helpers return normally, not Ready; completed is not accepted delivery. Ready reports arrive as concise handbacks; read report for detailed evidence.",
     parameters: Type.Object({
       action: Type.Union([
@@ -1465,8 +1484,11 @@ export function createJobs(host: JobsHost) {
         if (revision!.chat !== agent.chat) return `Reviewer ${id} belongs to another chat.`;
         if (!FULL_COMMIT.test(next))
           return "readRef must be a full lowercase commit SHA. Resolve a branch or PR to its commit first and pass that SHA.";
+        // Its last message must be reported too: a stopped turn can still be preparing, and would prepare the new commit.
+        if (agent.endedAt !== null && agent.reads && (agent.settledSeq ?? -1) < (agent.sends ?? 0))
+          return `Reviewer ${id} is still working or reporting its last message; wait a moment, or send without readRef.`;
         if (agent.endedAt === null)
-          return `Reviewer ${id} is still working; its revision changes only between turns. Wait for its answer, or stop it.`;
+          return `Reviewer ${id} is still working; its commit changes only between turns. Wait for its answer, or stop it.`;
       }
       const borrower = job?.workspace?.kind === "shared" ? sharedHandoff(doc, agent.chat, id) : undefined;
       if (borrower) return `Shared workspace is still handed to ${borrower.id}; wait for it to settle.`;
@@ -1475,10 +1497,12 @@ export function createJobs(host: JobsHost) {
       if (key) doc.requests[key] = id;
       // An agent that never received its brief (it failed or was stopped while preparing) gets it first, so a send retries the task.
       if (!agent.briefed && agent.brief && message !== agent.brief) message = `${agent.brief}\n\nOwner's follow-up: ${message}`;
-      const moved = next && before && next !== before.sha ? before.sha : undefined;
-      if (moved && next) {
-        agent.revisions = [...(agent.revisions ?? []), { seq: (agent.sends ?? 0) + 1, sha: next }];
-        message = `[The commit under review changed: your working directory now holds ${next}; before you read ${moved}. Read the files again and do not rely on what you saw earlier.]\n\n${message}`;
+      if (before) {
+        // Every message to a reader records the commit it reads, so each report names it.
+        const sha = next || before.sha;
+        agent.reads = [...(agent.reads ?? []), { seq: (agent.sends ?? 0) + 1, sha }];
+        if (sha !== before.sha)
+          message = `[The commit under review changed: your working directory now holds ${sha}; before you read ${before.sha}. Read the files again and do not rely on what you saw earlier.]\n\n${message}`;
       }
       if (job) {
         if (job.status === "ready" || job.status === "ready-with-gaps")
@@ -1644,6 +1668,7 @@ export function createJobs(host: JobsHost) {
       if (agent.prepared && !(doc.paused && agent.jobId && doc.jobs[agent.jobId]?.workspace))
         await host.prepare?.({
           agent: agent as Agent,
+          seq: agent.sends ?? 0,
           job: agent.jobId ? ((doc.jobs[agent.jobId] as Job | undefined) ?? null) : null,
           frame: (await harness.snapshot(AgentPrompt, agent.conversationId, context))?.frame ?? null,
         });

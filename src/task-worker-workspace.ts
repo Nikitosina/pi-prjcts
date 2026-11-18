@@ -317,7 +317,16 @@ export function taskWorkerWorkspaces(input: {
       const binding = await freeze(request, request.chat, { kind: "isolated", baseCommit: request.baseCommit }, true);
       if (binding.kind !== "isolated") throw new Error("Reader workspace must be isolated");
       await allocate(request, binding);
-      return { cwd: (await target(request, binding)).cwd };
+      const { cwd } = await target(request, binding);
+      // A reused checkout must still hold exactly the commit its report will name.
+      if (!attachments.has(slot(request))) {
+        const [head, status] = await Promise.all([
+          git(cwd, ["rev-parse", "HEAD"]),
+          git(cwd, ["status", "--porcelain=v1", "--untracked-files=all"]),
+        ]);
+        if (head !== request.baseCommit || status) throw new Error("Reader checkout moved off its commit or has changes");
+      }
+      return { cwd };
     });
   }
   function prepare(
@@ -396,7 +405,7 @@ export function taskWorkerWorkspaces(input: {
     await queues.get(threadId)?.catch(() => {});
     // A reader's later revisions keep their attachments under `<thread>@<commit>`.
     for (const key of [...attachments.keys()].filter((key) => key === threadId || key.startsWith(`${threadId}@`))) {
-      await attachments.get(key)!.detach();
+      await attachments.get(key)?.detach();
       attachments.delete(key);
     }
   }
@@ -404,7 +413,7 @@ export function taskWorkerWorkspaces(input: {
     closed = true;
     for (const pending of controllers.values()) for (const controller of pending) controller.abort(new Error("Task workspaces closed"));
     await Promise.allSettled([...operations]);
-    const results = await Promise.allSettled([...attachments.keys()].map(closeThread));
+    const results = await Promise.allSettled([...new Set([...attachments.keys()].map((key) => key.split("@")[0]!))].map(closeThread));
     const errors = results.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
     if (errors.length) throw new AggregateError(errors, "Task workspace detach failed");
   }

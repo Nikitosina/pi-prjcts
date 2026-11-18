@@ -130,6 +130,18 @@ function route(request) {
         ...(requestId ? { requestId } : {}),
       });
     }
+    if (user.startsWith("Stopit ")) return call("agents", { action: "stop", id: user.slice(7), reason: "test stop" });
+    if (user.startsWith("WorkerRef ")) {
+      return call("agents", {
+        action: "spawn",
+        role: "worker",
+        title: "Job WREF",
+        brief: "BRIEF-WREF",
+        acceptance: ["x"],
+        readRef: user.slice(10),
+        requestId: "wref",
+      });
+    }
     if (user.startsWith("Race ")) {
       const [id, first, second] = user.slice(5).split(" ");
       const send = (ref) =>
@@ -393,9 +405,9 @@ async function open() {
       killed.push(...ids);
       for (const id of ids) processes.delete(id);
     },
-    prepare: async ({ agent }) => {
+    prepare: async ({ agent, seq }) => {
       if (agent.title === "BRIEF-REVREAD") {
-        const read = readRevision(agent);
+        const read = readRevision(agent, seq);
         if (read?.sha === UNAVAILABLE) throw new Error(`Commit ${read.sha} is not in the local repository`);
         readerSaw = read?.sha ?? null;
       }
@@ -1348,6 +1360,21 @@ assert.deepEqual(await jobs.stallTick(harness, T + 21 * 60_000), [gate.id], "an 
   await quiet(harness);
   assert.equal(readerSaw, REV_C, "a refused request id is not consumed");
 
+  // V4: a first SHA that cannot be prepared is reported as not read, not as read.
+  await say_(root, `Review ${UNAVAILABLE}`);
+  await quiet(harness);
+  const lost = (await jobs.snapshot(harness)).agents.find((item) => item.readRef === UNAVAILABLE);
+  const [lostReport] = await reportsOf(lost);
+  assert.match(lostReport, new RegExp(`Revision ${UNAVAILABLE} was not read\\.`), "V4 an unavailable first SHA is reported as not read");
+  assert.doesNotMatch(lostReport, /Read revision:/, "V4 and never as read");
+
+  // V3: only a reader's report names a commit; a worker given a readRef reads none.
+  await say_(root, `WorkerRef ${REV_A}`);
+  await quiet(harness);
+  const worker = (await jobs.snapshot(harness)).agents.find((item) => item.title === "Job WREF");
+  const workerReports = await reportsOf(worker);
+  assert.ok(workerReports.length && !workerReports.some((text) => /revision/i.test(text)), "V3 a worker's report names no revision");
+
   // V5: two sends with different SHAs while the reviewer prepares: neither starts a turn.
   const turns = (await reportsOf(reviewer)).length;
   const runs = prepareRuns.length;
@@ -1360,6 +1387,21 @@ assert.deepEqual(await jobs.stallTick(harness, T + 21 * 60_000), [gate.id], "an 
   await quiet(harness);
   assert.equal((await reportsOf(reviewer)).length, turns + 1, "V5 only the plain send started a turn");
   assert.equal(readerSaw, REV_C, "V5 the refused races changed nothing");
+
+  // V5: stopping a reviewer in the middle of a turn does not let another revision in before that turn has been reported.
+  const stoppedRuns = prepareRuns.length;
+  prepareHeld.add("BRIEF-REVREAD");
+  await say_(root, `Resend ${reviewer.id} - held-2`);
+  await until(() => prepareRuns.length > stoppedRuns, "held prepare before stop");
+  await say_(root, `Stopit ${reviewer.id}`);
+  await say_(root, `Race ${reviewer.id} ${REV_A} ${REV_B}`);
+  assert.match(lastTool(), /still working/i, "V5 a stopped reviewer whose turn is not reported keeps its revision");
+  prepareHeld.delete("BRIEF-REVREAD");
+  await quiet(harness);
+  assert.equal(readerSaw, REV_C, "V5 the interrupted turn read the revision it was sent with");
+  await say_(root, `Resend ${reviewer.id} ${REV_B} after-stop`);
+  await quiet(harness);
+  assert.equal(readerSaw, REV_B, "V5 once settled, a stopped reviewer takes a new revision");
 }
 
 await harness.close(context);
