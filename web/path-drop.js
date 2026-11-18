@@ -9,7 +9,7 @@ export const FILE_ONLY_NOTE =
 
 /** The plain path a local `file:` URL names; null for another scheme, a remote host or an escape that does not decode. */
 function localPath(line) {
-  if (!/^file:\/\//i.test(line)) return null;
+  if (!/^file:\//i.test(line)) return null;
   let url;
   try {
     url = new URL(line);
