@@ -171,6 +171,33 @@ await kit.run(async () => {
     { log: await log(), stats },
   );
 
+  // ---- Per-project enablement (on hosts that have it; this base does not)
+  const scoped = await rpc({ action: "plugins", id: alpha });
+  if (scoped.plugins.some((plugin) => plugin.enabled !== undefined)) {
+    await rpc({ action: "project-plugin", id: beta, plugin: "side-b", enabled: false });
+    await select(beta);
+    await settled("side-a");
+    check(
+      "1 a plugin disabled in a project gets no section there",
+      !(await section("side-b")) && (await section("side-a"))?.state === "ready",
+      await sections(),
+    );
+    await select(alpha, two);
+    await settled("side-b");
+    const abortsBeforeDisable = (await log()).aborts.length;
+    await rpc({ action: "project-plugin", id: alpha, plugin: "side-b", enabled: false });
+    await page.waitFor(`!document.querySelector('#plugin-sections [data-plugin="side-b"]')`, "disabled section removed");
+    await delay(300);
+    check(
+      "5 disabling a plugin in the selected project removes its section and aborts the other sections' old mounts without affecting other projects",
+      (await log()).aborts.length > abortsBeforeDisable && (await section("side-a"))?.state === "ready",
+      await log(),
+    );
+    await rpc({ action: "project-plugin", id: alpha, plugin: "side-b", enabled: true });
+    await settled("side-b");
+    await rpc({ action: "project-plugin", id: beta, plugin: "side-b", enabled: true });
+  }
+
   // ---- Project switch
   await select(beta);
   await page.waitFor(

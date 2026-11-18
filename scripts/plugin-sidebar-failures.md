@@ -9,7 +9,7 @@ Placement and opt-in
 4. Workers and Pull requests change or disappear when plugin sections exist, or the mobile sheet cannot reach the sections.
 
 Lifecycle and stale content
-5. Selecting another chat keeps the previous chat's section. Each selection of a project or chat aborts the old `signal`, discards the old slot and mounts a fresh section with the new `chatId`.
+5. Selecting another chat keeps the previous chat's section. On a host with per-project disable, a disabled plugin still mounts, and disabling one in the selected project leaves its section and timers alive; it is removed and the changed enabled set aborts the old mounts, without affecting other projects. Re-enabling mounts it again. Each selection of a project or chat aborts the old `signal`, discards the old slot and mounts a fresh section with the new `chatId`.
 6. A delayed answer for the previous chat (rpc or fetch) renders into the new chat's section. After the abort, `rpc` and `fetch` send nothing and reject with `AbortError`, also a call already sent, and core ignores that rejection. A read that rejects after the switch also rejects as `AbortError`, not with its own late error.
 7. A normal refresh (a `sync`, a `jobs` or `chat` topic change, a reload of the PR list) remounts the sections, so mounts stack or flicker. Sections mount once per selection, also when the same chat is re-selected while its first view is still loading, and when a plugin status refresh leaves the enabled set unchanged.
 8. `section.rpc` or `section.fetch` reaches another plugin or project: they always send the own plugin and the section's project, and `fetch` adds `chat=<chatId>`.
