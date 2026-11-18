@@ -2720,6 +2720,155 @@ const journeys = {
     await page.shot(dir, "05-long-reply-end");
     record("visible", "an 8500-character reply shows its end marker after a reload, with no shortened note");
   },
+  // Feature: features/message-collapse.md
+  async "message-collapse"(run, page, record, dir) {
+    const composer = "#composer textarea",
+      owner = "#feed .msg.owner";
+    const paragraph = (n) => `Paragraph ${n}: the stack trace repeats itself and the log keeps going so this message must overflow the clamp. `.repeat(3);
+    const longText = [1, 2, 3, 4, 5].map(paragraph).join("\n\n").replace("Paragraph 1:", "Paragraph 1 [docs](https://example.invalid/docs):");
+    const listText = `Fix these first:\n\n${[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => `- item ${n} needs a long enough line of text to wrap`).join("\n")}`;
+    const send = async (text) => {
+      await page.click(composer);
+      await page.cdp("Input.insertText", { text });
+      await page.press("Enter", { code: "Enter", keyCode: 13 });
+    };
+    const ownerBy = (needle) =>
+      `[...document.querySelectorAll(${JSON.stringify(owner)})].find((n) => n.innerText.includes(${JSON.stringify(needle)}))`;
+    const state = (needle) =>
+      page.evaluate(`(() => {
+        const a = ${ownerBy(needle)}, body = a?.querySelector('.msg-body'), more = a?.querySelector('.msg-more');
+        return { found: !!a, overflow: a?.dataset.overflow === '1', open: a?.classList.contains('open') ?? false,
+          expanded: more?.getAttribute('aria-expanded') ?? null, moreShown: !!more && getComputedStyle(more).display !== 'none',
+          moreText: more?.innerText ?? null, height: body?.getBoundingClientRect().height ?? a?.getBoundingClientRect().height ?? 0,
+          html: a?.outerHTML.length ?? 0, focusOnMore: document.activeElement === more };
+      })()`);
+    const expectState = async (needle, want, what) => {
+      await page.waitFor(`(() => { const a = ${ownerBy(needle)}; return a?.querySelector('.msg-more')?.getAttribute('aria-expanded') === ${JSON.stringify(want)}; })()`, what, 5000);
+    };
+    const tap = (selector) => page.click(selector);
+    await page.navigate(run.webUrl);
+    await page.waitFor(
+      `document.body.dataset.ready === "1" && !!document.querySelector('#tree [data-chat="main"]') && !!document.querySelector(${JSON.stringify(composer)})`,
+      "inbox ready",
+    );
+    await send("Short answer: yes");
+    await page.waitFor(`!!${ownerBy("Short answer: yes")} && document.querySelectorAll('#feed .msg.agent').length >= 1`, "short exchange", 60000);
+    await send(longText);
+    await page.waitFor(`!!${ownerBy("Paragraph 5")} && document.querySelectorAll('#feed .msg.agent').length >= 2`, "long exchange", 60000);
+    await send(listText);
+    await page.waitFor(`!!${ownerBy("item 10")} && document.querySelectorAll('#feed .msg.agent').length >= 3`, "list exchange", 60000);
+    const shoot = async (name, scrollTo) => {
+      await page.evaluate(`${ownerBy(scrollTo)}.scrollIntoView({ block: "center" })`);
+      await page.shot(dir, name);
+    };
+
+    // Short text stays plain: no marker, no hint, and a click changes nothing.
+    const short = await state("Short answer: yes");
+    if (short.overflow || short.moreShown || short.expanded !== null && short.moreShown) throw Error(`short message is clamped: ${JSON.stringify(short)}`);
+    const shortBefore = await page.evaluate(`${ownerBy("Short answer: yes")}.outerHTML`);
+    await tap(`#feed .msg.owner .bubble`);
+    await page.evaluate(`new Promise((ok) => setTimeout(ok, 150))`);
+    if ((await page.evaluate(`${ownerBy("Short answer: yes")}.outerHTML`)) !== shortBefore) throw Error("clicking a short message changed it");
+    record("visible", "short message has no overflow marker or hint, and a click leaves it untouched");
+
+    // Long message: clamped with a hint; a click on the text opens it, a second click closes it.
+    const collapsed = await state("Paragraph 5");
+    if (!collapsed.overflow || collapsed.expanded !== "false" || !collapsed.moreShown || !/Show more/.test(collapsed.moreText))
+      throw Error(`long message is not collapsed: ${JSON.stringify(collapsed)}`);
+    await shoot("01-long-collapsed", "Paragraph 5");
+    const textPoint = `#feed .msg.owner[data-overflow] .bubble p`;
+    await tap(textPoint);
+    await expectState("Paragraph 5", "true", "click expands");
+    const opened = await state("Paragraph 5");
+    if (opened.height <= collapsed.height + 40 || !/Show less/.test(opened.moreText)) throw Error(`expand did not grow: ${JSON.stringify({ collapsed, opened })}`);
+    await shoot("02-long-expanded", "Paragraph 5");
+    await tap(`#feed .msg.owner[data-overflow].open .bubble p`);
+    await expectState("Paragraph 5", "false", "second click collapses");
+    const closed = await state("Paragraph 5");
+    if (Math.abs(closed.height - collapsed.height) > 2) throw Error(`collapse did not restore height: ${JSON.stringify({ collapsed, closed })}`);
+    record("visible", "clicking the message text opens and closes it, height follows");
+
+    // Keyboard: the hint is a real button, Enter and Space both toggle, focus stays on it.
+    await page.evaluate(`${ownerBy("Paragraph 5")}.querySelector('.msg-more').focus()`);
+    await page.press("Enter", { code: "Enter", keyCode: 13, text: "\r" });
+    await expectState("Paragraph 5", "true", "Enter expands");
+    if (!(await state("Paragraph 5")).focusOnMore) throw Error("focus left the hint after Enter");
+    await page.press(" ", { code: "Space", keyCode: 32, text: " " });
+    await expectState("Paragraph 5", "false", "Space collapses");
+    if (!(await state("Paragraph 5")).focusOnMore) throw Error("focus left the hint after Space");
+    record("visible", "Enter and Space on the focused hint expand then collapse, focus kept");
+
+    // Selection: a real drag over the text selects it and leaves the message as it was.
+    const drag = await page.evaluate(`(() => {
+      const p = ${ownerBy("Paragraph 5")}.querySelector('.bubble p'), r = document.createRange();
+      p.scrollIntoView({ block: 'center' });
+      r.setStart(p.firstChild, 0); r.setEnd(p.firstChild, 12);
+      const box = r.getBoundingClientRect(), end = r.getBoundingClientRect();
+      return { x1: box.left + 1, x2: box.right + 30, y: box.top + box.height / 2 };
+    })()`);
+    for (const [type, x, extra] of [
+      ["mouseMoved", drag.x1, {}],
+      ["mousePressed", drag.x1, { button: "left", clickCount: 1 }],
+      ["mouseMoved", drag.x2, { button: "left" }],
+      ["mouseReleased", drag.x2, { button: "left", clickCount: 1 }],
+    ])
+      await page.cdp("Input.dispatchMouseEvent", { type, x, y: drag.y, ...extra });
+    await page.evaluate(`new Promise((ok) => setTimeout(ok, 150))`);
+    const selected = await page.evaluate(`getSelection().toString().length`);
+    if (selected < 3) throw Error(`drag did not select text (${selected})`);
+    if ((await state("Paragraph 5")).expanded !== "false") throw Error("a drag selection toggled the message");
+    record("visible", `a drag selected ${selected} characters and did not toggle the message`);
+
+    // Links: the click goes to the link, the message stays as it was, and the app does not cancel the navigation.
+    await page.evaluate(`(() => {
+      window.__linkClicks = [];
+      window.addEventListener("click", (e) => { if (e.target.closest("a")) { window.__linkClicks.push({ prevented: e.defaultPrevented }); e.preventDefault(); } });
+    })()`);
+    await page.evaluate(`getSelection().removeAllRanges()`);
+    await tap(`#feed .msg.owner a[href^="https://example.invalid"]`);
+    await page.evaluate(`new Promise((ok) => setTimeout(ok, 150))`);
+    const links = await page.evaluate(`window.__linkClicks`);
+    if (links.length !== 1 || links[0].prevented) throw Error(`link click was lost or cancelled: ${JSON.stringify(links)}`);
+    if ((await state("Paragraph 5")).expanded !== "false") throw Error("a link click toggled the message");
+    record("visible", "link click reached the link, was not cancelled and did not toggle");
+
+    // Refresh: an open message stays open when the transcript re-renders for a new turn.
+    await tap(textPoint);
+    await expectState("Paragraph 5", "true", "expanded before refresh");
+    await send("One more short line");
+    await page.waitFor(`!!${ownerBy("One more short line")} && document.querySelectorAll('#feed .msg.agent').length >= 4`, "fourth exchange", 60000);
+    if ((await state("Paragraph 5")).expanded !== "true") throw Error("an ordinary refresh collapsed the open message");
+    record("visible", "an open message stays open after a new turn re-renders the feed");
+    await tap(`#feed .msg.owner[data-overflow].open .bubble p`);
+    await expectState("Paragraph 5", "false", "collapsed again");
+
+    // List message clamps too and keeps its bullets.
+    const list = await state("item 10");
+    if (!list.overflow || list.expanded !== "false") throw Error(`list message is not collapsed: ${JSON.stringify(list)}`);
+    await shoot("03-list-collapsed", "item 10");
+    await page.evaluate(`${ownerBy("item 10")}.querySelector('.msg-more').click()`);
+    await expectState("item 10", "true", "list expands");
+    if ((await page.evaluate(`${ownerBy("item 10")}.querySelectorAll('li').length`)) !== 10) throw Error("list lost its items");
+    await shoot("04-list-expanded", "item 10");
+    await page.evaluate(`${ownerBy("item 10")}.querySelector('.msg-more').click()`);
+    await expectState("item 10", "false", "list collapses");
+    await page.evaluate(`document.querySelector('#feed').scrollTop = 0`);
+    await page.shot(dir, "05-transcript-top");
+
+    // Narrow screen: same states, no sideways overflow.
+    await page.cdp("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+    await page.waitFor(`!!${ownerBy("Paragraph 5")}?.dataset.overflow`, "long message still clamped at 390 px", 5000);
+    await shoot("06-mobile-short", "Short answer: yes");
+    await shoot("07-mobile-long-collapsed", "Paragraph 5");
+    await tap(textPoint);
+    await expectState("Paragraph 5", "true", "mobile click expands");
+    await shoot("08-mobile-long-expanded", "Paragraph 5");
+    await page.evaluate(`document.querySelector('#feed').scrollTop = 0`);
+    await page.shot(dir, "09-mobile-list");
+    if (await page.evaluate(`document.documentElement.scrollWidth > innerWidth`)) throw Error("390 px layout overflows sideways");
+    await page.cdp("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    record("visible", "390 px: short plain, long collapsed then expanded, no sideways overflow");
+  },
 };
 
 async function drive() {

@@ -170,6 +170,24 @@ function failureHtml() {
 }
 /** Where this chat's images come from (see media.js). */
 const mediaSource = () => (state.projectId ? { project: state.projectId, chatId: state.chatId } : null);
+// An owner message clamps to CLAMP_LINES once it runs past ENGAGE_LINES, so opening it always reveals more than the hint costs (see .msg-body).
+const ENGAGE_LINES = 8;
+const messageSizes = new ResizeObserver((entries) => entries.forEach(({ target }) => measureMessage(target)));
+/** Marks the message whose text overflows the clamp (`data-overflow`); a hidden transcript keeps the mark it had. */
+function measureMessage(body) {
+  const article = body.closest(".msg");
+  if (!article || !body.getClientRects().length) return;
+  const line = parseFloat(getComputedStyle(body).lineHeight) || 21;
+  if (body.scrollHeight > line * ENGAGE_LINES) article.dataset.overflow = "1";
+  else delete article.dataset.overflow;
+}
+function watchMessages(parent) {
+  for (const body of parent.querySelectorAll(".msg-body:not([data-watched])")) {
+    body.dataset.watched = "1";
+    measureMessage(body);
+    messageSizes.observe(body);
+  }
+}
 /** Replaces children while keeping nodes whose key and html did not change, so rows only animate in when they are new. */
 export function morph(parent, html) {
   const next = document.createElement("div");
@@ -188,6 +206,7 @@ export function morph(parent, html) {
     const at = parent.children[index];
     if (at !== node) parent.insertBefore(node, at ?? null);
   });
+  watchMessages(parent);
 }
 
 const PROGRESS = { collecting: 0, pending: 1, ready: 2, failed: 2 };
@@ -262,21 +281,28 @@ function hash(text) {
   return String(h);
 }
 const approvalPattern = /^\[approval ([0-9a-f-]{36})\] The owner (approved|denied) "([^"]*)" \(([\w-]+)\)(, and it failed)?/;
+/** An owner bubble whose long text clamps (`measureMessage` marks the overflow) and opens on a click or the hint button. */
+function ownerMessageHtml(message, className, who, text) {
+  const meta = `<div class="msg-meta"><span class="who">${who}</span>${who === "Earlier input" ? "" : `<time>${esc(clock(message.at))}</time>`}</div>`;
+  if (message.entryId == null) return `<article class="${className}">${meta}<div class="bubble">${markdown(text)}${imagesHtml(message.images)}</div></article>`;
+  const key = `msg:${message.entryId}`,
+    open = expanded.has(key);
+  const hint = `<button type="button" class="msg-more" data-toggle="${esc(key)}" aria-expanded="${open}">${open ? "Show less ▴" : `Show more ▾ · ${text.length.toLocaleString("en-US")} chars`}</button>`;
+  return `<article class="${className}${open ? " open" : ""}">${meta}<div class="bubble"><div class="msg-body">${markdown(text)}</div>${imagesHtml(message.images)}</div>${hint}</article>`;
+}
 function inputHtml(message, who = "Coordinator") {
   const text = message.text ?? "";
   const approval = message.origin !== "owner" ? approvalPattern.exec(text) : null;
   if (approval) return approvalRowHtml(approval);
-  if (who !== "Coordinator" && message.origin !== "owner")
-    return `<article class="msg owner brief"><div class="msg-meta"><span class="who">Brief</span><time>${esc(clock(message.at))}</time></div><div class="bubble">${markdown(text)}${imagesHtml(message.images)}</div></article>`;
-  if (message.origin === "owner")
-    return `<article class="msg owner"><div class="msg-meta"><span class="who">You</span><time>${esc(clock(message.at))}</time></div><div class="bubble">${markdown(text)}${imagesHtml(message.images)}</div></article>`;
+  if (who !== "Coordinator" && message.origin !== "owner") return ownerMessageHtml(message, "msg owner brief", "Brief", text);
+  if (message.origin === "owner") return ownerMessageHtml(message, "msg owner", "You", text);
   const report = reportPattern.exec(text);
   if (report) return reportRowHtml(message, report);
   const event = /^\[Owner-local event ([\w.-]+)\]\n/.exec(text);
   if (event) return `<div class="sys-row"><span class="sys-icon" aria-hidden="true">⚑</span>Event <code>${esc(event[1])}</code></div>`;
   if (message.origin === "internal")
     return `<div class="sys-row muted"><span class="sys-icon" aria-hidden="true">↻</span>${esc(clip(oneLine(text), 120))}</div>`;
-  return `<article class="msg owner earlier-input"><div class="msg-meta"><span class="who">Earlier input</span></div><div class="bubble">${markdown(text)}${imagesHtml(message.images)}</div></article>`;
+  return ownerMessageHtml(message, "msg owner earlier-input", "Earlier input", text);
 }
 /** The outcome the host posts back after an owner decision (`[approval <id>] The owner …`), as one row instead of a bubble. */
 function approvalRowHtml([, id, decision, summary, action, failed]) {
@@ -589,18 +615,27 @@ export function toggleSteer() {
 
 // ---------------------------------------------------------------------------------------------------------------- clicks
 
+/** The hint of the clamped owner message a plain click landed on; null for links, buttons, images, a selection and unclamped messages. */
+function clampedMessageHint(event) {
+  const article = event.target.closest(".msg[data-overflow]");
+  if (!article || event.target.closest("a, button, summary, input, textarea, select, img, [data-media]")) return null;
+  const selection = getSelection();
+  if (selection && !selection.isCollapsed && selection.containsNode(article, true)) return null;
+  return article.querySelector(".msg-more");
+}
+
 /** Clicks inside any transcript (chat feed, a worker in the center, the Host agent); `rerender` repaints that transcript, `follow` is its follower. */
 export async function transcriptClick(event, root, rerender, follow) {
-  const toggle = event.target.closest("[data-toggle]");
+  const toggle = event.target.closest("[data-toggle]") ?? clampedMessageHint(event);
   if (toggle) {
     const key = toggle.dataset.toggle,
-      top = toggle.getBoundingClientRect().top;
+      top = (toggle.closest(".msg") ?? toggle).getBoundingClientRect().top;
     expanded.has(key) ? expanded.delete(key) : expanded.add(key);
     // Opening a detail is reading: following stops, and the line stays under the pointer (streaming-follow-intent-failures.md F8).
     follow?.stop();
     rerender();
     const line = root.querySelector(`[data-toggle="${CSS.escape(key)}"]`);
-    if (line) follow?.keepAt(line, top);
+    if (line) follow?.keepAt(line.closest(".msg") ?? line, top);
     line?.focus({ preventScroll: true });
     return true;
   }
