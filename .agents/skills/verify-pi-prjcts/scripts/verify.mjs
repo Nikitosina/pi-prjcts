@@ -2927,6 +2927,8 @@ const journeys = {
       if (back.expanded !== "false" || !back.moreShown) throw Error(`A → B → A did not collapse ${needle}: ${JSON.stringify(back)}`);
     }
     record("visible", "A → B → A shows both long messages collapsed again");
+    // The feed is still scrolling to its end after the switch; aim only once it has settled.
+    await settle();
     await mouse(await wordPoint("Paragraph 5", "first"), [1]);
     await expectRevealed("Paragraph 5", "a click reveals after coming back");
     await page.reload();
