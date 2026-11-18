@@ -20,5 +20,6 @@ export const sidebarPlugin = (name, title, script, { rpc, routes } = {}) => ({
 
 export const slowRead = async ({ projectId, params }) => {
   if (params?.slow) await wait(params.slow);
+  if (params?.fail) throw new Error("stale read failed");
   return { projectId, chatId: params?.chatId ?? null };
 };

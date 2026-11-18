@@ -14,7 +14,10 @@ window.piProjects.register({
       section.signal.addEventListener("abort", () => log.aborts.push(section.chatId));
       slot.innerHTML = `<p data-side-chat>…</p><p data-side-echo></p><button type="button" data-action="side-a-late">Late</button><button type="button" data-profile="worker">Not core</button>`;
       const slow = section.chatId === log.slowChat ? 1500 : 0;
-      const answer = await section.rpc("read", { chatId: section.chatId, slow });
+      const answer = await section.rpc("read", { chatId: section.chatId, slow, fail: section.chatId === log.failChat }).catch((error) => {
+        log.staleError = error.name;
+        throw error;
+      });
       node().querySelector("[data-side-chat]").textContent = `${answer.projectId}/${answer.chatId}`;
       const echo = await section.fetch("echo");
       node().querySelector("[data-side-echo]").textContent = await echo.text();

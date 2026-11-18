@@ -99,6 +99,7 @@ function onTopic(change) {
   if (change.topic === "jobs") void loadJobs();
   if (change.topic === "settings") {
     emit("prompts-changed");
+    emit("plugins-changed");
     void loadChat();
     void loadUsage();
   }

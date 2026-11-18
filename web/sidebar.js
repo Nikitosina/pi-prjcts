@@ -1,33 +1,45 @@
-// Plugin sections in the right panel: every loaded plugin that opted in (web.sidebar) gets one section under Workers and Pull requests.
-// Sections mount once per project/chat selection and are aborted and replaced by the next one; a refresh of jobs, chat or PRs never touches them.
+// Plugin sections in the right panel: every plugin enabled for this project that opted in (web.sidebar) gets one section
+// under Workers and Pull requests. A project/chat selection or a changed enabled set aborts and replaces the sections;
+// a refresh of jobs, chat, PRs or an unchanged plugin status never touches them.
 import { call } from "./api.js";
 import { mountSections, sectionNodes } from "./plugins.js";
-import { on, state, stale } from "./state.js";
+import { on, stale, state } from "./state.js";
 
 const box = document.querySelector("#plugin-sections");
-let web = null; // the plugins RPC's `web`, read once per page; a failed read is retried on the next selection
+let mountedKey = null;
+let selectionKey = null;
 let unmount = () => {};
 
-const webOnce = () =>
-  (web ??= call("plugins").then(
-    (status) => status.web,
-    (error) => {
-      web = null;
-      throw error;
-    },
-  ));
-
-on("select", async ({ projectId, chatId }) => {
+async function refresh({ projectId, chatId }) {
   const gen = state.generation;
+  // With per-project plugin disable the same RPC returns each plugin's `enabled`; without it every loaded plugin is enabled.
+  const status = await call("plugins", { id: projectId }).catch((error) => void console.warn(error));
+  if (!status || stale(gen)) return;
+  const enabled = new Set(status.plugins.filter((plugin) => plugin.enabled !== false).map((plugin) => plugin.name));
+  const items = status.web.filter((item) => enabled.has(item.plugin));
+  const nodes = sectionNodes(items);
+  const key = `${projectId}\0${chatId}\0${nodes.map((node) => node.dataset.plugin).join("\0")}`;
+  if (key === mountedKey) return;
+  mountedKey = key;
   unmount();
   unmount = () => {};
   box.replaceChildren();
-  box.hidden = true;
-  const items = await webOnce().catch((error) => void console.warn(error));
-  if (!items || stale(gen)) return;
-  const nodes = sectionNodes(items);
+  box.hidden = !nodes.length;
   if (!nodes.length) return;
   box.replaceChildren(...nodes);
-  box.hidden = false;
   unmount = mountSections(nodes, items, { projectId, chatId });
+}
+
+on("select", (context) => {
+  const key = `${context.projectId}\0${context.chatId}`;
+  if (key !== selectionKey) {
+    selectionKey = key;
+    mountedKey = null;
+    unmount();
+    unmount = () => {};
+    box.replaceChildren();
+    box.hidden = true;
+  }
+  void refresh(context);
 });
+on("plugins-changed", () => void refresh({ projectId: state.projectId, chatId: state.chatId }));

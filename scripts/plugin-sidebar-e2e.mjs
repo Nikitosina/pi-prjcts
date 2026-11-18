@@ -114,7 +114,21 @@ await kit.run(async () => {
   );
   await shot("02-chat-two");
 
+  // ---- 6: a stale rejection is an AbortError too
+  await page.evaluate(`window.__side.failChat = ${js(one)}; window.__side.slowChat = ${js(one)}`);
+  await select(alpha, one);
+  await page.waitFor(`window.__side.mounts.filter((mount) => mount.chatId === ${js(one)}).length === 2`, "chat one failing read mounted");
+  await select(alpha, two);
+  await settled("side-a");
+  await delay(2000);
+  check(
+    "6 a read that rejects after the selection changed rejects as AbortError, never as the stale read error",
+    (await log()).staleError === "AbortError",
+    await log(),
+  );
+
   // ---- 7: normal refresh does not remount
+  await page.evaluate(`window.__side.failChat = null; window.__side.slowChat = null`);
   const mountsBefore = (await log()).mounts.length;
   await rpc({ action: "chat-create", id: alpha, title: "Three" });
   await page.evaluate(`import("/workers.js").then((workers) => Promise.all([workers.loadJobs(), workers.loadSide()]))`);
@@ -122,6 +136,22 @@ await kit.run(async () => {
   await delay(1500);
   check(
     "7 a refresh, a new chat elsewhere and re-selecting the same chat mount nothing again",
+    (await log()).mounts.length === mountsBefore,
+    await log(),
+  );
+  await page.evaluate(
+    `import("/state.js").then((bus) => { bus.state.view = null; bus.emit("select-request", { projectId: ${js(alpha)}, chatId: ${js(two)} }); })`,
+  );
+  await delay(500);
+  check(
+    "7 re-selecting the same chat while its view is still loading does not mount again",
+    (await log()).mounts.length === mountsBefore,
+    await log(),
+  );
+  await page.evaluate(`import("/state.js").then((bus) => bus.emit("plugins-changed"))`);
+  await delay(500);
+  check(
+    "7 a plugin status refresh with the same enabled set mounts nothing again",
     (await log()).mounts.length === mountsBefore,
     await log(),
   );

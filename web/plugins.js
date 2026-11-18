@@ -172,9 +172,14 @@ async function mountOne(node, item, { projectId, chatId }, signal, kind) {
   // A call after the panel went away is never sent, and a late answer rejects with an AbortError, so nothing reaches the next project.
   const settled = async (send) => {
     signal.throwIfAborted();
-    const value = await send();
-    signal.throwIfAborted();
-    return value;
+    try {
+      const value = await send();
+      signal.throwIfAborted();
+      return value;
+    } catch (error) {
+      signal.throwIfAborted();
+      throw error;
+    }
   };
   const panel = Object.freeze({
     projectId,

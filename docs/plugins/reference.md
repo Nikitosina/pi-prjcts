@@ -241,7 +241,7 @@ web?: {
 
 Settings → Plugins lists every plugin the host loaded, one card each. A loaded plugin with a `script` gets a panel in its card. The inbox loads each `ui.js` and `ui.css` once per page, the first time the owner opens the section. The panel is mounted while the section shows: again after Settings closes and reopens, and again for each project the owner selects. With no project selected, the card says so and nothing mounts.
 
-`ui.js` is a classic script. While it first runs, it registers its panel:
+`ui.js` is a classic script. Wrap your declarations in a block (`{ ... }`) so helpers of two plugins copied from the example do not share top-level lexical names. While it first runs, it registers its panel:
 
 ```js
 window.piProjects.register({
@@ -306,8 +306,8 @@ window.piProjects.register({
 
 Rules, in addition to those of the Settings panel:
 
-- The section mounts once per selection of a project or chat. Selecting another chat or project aborts `signal` and mounts a fresh section in a fresh slot with the new `chatId`. Refreshes of workers, jobs, the chat and the PR list do not mount it again, and selecting the chat that is already selected does nothing.
-- Everything from the old selection is cut off after the abort: `rpc` and `fetch` send nothing and reject with an `AbortError`, also a call already sent, so a slow answer never renders into the next chat. Keep timers and polling tied to `signal`.
+- The section mounts once per selection of a project or chat. Selecting another chat or project aborts `signal` and mounts a fresh section in a fresh slot with the new `chatId`. Refreshes of workers, jobs, the chat and the PR list do not mount it again, and selecting the chat that is already selected does nothing. On hosts with per-project plugin disable, only enabled plugins mount; changing that set aborts and replaces the sections.
+- Everything from the old selection is cut off after the abort: `rpc` and `fetch` send nothing and reject with an `AbortError`, also a call already sent and a call that rejects late, so a slow answer never renders into the next chat. Keep timers and polling tied to `signal`.
 - One failing section shows its error line in that section only. Other sections, Workers, Pull requests and the chat keep working.
 - Sections follow plugin load order. The panel is a narrow column (about 300 px, a sheet on small screens): wrap long text, avoid fixed widths, and scope your CSS to your own classes, as `.notes-panel` does. Core styles `.plugin-section` only for spacing, the heading and the error line.
 - The code is trusted, not isolated, as for the Settings panel. A plugin that wants to show something for a feature of its own (a task list, a status) reads its own RPC methods or routes; core has no knowledge of any plugin's data.
