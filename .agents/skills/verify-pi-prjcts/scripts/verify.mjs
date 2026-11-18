@@ -5,7 +5,7 @@
 //   node .agents/skills/verify-pi-prjcts/scripts/verify.mjs rpc     --run <scratch> <action> [json-fields]
 //   node .agents/skills/verify-pi-prjcts/scripts/verify.mjs drive   --run <scratch> <feature>
 //   node .agents/skills/verify-pi-prjcts/scripts/verify.mjs cleanup --run <scratch>
-// Features: message-coordinator
+// Features: message-coordinator, message-collapse
 import { spawn, execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { deflateSync } from "node:zlib";
