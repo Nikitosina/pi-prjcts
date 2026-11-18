@@ -729,13 +729,14 @@ await kit.run(async () => {
         .filter((item) => item.role === "coordinator" && /^\[reviewer /.test(item.user))
         .map((item) => item.user)
         .join("\n--\n");
+    const CONFIRMED = "confirmed in its checkout before the review began; not locked, and not checked again after it";
     const count = async (needle) =>
       new Set(
         result.calls
           .filter((item) => item.role === "coordinator" && item.user.includes(needle))
           .map((item) => /Report ref: (\d+)/.exec(item.user)?.[1]),
       ).size;
-    const reads = (sha) => count(`Read revision: ${sha}`);
+    const reads = (sha) => count(`Read revision: ${sha}, ${CONFIRMED}.`);
     const misses = (sha) => count(`Revision ${sha} was not read.`);
     const checkoutsOf = (sha) =>
       readdirSync(treeRoot).filter(
@@ -831,6 +832,7 @@ await kit.run(async () => {
   {
     const F = "9".repeat(40);
     const G = "8".repeat(40);
+    const CONFIRMED = "confirmed in its checkout before the review began; not locked, and not checked again after it";
     const reviewerCalls = (sha) => result.calls.filter((item) => item.role === "reviewer" && item.user.includes(`REVIEW ${sha}`)).length;
     const reportsFor = (sha) =>
       result.calls
@@ -847,7 +849,7 @@ await kit.run(async () => {
     const failed = reportsFor(F).join("\n");
     check(
       "38 a provider rejecting with an empty message fails the reviewer: no read, no attested revision, readable report",
-      reviewerCalls(F) === 0 && !failed.includes(`Read revision: ${F}`) && /failed to start/.test(failed) && /no message/i.test(failed),
+      reviewerCalls(F) === 0 && !failed.includes(`Read revision`) && /failed to start/.test(failed) && /no message/i.test(failed),
       failed,
     );
     patchData((data) => {
@@ -856,7 +858,7 @@ await kit.run(async () => {
     await settled(G);
     check(
       "38 the same provider without the failure is read and reported",
-      reviewerCalls(G) === 1 && reportsFor(G).some((text) => text.includes(`Read revision: ${G}`)),
+      reviewerCalls(G) === 1 && reportsFor(G).some((text) => text.includes(`Read revision: ${G}, ${CONFIRMED}.`)),
       reportsFor(G),
     );
   }

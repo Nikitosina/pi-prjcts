@@ -1329,7 +1329,11 @@ assert.deepEqual(await jobs.stallTick(harness, T + 21 * 60_000), [gate.id], "an 
   const [reviewer] = await reviewers();
   let reports = await reportsOf(reviewer);
   assert.equal(reports.length, 1);
-  assert.match(reports[0], new RegExp(`Read revision: ${REV_A}`), "V3 the first report names A");
+  assert.match(
+    reports[0],
+    new RegExp(`Read revision: ${REV_A}, confirmed in its checkout before the review began; not locked, and not checked again after it\\.`),
+    "V3 the first report names A and says when it was confirmed",
+  );
   assert.equal(readerSaw, REV_A);
 
   await say_(root, `Resend ${reviewer.id} ${REV_B} send-b`);

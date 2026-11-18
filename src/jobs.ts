@@ -542,6 +542,8 @@ function nextModel(host: JobsHost, role: AgentRole, from: string, moves: readonl
   return offered && offered.label !== from && !moves.some((move) => move.from === offered.label) ? offered : null;
 }
 
+const CONFIRMED_BEFORE_REVIEW = "confirmed in its checkout before the review began; not locked, and not checked again after it";
+
 /** The reporter of message `seq` is done with a reader: it may change commit for its next message. */
 async function settleTurn(tx: Tx, agentId: string, seq: number) {
   const agent = (await tx.doc(Jobs, ROOT_CONVERSATION_ID)).agents[agentId];
@@ -836,7 +838,8 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
           const drift = agent?.readHead ? await host.readDrift?.(agent as Agent) : null;
           const read = agent?.reads?.find((item) => item.seq === (reporter.input.seq ?? 0));
           const notes = [
-            read?.state && (read.state === "failed" ? `Revision ${read.sha} was not read.` : `Read revision: ${read.sha}`),
+            read?.state &&
+              (read.state === "failed" ? `Revision ${read.sha} was not read.` : `Read revision: ${read.sha}, ${CONFIRMED_BEFORE_REVIEW}.`),
             drift,
           ].filter(Boolean);
           // The notes go right under the report's first line, so a clipped preview still shows them.
