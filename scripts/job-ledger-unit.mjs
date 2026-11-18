@@ -78,7 +78,9 @@ const withFiles = job(7000, { attachments: [randomUUID()] });
 saveJob(A, withFiles);
 withFiles.attachments.push(randomUUID());
 assert.equal(jobs(A).find((item) => item.id === withFiles.id).attachments.length, 1);
-jobs(A).find((item) => item.id === withFiles.id).attachments.push(randomUUID());
+jobs(A)
+  .find((item) => item.id === withFiles.id)
+  .attachments.push(randomUUID());
 assert.equal(jobs(A).find((item) => item.id === withFiles.id).attachments.length, 1);
 
 // L8: the cache keeps a bounded number of projects; an evicted ledger is read again.
