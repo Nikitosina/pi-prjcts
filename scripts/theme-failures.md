@@ -35,3 +35,12 @@ tree chevrons and "New chat", panel headings, composer key hints (3.1-3.9:1), an
 - A2 An old section id (`theme`, `animations`, `display`, `statusline`), such as the Host agent's `ui_focus`, no longer opens Settings.
 - A3 A hotkey the owner saved for the old Theme page stops working, and the letter H does not open Appearance.
 - A4 At 390 px the combined page overflows. A5: after a reload a part shows its default instead of its saved value.
+
+## Custom chat text size (C6)
+
+- C6a A typed value outside 50-200, a fraction, text, exponent form or blank is saved, or the field keeps the bad text instead of the last valid percent.
+- C6b A refusal is silent: no message for screen readers (polite live region) and no aria-invalid on the field.
+- C6c Custom 107% is applied but lost on reload, or applied after first paint (flash of the default size).
+- C6d Switching back to a preset keeps the custom scale, or forgets the last custom value.
+- C6e Long owner messages escape their six-line clamp at 50-200%, or 200% overflows sideways at 390 px.
+- Host validation of `chatTextPercent` (refused values leave the document untouched, old documents read 100) is in `ui2-settings-e2e.mjs` (U1, U2).

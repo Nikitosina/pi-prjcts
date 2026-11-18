@@ -54,7 +54,7 @@ const serial = <T>(operation: () => Promise<T> | T): Promise<T> => {
 export function readUi(): { revision: string; ui: UiSettings } {
   const ui =
     readDocument(uiPath(), (value) => {
-      // Documents saved before `font`, `chatTextSize`, `statusItems`, a status item or the transcript display fields existed read with today's defaults for them.
+      // Documents saved before `font`, `chatTextSize`, `chatTextPercent`, `statusItems`, a status item or the transcript display fields existed read with today's defaults for them.
       const record = typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
       const ui = parse(
         UiSettings,
@@ -62,6 +62,7 @@ export function readUi(): { revision: string; ui: UiSettings } {
           ? {
               font: DEFAULT_UI.font,
               chatTextSize: DEFAULT_UI.chatTextSize,
+              chatTextPercent: DEFAULT_UI.chatTextPercent,
               showThinking: DEFAULT_UI.showThinking,
               toolSummaries: DEFAULT_UI.toolSummaries,
               ...record,

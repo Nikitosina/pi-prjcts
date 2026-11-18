@@ -13,7 +13,11 @@
     root.dataset.themePref = theme;
     root.dataset.theme = theme === "system" ? (dark.matches ? "claude" : "light") : theme;
     root.dataset.font = ["jetbrains-mono", "system-sans", "system-mono"].includes(ui.font) ? ui.font : "jetbrains-mono";
-    root.dataset.chatSize = ["small", "default", "large"].includes(ui.chatTextSize) ? ui.chatTextSize : "default";
+    const percent =
+      Number.isInteger(ui.chatTextPercent) && ui.chatTextPercent >= 50 && ui.chatTextPercent <= 200 ? ui.chatTextPercent : 100;
+    root.dataset.chatSize = ["small", "default", "large", "custom"].includes(ui.chatTextSize) ? ui.chatTextSize : "default";
+    if (root.dataset.chatSize === "custom") root.style.setProperty("--chat-scale", String(percent / 100));
+    else root.style.removeProperty("--chat-scale");
     const level = ["off", "subtle", "full"].includes(ui.animations) ? ui.animations : "subtle";
     root.dataset.motion = reduced.matches ? "off" : level;
   };

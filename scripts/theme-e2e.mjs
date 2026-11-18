@@ -248,9 +248,9 @@ await kit.run(async () => {
   check("C1 the stored default is 'default'", (await rpc({ action: "ui-get" })).ui.chatTextSize === "default");
   await openAppearance();
   check(
-    "C2 Settings offers Smaller, Default and Larger, Default selected",
+    "C2 Settings offers Smaller, Default, Larger and Custom, Default selected",
     await page.evaluate(
-      `JSON.stringify([...document.querySelectorAll('[data-chat-size-option]')].map((n) => [n.dataset.chatSizeOption, n.getAttribute('aria-checked')])) === JSON.stringify([["small","false"],["default","true"],["large","false"]])`,
+      `JSON.stringify([...document.querySelectorAll('[data-chat-size-option]')].map((n) => [n.dataset.chatSizeOption, n.getAttribute('aria-checked')])) === JSON.stringify([["small","false"],["default","true"],["large","false"],["custom","false"]])`,
     ),
   );
   await page.shot("06-chat-size-default", { force: true });
@@ -305,5 +305,136 @@ await kit.run(async () => {
   const narrow = await probe();
   check("C5 at 390 px the large text does not overflow sideways", narrow.horizontal === false && narrow.prose > 14.5, narrow);
   await page.shot("06-chat-size-large-390", { force: true });
+  await page.viewport(1440, 1000);
+
+  // C6: Custom chat text size, a whole percent from 50 to 200 typed by the owner.
+  const storedUi = async () => (await rpc({ action: "ui-get" })).ui;
+  const customState = () =>
+    page.evaluate(`(() => {
+      const input = document.querySelector('#chat-size-percent');
+      return {
+        value: input?.value,
+        invalid: input?.getAttribute('aria-invalid'),
+        labelled: !!input && (input.labels?.length > 0 || !!input.getAttribute('aria-label')),
+        status: document.querySelector('#chat-size-status')?.textContent.trim(),
+        live: document.querySelector('#chat-size-status')?.getAttribute('aria-live'),
+        radio: document.querySelector('[data-chat-size-option="custom"]')?.getAttribute('aria-checked'),
+        inViewport: !!input && input.getBoundingClientRect().right <= innerWidth && input.getBoundingClientRect().left >= 0,
+      };
+    })()`);
+  const typePercent = async (text) => {
+    await page.evaluate(`(() => { const i = document.querySelector('#chat-size-percent'); i.focus(); i.select(); })()`);
+    if (text === "")
+      await page.cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 });
+    else await page.cdp("Input.insertText", { text });
+    await page.cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: "\r" });
+    await page.cdp("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+    await kit.delay(300);
+  };
+  await openAppearance();
+  check(
+    "C6 Settings offers Custom beside the presets, with a labelled percent field",
+    await page.evaluate(
+      `JSON.stringify([...document.querySelectorAll('[data-chat-size-option]')].map((n) => n.dataset.chatSizeOption)) === JSON.stringify(["small","default","large","custom"])`,
+    ),
+  );
+  await page.evaluate(`document.querySelector('[data-chat-size-option="custom"]').click()`);
+  await page.waitFor(`document.documentElement.dataset.chatSize === "custom"`, "custom selected");
+  const first = await customState();
+  check(
+    "C6 choosing Custom starts at 100% with the field labelled",
+    first.value === "100" && first.labelled && first.radio === "true",
+    first,
+  );
+  await typePercent("107");
+  await kit.eventually(async () => (await storedUi()).chatTextPercent === 107, "107 not saved", 100);
+  const at107 = await probe();
+  check(
+    "C6 custom 107% scales message text by exactly 1.07 and nothing around it",
+    Math.abs(at107.prose - 14.5 * 1.07) < 0.01 &&
+      Math.abs(at107.owner - 14 * 1.07) < 0.01 &&
+      at107.meta === base.meta &&
+      at107.composer === base.composer &&
+      (await storedUi()).chatTextSize === "custom",
+    at107,
+  );
+  check("C6 the field and the status confirm the applied value", /107\s?%/.test((await customState()).status ?? ""), await customState());
+  await page.shot("07-custom-107", { force: true });
+  for (const bad of ["", "abc", "49", "201", "107.5", "-5", "1e2"]) {
+    await typePercent(bad);
+    const now = await customState();
+    const saved = await storedUi();
+    check(
+      `C6 invalid ${JSON.stringify(bad)} is refused with a message, the field returns to 107 and nothing is saved`,
+      now.value === "107" &&
+        now.invalid === "true" &&
+        now.live === "polite" &&
+        !!now.status &&
+        saved.chatTextPercent === 107 &&
+        saved.chatTextSize === "custom" &&
+        (await probe()).prose === at107.prose,
+      { bad, now, saved },
+    );
+  }
+  await page.shot("07-custom-invalid", { force: true });
+  await typePercent("108");
+  check("C6 a valid value after a refusal clears the error", (await customState()).invalid !== "true", await customState());
+  await typePercent("107");
+  await kit.eventually(async () => (await storedUi()).chatTextPercent === 107, "107 not saved again", 100);
+  await page.reload();
+  await page.waitFor(`document.body.dataset.ready === "1"`, "reloaded with custom text");
+  const reloaded = await probe();
+  check(
+    "C6 custom 107% survives a reload, set before <body>, with the field showing it",
+    (await page.evaluate(`window.__chatAtBody`)) === "custom" &&
+      Math.abs(reloaded.prose - 14.5 * 1.07) < 0.01 &&
+      (await page.evaluate(`document.documentElement.style.getPropertyValue('--chat-scale')`)) === "1.07",
+    reloaded,
+  );
+  await openAppearance();
+  const afterReload = await customState();
+  check("C6 after a reload the field shows 107", afterReload.value === "107" && afterReload.radio === "true", afterReload);
+  await page.evaluate(`document.querySelector('[data-chat-size-option="small"]').click()`);
+  await page.waitFor(`document.documentElement.dataset.chatSize === "small"`, "preset after custom");
+  await kit.eventually(async () => (await storedUi()).chatTextSize === "small", "small not saved", 100);
+  await page.evaluate(`document.querySelector('#settings').close()`);
+  await kit.delay(300);
+  const backToSmall = await probe();
+  check(
+    "C6 switching to a preset leaves custom scale behind and keeps the last custom value",
+    Math.abs(backToSmall.prose - 14.5 * 0.9) < 0.01 &&
+      (await storedUi()).chatTextPercent === 107 &&
+      (await page.evaluate(`document.documentElement.style.getPropertyValue('--chat-scale')`)) === "",
+    backToSmall,
+  );
+  await openAppearance();
+  await page.evaluate(`document.querySelector('[data-chat-size-option="custom"]').click()`);
+  await page.waitFor(`document.documentElement.dataset.chatSize === "custom"`, "custom again");
+  check("C6 choosing Custom again returns to 107%", (await customState()).value === "107", await customState());
+  for (const extreme of ["50", "200"]) {
+    await typePercent(extreme);
+    await kit.eventually(async () => (await storedUi()).chatTextPercent === Number(extreme), `${extreme} not saved`, 100);
+    await page.evaluate(`document.querySelector('#settings').close()`);
+    await kit.delay(300);
+    const p = await probe();
+    check(
+      `C6 ${extreme}% keeps a long owner message clamped to six lines and the page from scrolling sideways`,
+      p.overflow && p.bodyHeight <= p.lineHeight * 6 + 1 && !p.horizontal && Math.abs(p.prose - (14.5 * Number(extreme)) / 100) < 0.01,
+      p,
+    );
+    await openAppearance();
+  }
+  await page.viewport(390, 844, true);
+  await kit.delay(300);
+  const phone = await customState();
+  const phoneProbe = await probe();
+  check("C6 at 390 px the 200% text and the field fit the screen", phone.inViewport && phoneProbe.horizontal === false, {
+    phone,
+    phoneProbe,
+  });
+  await page.shot("07-custom-200-390-settings", { force: true });
+  await page.evaluate(`document.querySelector('#settings').close()`);
+  await kit.delay(300);
+  await page.shot("07-custom-200-390-chat", { force: true });
   await page.viewport(1440, 1000);
 });

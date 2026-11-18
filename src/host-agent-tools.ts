@@ -342,7 +342,7 @@ export function hostAgentTools(deps: HostToolDeps): ToolRegistration[] {
   });
   const uiSet = defineTool({
     name: "ui_set",
-    description: `Change the owner's UI settings (theme, font, chatTextSize small|default|large, animations, hotkeys, panels, status line, showThinking, toolSummaries { enabled, model }) with a partial patch. statusLine: false hides the whole status line; statusItems orders it and hides items: list every one of ${STATUS_ITEM_IDS.join(", ")} exactly once as { id, enabled }. Read the current list with host_call ui-get first.`,
+    description: `Change the owner's UI settings (theme, font, chatTextSize small|default|large|custom with chatTextPercent a whole number 50-200, animations, hotkeys, panels, status line, showThinking, toolSummaries { enabled, model }) with a partial patch. statusLine: false hides the whole status line; statusItems orders it and hides items: list every one of ${STATUS_ITEM_IDS.join(", ")} exactly once as { id, enabled }. Read the current list with host_call ui-get first.`,
     parameters: Type.Object({ patch: Type.Record(Type.String(), Type.Unknown()) }),
     replay: "unsafe",
     async execute(args) {

@@ -8,6 +8,7 @@ export const DEFAULT_UI = {
   theme: "claude",
   font: "jetbrains-mono",
   chatTextSize: "default",
+  chatTextPercent: 100,
   animations: "subtle",
   hotkeys: {},
   panels: { list: true, context: true, hostAgent: false },

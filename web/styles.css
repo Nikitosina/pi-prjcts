@@ -3235,6 +3235,36 @@ input.pb-title {
   border-radius: var(--r-m);
   text-align: left;
 }
+.font-options.chat-sizes {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.chat-size-custom {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.chat-size-custom input {
+  width: 6ch;
+  min-width: 0;
+  text-align: right;
+}
+.chat-size-custom input[aria-invalid="true"] {
+  border-color: var(--bad);
+}
+.chat-size-status {
+  min-height: 1.4em;
+  margin: 2px 0 0;
+}
+.chat-size-status.error {
+  color: var(--bad);
+}
+@media (max-width: 640px) {
+  .font-options.chat-sizes {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
 .font-options button[aria-checked="true"] {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-soft);
