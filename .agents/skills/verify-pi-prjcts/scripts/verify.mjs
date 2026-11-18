@@ -2875,7 +2875,10 @@ const journeys = {
     if (picked < 2) throw Error(`double click did not select a word (${picked})`);
     await expectRevealed("Paragraph 5", "repeated clicks keep the message revealed");
     if (Math.abs((await state("Paragraph 5")).height - opened.height) > 2) throw Error("a click changed the revealed message height");
-    record("visible", `repeated clicks and a double click (word of ${picked} characters) left the message revealed, no collapse affordance`);
+    record(
+      "visible",
+      `repeated clicks and a double click (word of ${picked} characters) left the message revealed, no collapse affordance`,
+    );
     await page.evaluate(`getSelection().removeAllRanges()`);
     await page.evaluate(`${ownerBy("Paragraph 5")}.__kept = true`);
     await send("One more short line");
@@ -2908,7 +2911,11 @@ const journeys = {
 
     // Navigation: A → B → A starts collapsed again, and so does a reload.
     await page.click(`#tree [data-new-chat]`);
-    await page.waitFor(`document.querySelectorAll('#tree [data-chat]').length >= 2 && !document.querySelector(${JSON.stringify(owner)})`, "chat B open", 10000);
+    await page.waitFor(
+      `document.querySelectorAll('#tree [data-chat]').length >= 2 && !document.querySelector(${JSON.stringify(owner)})`,
+      "chat B open",
+      10000,
+    );
     await page.click(`#tree [data-chat="main"]`);
     await page.waitFor(`!!${ownerBy("Paragraph 5")}?.querySelector('.msg-more')`, "chat A shown again", 10000);
     for (const needle of ["Paragraph 5", "item 10"]) {
@@ -2931,7 +2938,8 @@ const journeys = {
     await page.press(" ", { code: "Space", keyCode: 32, text: " " });
     await expectRevealed("item 10", "Space reveals the list");
     const shortAfter = await state("Short answer: yes");
-    if (shortAfter.overflow || shortAfter.moreShown) throw Error(`short message is clamped after navigation: ${JSON.stringify(shortAfter)}`);
+    if (shortAfter.overflow || shortAfter.moreShown)
+      throw Error(`short message is clamped after navigation: ${JSON.stringify(shortAfter)}`);
     await page.evaluate(`document.querySelector('#feed').scrollTop = 0`);
     await page.shot(dir, "05-transcript-top");
 
