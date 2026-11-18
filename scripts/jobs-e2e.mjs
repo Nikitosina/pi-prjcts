@@ -46,6 +46,32 @@ const REFUND_STEPS = [
   review("full"),
   ["job", { action: "ready", summary: "Reviewed", pr: "12", candidate: sha, proof: ["p"], review: "REVIEW-OK" }],
 ];
+// W1-W9 (jobs-failures.md): a worker's re-check continues its reviewer; `worktree` stands in for the worker's checkout.
+const worktree = { head: null, dirty: false, unreadable: false };
+let continuedReviewer = null;
+function setWorktree(head, flags = {}) {
+  Object.assign(worktree, { head, dirty: false, unreadable: false, ...flags });
+  return head;
+}
+const recheck = (task, continues) => ["subagent", { role: "reviewer", kind: "recheck", task, continues }];
+const CONTINUE_STEPS = [
+  () => ["job", { action: "candidate", sha: setWorktree(REV_A) }],
+  () => ["subagent", { role: "reviewer", kind: "full", task: "BRIEF-CONT review A" }],
+  (r) => ["subagent", { role: "reviewer", kind: "full", task: "again", continues: (continuedReviewer = /reviewer (\d+)/.exec(r[1])?.[1]) }],
+  () => recheck("no news", continuedReviewer),
+  () => (setWorktree(REV_B, { dirty: true }), ["job", { action: "candidate", sha: REV_B }]),
+  () => recheck("dirty", continuedReviewer),
+  () => (setWorktree(REV_C), recheck("moved on", continuedReviewer)),
+  () => (setWorktree(REV_B, { unreadable: true }), recheck("blind", continuedReviewer)),
+  () => (setWorktree(REV_B), recheck("stranger", "999999")),
+  () => recheck("REVIEW B", continuedReviewer),
+  () => recheck("same again", continuedReviewer),
+  () => (setWorktree(REV_C), ["job", { action: "candidate", sha: REV_C }]),
+  () => recheck("REVIEW-FAIL", continuedReviewer),
+  () => recheck("after the failure", continuedReviewer),
+  () => recheck("fresh after the failure"),
+  () => ["job", { action: "ready", summary: "Continued", pr: "12", candidate: REV_B, proof: ["p"], review: "REVIEW-OK" }],
+];
 // Tasks a worker gives its checking scout; other scout tasks answer normally.
 const CHECKS = new Set(["CHECK", "SLOW-CHECK", "SILENT", "BUSY"]);
 // A glued-words suspect (scripts/agent-signals-failures.md G6).
@@ -233,6 +259,18 @@ function route(request) {
       const step = BUDGET_STEPS[messages.filter((message) => message.role === "toolResult").length];
       return step ? call(...step) : say("Budget spent.");
     }
+    if (tag === "BRIEF-CONT") {
+      const done = messages.filter((message) => message.role === "toolResult").map((message) => text(message.content));
+      const step = CONTINUE_STEPS[done.length];
+      return step ? call(...step(done)) : say("Continued.");
+    }
+    if (tag === "BRIEF-CONTOTHER") {
+      const results = messages.filter((message) => message.role === "toolResult").length;
+      if (results === 0) return call("job", { action: "candidate", sha: setWorktree(REV_B) });
+      if (results === 1) return call("subagent", { role: "reviewer", kind: "full", task: "BRIEF-CONTX own review" });
+      if (results === 2) return call(...recheck("borrow", continuedReviewer));
+      return say("Borrow refused.");
+    }
     if (tag === "BRIEF-REFUND") {
       const step = REFUND_STEPS[messages.filter((message) => message.role === "toolResult").length];
       return step ? call(...step) : say("Reviewed.");
@@ -310,9 +348,11 @@ function route(request) {
     if (result.startsWith("step ")) return Number(result.slice(5)) < 12 ? call("step", { n: Number(result.slice(5)) + 1 }) : say("PASS");
     return say("PASS");
   }
-  if (role === "reviewer" && user === "REVIEW-FAIL")
+  if (role === "reviewer" && user.endsWith("REVIEW-FAIL"))
     return fauxAssistantMessage([], { stopReason: "error", errorMessage: "scripted reviewer failure" });
   if (role === "reviewer" && tag === "BRIEF-REVREAD") return say(`SAW ${readerSaw}`);
+  if (role === "reviewer" && tag === "BRIEF-CONT")
+    return say(`TURNS ${messages.filter((message) => message.role === "user").length}; LAST ${user.slice(0, 400)}`);
   return say(user === "LONG-SCOUT" ? longAnswer : role === "reviewer" ? "REVIEW-OK" : "Scouted.");
 }
 
@@ -445,6 +485,12 @@ async function open() {
     backgroundSilence: () => backgroundSilenceMs,
     stallMinutes: () => 20,
     reviewRechecks: () => 2,
+    confirmRevision: async () =>
+      worktree.unreadable || !worktree.head
+        ? { refusal: "The checkout's HEAD cannot be read" }
+        : worktree.dirty
+          ? { refusal: "The checkout has uncommitted changes" }
+          : { sha: worktree.head },
   });
   const registry = createRegistry();
   registry.install(TestTools);
@@ -1492,6 +1538,46 @@ assert.deepEqual(await jobs.stallTick(harness, T + 21 * 60_000), [gate.id], "an 
   await say_(root, `Resend ${reviewer.id} ${REV_A} overlap-3`);
   await quiet(harness);
   assert.equal(readerSaw, REV_A, "V5 once every earlier message is reported, the new commit is taken");
+}
+
+// W1-W9 (jobs-failures.md): a re-check continues its reviewer's conversation on the repaired, confirmed candidate.
+{
+  await say_(root, "Start CONT");
+  await quiet(harness);
+  const cont = (await jobsOf(harness)).find((item) => item.title === "Job CONT");
+  const results = requests.filter((item) => item.role === "worker" && item.tag === "BRIEF-CONT").map((item) => item.result);
+  assert.ok(continuedReviewer, "W1 the first review names the reviewer to continue");
+  assert.match(results[3], /fresh|independent/i, "W2 a full review never continues a conversation");
+  assert.match(results[4], /already read/i, "W4 the commit the reviewer read is not read again");
+  assert.match(results[6], /uncommitted/i, "W3 a dirty checkout is refused");
+  assert.match(results[7], /recorded candidate/i, "W3 a checkout that is not the recorded candidate is refused");
+  assert.match(results[8], /cannot be read/i, "W3 an unreadable checkout is refused");
+  assert.match(results[9], /not a reviewer of this Job/i, "W2 an unknown reviewer is refused");
+  assert.match(
+    results[10],
+    new RegExp(`^TURNS 2; LAST \\[The commit under review changed.*holds ${REV_B}.*read ${REV_A}`, "s"),
+    "W1 W5 the same conversation reads B and is told A came before",
+  );
+  assert.match(results[11], /already read/i, "W4 a second re-check on B is refused");
+  assert.match(results[13], /did not answer/, "W7 a continued turn whose model fails reports it");
+  assert.match(results[14], /not answered its last turn/, "W8 a reviewer that did not answer is not continued");
+  assert.match(results[15], /^REVIEW-OK/, "W7 the failed continued turn gave its re-check back, so a fresh one still runs");
+  assert.deepEqual(cont.reviews, { full: 1, rechecks: 3 }, "W7 W9 refusals spend nothing; each started turn is one re-check");
+  const child = cont.children.find((item) => String(item.id) === continuedReviewer);
+  assert.deepEqual(
+    child.reads.map((item) => item.sha),
+    [REV_A, REV_B, REV_C],
+    "W6 every commit a turn was sent is recorded, oldest first",
+  );
+  assert.equal(
+    cont.children.filter((item) => item.role === "reviewer").length,
+    2,
+    "W1 continuing starts no conversation; only the fresh re-check does",
+  );
+  await say_(root, "Start CONTOTHER");
+  await quiet(harness);
+  const other = requests.filter((item) => item.role === "worker" && item.tag === "BRIEF-CONTOTHER").map((item) => item.result);
+  assert.match(other[3], /not a reviewer of this Job/i, "W2 another Job's reviewer is never continued");
 }
 
 await harness.close(context);

@@ -78,3 +78,17 @@ Live cause: the Coordinator answered "yes, I continue, next I start the full che
 - V12 A turn stopped before its checkout was prepared becomes the commit the next plain send reads.
 - V13 A worker given a `readRef` gets revision evidence, or a reviewer's reused checkout is not at the commit its report names (git provider: HEAD moved or files changed). A plugin provider is checked through its task attachment's `confirmRevision` (vcs-plugins-failures.md 31-37); one without it is refused.
 - V14 Reopening the host stops on a reviewer whose new commit is unavailable instead of reporting it from its own reporter.
+
+## A worker's re-check reads its repaired candidate in the same reviewer conversation (owner 2026-11-18: "переиспользовать reviewer, а не спавнить новых каждый раз")
+
+A worker's `subagent` call with kind recheck may carry `continues`: the id of a reviewer of the same Job that answered before. The reviewer keeps its conversation and history; the host confirms the worker's checkout before the turn and tells the reviewer which commit it now holds.
+
+- W1 `continues` starts a new conversation anyway, so the reviewer has no history of the first review.
+- W2 `continues` is accepted with kind full (an independent full review must stay fresh), for a scout, or for a conversation that is not a reviewer of this Job (another Job's reviewer, the worker, a coordinator-started reader).
+- W3 The re-check starts although the checkout cannot be confirmed (no confirmation by the host, unreadable HEAD, uncommitted changes) or is not the recorded candidate (`job candidate`): the reviewer reads unverified or dirty code.
+- W4 The re-check starts on the commit the reviewer already read: it spends a re-check on nothing new, or the old report passes as a new review.
+- W5 The reviewer is not told the commit changed and answers from the files it saw before.
+- W6 The reviewer has no record of the commit it read, so the next re-check cannot tell fresh from stale; the record keeps only the latest commit and loses A.
+- W7 A refused re-check (stale, dirty, unknown reviewer) still spends the budget; a re-check that does not answer keeps its place; a replayed call (restart) spends twice or sends the task twice.
+- W8 Two re-checks continue the same reviewer at once, or a reviewer that did not answer its last turn is continued.
+- W9 A continued re-check gets the budget around it: it counts as a re-check, never as a free turn, and the full round is not reopened.

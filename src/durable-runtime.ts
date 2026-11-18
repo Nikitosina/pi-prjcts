@@ -44,7 +44,7 @@ import { Type } from "typebox";
 import type { Context } from "@earendil-works/chord";
 import { DEFAULT_REVIEW_RECHECKS, DEFAULT_STALL_MINUTES, DEFAULT_VERIFY_ROUNDS } from "./state.ts";
 import { Jobs, createJobs, readRevision, sharedHandoff, type JobsRuntime, type JobsSnapshot, type SpawnArgs } from "./jobs.ts";
-import { changedFiles, headCommit } from "./vcs.ts";
+import { changedFiles, confirmCheckout, headCommit } from "./vcs.ts";
 import { checkProofRefs, proofTools } from "./proof.ts";
 import { createApprover, describeAcceptance, fileAcceptanceLog, githubMergeProvider } from "./result-acceptance.ts";
 import { pullMainCheckout } from "./main-pull.ts";
@@ -1428,6 +1428,7 @@ export async function openDurableProject(input: {
       checkProof: (job, refs) => checkProofRefs(dir, job, refs),
       stallMinutes: () => loadProject(project.id).stallMinutes ?? DEFAULT_STALL_MINUTES,
       reviewRechecks: () => loadProject(project.id).review?.rechecks ?? DEFAULT_REVIEW_RECHECKS,
+      confirmRevision: confirmCheckout,
       approver: {
         approve: async (job) => {
           const current = loadProject(project.id),

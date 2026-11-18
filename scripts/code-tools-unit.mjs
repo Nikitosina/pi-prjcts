@@ -217,6 +217,29 @@ try {
   const legacyPage = await runIn(kinds.legacy.tools, "code_diff", {});
   assert.match(legacyPage, /continue with offset=\d+, or mode="stat"/, "F17 the legacy note names offset and stat");
   assert.doesNotMatch(legacyPage, /pass path/, "F17 the legacy note does not advise path");
+  // W3 (jobs-failures.md): a reviewer reads only a checkout confirmed at a readable HEAD with nothing uncommitted.
+  const { confirmCheckout } = await import("../src/vcs.ts");
+  const tree = join(base, "confirm");
+  mkdirSync(tree);
+  const inTree = (...args) =>
+    execFileSync("/usr/bin/git", ["-C", tree, "-c", "user.email=t@example.invalid", "-c", "user.name=t", ...args], { encoding: "utf8" });
+  assert.match((await confirmCheckout(undefined)).refusal, /no working directory/, "W3 no directory is refused");
+  inTree("init", "-q", "-b", "main");
+  assert.match((await confirmCheckout(tree)).refusal, /HEAD cannot be read/, "W3 a repository with no commit is refused");
+  writeFileSync(join(tree, "f.txt"), "1\n");
+  inTree("add", ".");
+  inTree("commit", "-qm", "one");
+  assert.deepEqual(await confirmCheckout(tree), { sha: inTree("rev-parse", "HEAD").trim() }, "W3 a clean checkout gives its commit");
+  writeFileSync(join(tree, "f.txt"), "2\n");
+  assert.match((await confirmCheckout(tree)).refusal, /1 uncommitted/, "W3 a modified file is refused");
+  inTree("checkout", "--", "f.txt");
+  writeFileSync(join(tree, "new.txt"), "n\n");
+  assert.match((await confirmCheckout(tree)).refusal, /uncommitted/, "W3 an untracked file is refused");
+  assert.deepEqual(
+    await confirmCheckout(join(kinds.narrowing.root, "proj")),
+    { sha: "1".repeat(40) },
+    "W3 a plugin kind is confirmed through its provider",
+  );
   console.log("code-tools-unit: ok");
 } finally {
   rmSync(shared, { recursive: true, force: true });

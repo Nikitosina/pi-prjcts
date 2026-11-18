@@ -211,6 +211,7 @@ export const ROLE_BLOCKS = {
 - 1000 lines or more: run the pr-review skill (Standards, Spec, Bugs/performance, each its own reviewer, all kind full).
 - Only P0 and P1 block Ready: fix them. Fix a P2 when it is cheap, without a round of its own; otherwise list it under Not fixed with the reason. List P3s there too.
 - After fixes, run re-checks with kind recheck: each covers the fix diff and the still-open findings. Your host contract gives the number.
+- To keep the reviewer's history, commit the fixes, verify them, record the commit with job candidate and pass the reviewer's id as continues. The host refuses a checkout that is dirty, is not the recorded candidate, or was already read; a full review is always a fresh reviewer.
 - When the budget is spent, finish your report with the still-open P0 and P1 findings as gaps for the owner.
 - Review is read-only. Never post findings to the PR.
 - Start a scout with the subagent tool for read-only questions along the way.`,
