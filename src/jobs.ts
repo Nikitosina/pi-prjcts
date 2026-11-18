@@ -1549,15 +1549,15 @@ export function createJobs(host: JobsHost) {
         Object.values(doc?.jobs ?? {})
           .flatMap((job) => job.children)
           .find((item) => item.id === child);
-      // A call admitted before a restart may not have sent its turn yet: it must not send it to a checkout that moved off the pinned commit.
-      const sent =
-        replayed && (await api.commit((tx) => tx.submissionByRequest(child, `subagent:${api.taskId}`), callContext)) !== undefined;
-      const moved = replayed && !sent && pinned ? await checkoutMoved(api.conversationId, cwd, pinned) : undefined;
-      if (moved) throw new Error(`The checkout moved off ${pinned} before the reviewer's turn was sent: ${moved}. No turn was sent.`);
       for (;;) {
         const moves = childRecord(await api.snapshot(Jobs, ROOT_CONVERSATION_ID, callContext))?.modelMoves ?? [];
         // One request id per model, so a replay waits on the attempt it left instead of sending the task again.
         const requestId = moves.length ? `subagent:${api.taskId}:${moves.at(-1)!.to}` : `subagent:${api.taskId}`;
+        // A replayed call may not have sent this turn yet: a new one must not go to a checkout that moved off the pinned commit.
+        if (replayed && pinned && (await api.commit((tx) => tx.submissionByRequest(child, requestId), callContext)) === undefined) {
+          const moved = await checkoutMoved(api.conversationId, cwd, pinned);
+          if (moved) throw new Error(`The checkout moved off ${pinned} before the reviewer's turn was sent: ${moved}. No turn was sent.`);
+        }
         const settled = await (await handle.submit({ type: "input", content: task, requestId }, callContext)).wait(callContext);
         const failure = await turnFailure(
           settled,
