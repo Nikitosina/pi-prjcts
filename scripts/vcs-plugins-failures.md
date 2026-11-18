@@ -49,3 +49,13 @@ removed) and the "plugin is not loaded" note in the PR card (20; `automation-sna
 28. A plugin's declared version is missing from the `plugins` RPC or `/health`, so the owner cannot tell which version a host runs.
 29. The browser shows no plugin status: Settings → Plugins must list every plugin with its name, version, state and capabilities, and a failed plugin with its source and error, escaped.
 30. A plugin scaffolded by `projects plugin new` in a directory outside the core repository does not load on a host started with it, or its scaffolded read RPC does not answer.
+
+## A reviewer's checkout of a plugin provider is confirmed from the checkout (2026-11-18)
+
+31. A reader checkout of a plugin provider is reported as read although nothing proved which commit it holds: the report names the requested commit, not the checkout's.
+32. A reviewer sent to a second commit reuses or edits the first checkout, so the earlier report no longer matches its checkout.
+33. A reused checkout that moved to another commit after its first report is read again and the new report names the old commit.
+34. A reused checkout with added or changed files is read and reported as the clean commit.
+35. A first checkout the provider materialized at another commit than the plan is reported as the requested commit.
+36. A provider that cannot confirm the revision (no `confirmRevision`) is trusted anyway.
+37. After a failed turn the reviewer is stuck, or labels itself with the commit that failed.

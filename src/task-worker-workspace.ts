@@ -318,14 +318,21 @@ export function taskWorkerWorkspaces(input: {
       if (binding.kind !== "isolated") throw new Error("Reader workspace must be isolated");
       await allocate(request, binding);
       const { cwd } = await target(request, binding);
-      // A reused checkout must still hold exactly the commit its report will name.
-      if (!attachments.has(slot(request))) {
+      // Every turn, first or reused, must find exactly the commit its report will name, read from the checkout and not from what was requested.
+      const attachment = attachments.get(slot(request));
+      let held: { head: string; clean: boolean };
+      if (!attachment) {
         const [head, status] = await Promise.all([
           git(cwd, ["rev-parse", "HEAD"]),
           git(cwd, ["status", "--porcelain=v1", "--untracked-files=all"]),
         ]);
-        if (head !== request.baseCommit || status) throw new Error("Reader checkout moved off its commit or has changes");
+        held = { head, clean: !status };
+      } else {
+        if (!attachment.confirmRevision) throw new Error("The workspace provider cannot confirm the revision of a reader checkout");
+        const state = await attachment.confirmRevision();
+        held = { head: state.revision, clean: state.clean === true };
       }
+      if (held.head !== request.baseCommit || !held.clean) throw new Error("Reader checkout moved off its commit or has changes");
       return { cwd };
     });
   }
