@@ -2729,7 +2729,8 @@ const journeys = {
     const longText = [1, 2, 3, 4, 5]
       .map(paragraph)
       .join("\n\n")
-      .replace("Paragraph 1:", "Paragraph 1 [docs](https://example.invalid/docs):");
+      .replace("Paragraph 1:", "Paragraph 1 [docs](https://example.invalid/docs):")
+      .replace("Paragraph 4:", "Paragraph 4 [deep](https://example.invalid/deep):");
     const listText = `Fix these first:\n\n${[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => `- item ${n} needs a long enough line of text to wrap`).join("\n")}`;
     const send = async (text) => {
       await page.click(composer);
@@ -2836,7 +2837,7 @@ const journeys = {
     record("visible", `a drag selected ${selected} characters and did not toggle the message`);
 
     // Double click on a word: the word stays selected and the message ends as it was, collapsed or open.
-    const doubleClickWord = async (which) => {
+    const doubleClickWord = async (which, gapMs = 0) => {
       await page.evaluate(`getSelection().removeAllRanges()`);
       const word = await page.evaluate(`(() => {
         const ps = ${ownerBy("Paragraph 5")}.querySelectorAll('.bubble p'), p = ps[${which === "last" ? "ps.length - 1" : "0"}], r = document.createRange();
@@ -2851,8 +2852,11 @@ const journeys = {
         ["mouseReleased", { button: "left", clickCount: 1 }],
         ["mousePressed", { button: "left", clickCount: 2 }],
         ["mouseReleased", { button: "left", clickCount: 2 }],
-      ])
+      ]) {
+        // A slow double click: the browser still counts it (clickCount 2) however long the pause was.
+        if (type === "mousePressed" && extra.clickCount === 2) await page.evaluate(`new Promise((ok) => setTimeout(ok, ${gapMs}))`);
         await page.cdp("Input.dispatchMouseEvent", { type, x: word.x, y: word.y, ...extra });
+      }
       await page.evaluate(`new Promise((ok) => setTimeout(ok, 600))`);
       const picked = await page.evaluate(`getSelection().toString().trim().length`);
       if (picked < 2) throw Error(`double click did not select a word (${picked})`);
@@ -2882,6 +2886,38 @@ const journeys = {
     if ((await state("Paragraph 5")).expanded !== "true")
       throw Error("a double click on a word below the clamp collapsed the open message");
     record("visible", `a double click on a word below the clamp selected it (${pickedOpen} characters) and left the message open`);
+    // Slower than the old 300 ms wait, on text a collapse would hide: the word must still be selected, the message open.
+    const pickedSlow = await doubleClickWord("last", 500);
+    if ((await state("Paragraph 5")).expanded !== "true") throw Error("a slow double click below the clamp changed the open message");
+    record("visible", `a 500 ms double click below the clamp selected a word (${pickedSlow} characters) and left the message open`);
+    // A single click below the clamp does not collapse (it would hide the text under the pointer); the hint does.
+    await page.evaluate(`getSelection().removeAllRanges()`);
+    const below = await page.evaluate(`(() => {
+      const ps = ${ownerBy("Paragraph 5")}.querySelectorAll('.bubble p'), p = ps[ps.length - 1], r = document.createRange();
+      p.scrollIntoView({ block: 'center' });
+      r.setStart(p.lastChild, 12); r.setEnd(p.lastChild, 18);
+      const box = r.getBoundingClientRect();
+      return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+    })()`);
+    for (const [type, extra] of [
+      ["mousePressed", { button: "left", clickCount: 1 }],
+      ["mouseReleased", { button: "left", clickCount: 1 }],
+    ])
+      await page.cdp("Input.dispatchMouseEvent", { type, x: below.x, y: below.y, ...extra });
+    await page.evaluate(`new Promise((ok) => setTimeout(ok, 600))`);
+    if ((await state("Paragraph 5")).expanded !== "true") throw Error("a click below the clamp collapsed the message");
+    record("visible", "a single click on text below the clamp leaves the open message open; Show less closes it");
+    await page.evaluate(`${ownerBy("Paragraph 5")}.querySelector('.msg-more').click()`);
+    await expectState("Paragraph 5", "false", "hint collapses");
+    // A link the clamp hides opens the message when keyboard focus reaches it.
+    await page.evaluate(`${ownerBy("Paragraph 5")}.querySelector('a[href$="/deep"]').focus()`);
+    await expectState("Paragraph 5", "true", "focus on a hidden link opens the message");
+    record("visible", "focusing a link the clamp hides opens the message");
+    // A click inside the clamp collapses at once, and a slow double click there selects the word and leaves the message open.
+    const pickedTop = await doubleClickWord("first", 500);
+    if ((await state("Paragraph 5")).expanded !== "true") throw Error("a slow double click inside the clamp changed the open message");
+    record("visible", `a 500 ms double click inside the clamp selected a word (${pickedTop} characters) and left the message open`);
+    await page.evaluate(`getSelection().removeAllRanges()`);
     await page.evaluate(`${ownerBy("Paragraph 5")}.__kept = true`);
     await send("One more short line");
     await page.waitFor(
