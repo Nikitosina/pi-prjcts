@@ -2741,7 +2741,7 @@ const journeys = {
     const state = (needle) =>
       page.evaluate(`(() => {
         const a = ${ownerBy(needle)}, body = a?.querySelector('.msg-body'), more = a?.querySelector('.msg-more');
-        return { found: !!a, overflow: a?.dataset.overflow === '1', open: a?.classList.contains('open') ?? false,
+        return { found: !!a, overflow: a?.dataset.overflow === '1', 
           expanded: more?.getAttribute('aria-expanded') ?? null, moreShown: !!more && getComputedStyle(more).display !== 'none',
           moreText: more?.innerText ?? null, height: body?.getBoundingClientRect().height ?? a?.getBoundingClientRect().height ?? 0,
           html: a?.outerHTML.length ?? 0, focusOnMore: document.activeElement === more };
@@ -2797,7 +2797,7 @@ const journeys = {
     if (opened.height <= collapsed.height + 40 || !/Show less/.test(opened.moreText))
       throw Error(`expand did not grow: ${JSON.stringify({ collapsed, opened })}`);
     await shoot("02-long-expanded", "Paragraph 5");
-    await tap(`#feed .msg.owner[data-overflow].open .bubble p`);
+    await tap(`#feed .msg.owner[data-overflow]:has(.msg-more[aria-expanded="true"]) .bubble p`);
     await expectState("Paragraph 5", "false", "second click collapses");
     const closed = await state("Paragraph 5");
     if (Math.abs(closed.height - collapsed.height) > 2)
@@ -2835,28 +2835,32 @@ const journeys = {
     if ((await state("Paragraph 5")).expanded !== "false") throw Error("a drag selection toggled the message");
     record("visible", `a drag selected ${selected} characters and did not toggle the message`);
 
-    // Double click: selecting a word ends with the message as it was, and the word stays selected.
-    await page.evaluate(`getSelection().removeAllRanges()`);
-    const word = await page.evaluate(`(() => {
-      const p = ${ownerBy("Paragraph 5")}.querySelector('.bubble p'), r = document.createRange();
-      p.scrollIntoView({ block: 'center' });
-      r.setStart(p.lastChild, 12); r.setEnd(p.lastChild, 18);
-      const box = r.getBoundingClientRect();
-      return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
-    })()`);
-    for (const [type, extra] of [
-      ["mouseMoved", {}],
-      ["mousePressed", { button: "left", clickCount: 1 }],
-      ["mouseReleased", { button: "left", clickCount: 1 }],
-      ["mousePressed", { button: "left", clickCount: 2 }],
-      ["mouseReleased", { button: "left", clickCount: 2 }],
-    ])
-      await page.cdp("Input.dispatchMouseEvent", { type, x: word.x, y: word.y, ...extra });
-    await page.evaluate(`new Promise((ok) => setTimeout(ok, 150))`);
-    const picked = await page.evaluate(`getSelection().toString().trim().length`);
-    if (picked < 2) throw Error(`double click did not select a word (${picked})`);
-    if ((await state("Paragraph 5")).expanded !== "false") throw Error("a double click left the message toggled");
-    record("visible", `a double click selected a word (${picked} characters) and left the message collapsed`);
+    // Double click on a word: the word stays selected and the message ends as it was, collapsed or open.
+    const doubleClickWord = async (which) => {
+      await page.evaluate(`getSelection().removeAllRanges()`);
+      const word = await page.evaluate(`(() => {
+        const ps = ${ownerBy("Paragraph 5")}.querySelectorAll('.bubble p'), p = ps[${which === "last" ? "ps.length - 1" : "0"}], r = document.createRange();
+        p.scrollIntoView({ block: 'center' });
+        r.setStart(p.lastChild, 12); r.setEnd(p.lastChild, 18);
+        const box = r.getBoundingClientRect();
+        return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+      })()`);
+      for (const [type, extra] of [
+        ["mouseMoved", {}],
+        ["mousePressed", { button: "left", clickCount: 1 }],
+        ["mouseReleased", { button: "left", clickCount: 1 }],
+        ["mousePressed", { button: "left", clickCount: 2 }],
+        ["mouseReleased", { button: "left", clickCount: 2 }],
+      ])
+        await page.cdp("Input.dispatchMouseEvent", { type, x: word.x, y: word.y, ...extra });
+      await page.evaluate(`new Promise((ok) => setTimeout(ok, 600))`);
+      const picked = await page.evaluate(`getSelection().toString().trim().length`);
+      if (picked < 2) throw Error(`double click did not select a word (${picked})`);
+      return picked;
+    };
+    const picked = await doubleClickWord("first");
+    if ((await state("Paragraph 5")).expanded !== "false") throw Error("a double click left the collapsed message toggled");
+    record("visible", `a double click selected a word (${picked} characters) and left the collapsed message collapsed`);
 
     // Links: the click goes to the link, the message stays as it was, and the app does not cancel the navigation.
     await page.evaluate(`(() => {
@@ -2874,6 +2878,11 @@ const journeys = {
     // Refresh: an open message stays open when the transcript re-renders for a new turn.
     await tap(textPoint);
     await expectState("Paragraph 5", "true", "expanded before refresh");
+    const pickedOpen = await doubleClickWord("last");
+    if ((await state("Paragraph 5")).expanded !== "true")
+      throw Error("a double click on a word below the clamp collapsed the open message");
+    record("visible", `a double click on a word below the clamp selected it (${pickedOpen} characters) and left the message open`);
+    await page.evaluate(`${ownerBy("Paragraph 5")}.__kept = true`);
     await send("One more short line");
     await page.waitFor(
       `!!${ownerBy("One more short line")} && document.querySelectorAll('#feed .msg.agent').length >= 4`,
@@ -2881,8 +2890,10 @@ const journeys = {
       60000,
     );
     if ((await state("Paragraph 5")).expanded !== "true") throw Error("an ordinary refresh collapsed the open message");
+    if (!(await page.evaluate(`${ownerBy("Paragraph 5")}.__kept === true`)))
+      throw Error("a refresh replaced the toggled message node, losing its focus and selection");
     record("visible", "an open message stays open after a new turn re-renders the feed");
-    await tap(`#feed .msg.owner[data-overflow].open .bubble p`);
+    await tap(`#feed .msg.owner[data-overflow]:has(.msg-more[aria-expanded="true"]) .bubble p`);
     await expectState("Paragraph 5", "false", "collapsed again");
 
     // List message clamps too and keeps its bullets.
