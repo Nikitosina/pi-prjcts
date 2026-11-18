@@ -649,15 +649,11 @@ a {
   color: var(--accent-ink);
   cursor: pointer;
 }
-.msg.owner[data-overflow] .msg-more {
+.msg.owner[data-overflow] .msg-more[aria-expanded="false"] {
   display: block;
 }
-.msg.owner .msg-more .less,
-.msg.owner:has(.msg-more[aria-expanded="true"]) .msg-more .more {
-  display: none;
-}
-.msg.owner:has(.msg-more[aria-expanded="true"]) .msg-more .less {
-  display: inline;
+.msg-body:focus {
+  outline: none;
 }
 .msg-body > :first-child {
   margin-top: 0;
@@ -671,7 +667,7 @@ a {
   -webkit-mask-image: linear-gradient(#000 70%, transparent);
   mask-image: linear-gradient(#000 70%, transparent);
 }
-.msg.owner[data-overflow] .bubble {
+.msg.owner[data-overflow]:not(:has(.msg-more[aria-expanded="true"])) .bubble {
   cursor: pointer;
 }
 .msg.owner.brief {

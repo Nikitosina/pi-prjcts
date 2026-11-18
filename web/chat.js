@@ -20,6 +20,7 @@ let live = null,
   loading = null,
   held = null; // live text and thinking of a step the host just committed, shown until a transcript read that includes it renders
 const expanded = new Set(); // tool callIds and group keys the owner opened
+const revealed = new Set(); // long owner messages opened during this chat visit; they stay open until the owner navigates away
 const reportPattern = /^\[(worker|scout|reviewer) ([0-9a-f-]{36}) ([\w-]+(?: to start)?): ([^\]\n]*)\]([\s\S]*)$/;
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/;
 
@@ -62,6 +63,7 @@ on("select", () => {
   olderGroups = null;
   follow.follow();
   expanded.clear();
+  revealed.clear();
   feed.replaceChildren();
   document.querySelector("#questions").replaceChildren();
   state.live = null;
@@ -284,15 +286,15 @@ function hash(text) {
   return String(h);
 }
 const approvalPattern = /^\[approval ([0-9a-f-]{36})\] The owner (approved|denied) "([^"]*)" \(([\w-]+)\)(, and it failed)?/;
-/** An owner bubble whose long text clamps (`measureMessage` marks the overflow) and opens on a click or the hint button. */
+/** An owner bubble whose long text clamps (`measureMessage` marks the overflow) and is revealed for the rest of the chat visit by a click or the hint button. */
 function ownerMessageHtml(message, className, who, text) {
   const meta = `<div class="msg-meta"><span class="who">${who}</span>${who === "Earlier input" ? "" : `<time>${esc(clock(message.at))}</time>`}</div>`;
   if (message.entryId == null)
     return `<article class="${className}">${meta}<div class="bubble">${markdown(text)}${imagesHtml(message.images)}</div></article>`;
   const key = `msg:${message.entryId}`,
-    open = expanded.has(key);
-  const hint = `<button type="button" class="msg-more" data-toggle="${esc(key)}" aria-expanded="${open}"><span class="more">Show more ▾ · ${text.length.toLocaleString("en-US")} chars</span><span class="less">Show less ▴</span></button>`;
-  return `<article class="${className}">${meta}<div class="bubble"><div class="msg-body">${markdown(text)}</div>${imagesHtml(message.images)}</div>${hint}</article>`;
+    open = revealed.has(key);
+  const hint = `<button type="button" class="msg-more" data-reveal="${esc(key)}" aria-expanded="${open}">Show more ▾ · ${text.length.toLocaleString("en-US")} chars</button>`;
+  return `<article class="${className}">${meta}<div class="bubble"><div class="msg-body" tabindex="-1">${markdown(text)}</div>${imagesHtml(message.images)}</div>${hint}</article>`;
 }
 function inputHtml(message, who = "Coordinator") {
   const text = message.text ?? "";
@@ -619,59 +621,45 @@ export function toggleSteer() {
 
 // ---------------------------------------------------------------------------------------------------------------- clicks
 
-/** The hint of the clamped owner message a plain click landed on; null for links, buttons, images, a selection and unclamped messages. */
-function clampedMessageHint(event) {
+/** The hint of the collapsed owner message a plain click landed on; null for links, buttons, images, a selection, revealed and unclamped messages. */
+function collapsedMessageHint(event) {
   const article = event.target.closest(".msg[data-overflow]");
   if (!article || event.target.closest("a, button, summary, input, textarea, select, img, [data-media]")) return null;
-  // The second click of a double click selects a word, so it must not hide behind the selection guard below.
-  if (event.detail > 1) return article.querySelector(".msg-more");
   const selection = getSelection();
   if (selection && !selection.isCollapsed && selection.containsNode(article, true)) return null;
-  return article.querySelector(".msg-more");
+  const hint = article.querySelector(".msg-more");
+  return hint?.getAttribute("aria-expanded") === "false" ? hint : null;
 }
 
-let messageClick = null; // the message the current click sequence started on, and whether it was open
-/** Opens or closes an owner message in place (`aria-expanded` drives the CSS), so selection, focus and scroll stay where they are. */
-function setMessageOpen(hint, open, follow) {
-  const key = hint.dataset.toggle;
-  if (open) expanded.add(key);
-  else expanded.delete(key);
+/** Reveals an owner message in place (`aria-expanded` drives the CSS), so selection and scroll stay where they are. There is no way back until the next chat visit. */
+function revealMessage(hint, follow) {
+  revealed.add(hint.dataset.reveal);
   follow?.stop();
-  hint.setAttribute("aria-expanded", String(open));
+  hint.setAttribute("aria-expanded", "true");
+  // The hint disappears with the reveal, so a keyboard user's focus moves into the text.
+  if (hint === document.activeElement) hint.closest(".msg").querySelector(".msg-body").focus({ preventScroll: true });
 }
-/** Whether a point is on text a collapse keeps in place; a click below the clamp would hide the text a double click then selects. */
+/** Whether a point is on text the clamp shows; a link below it is hidden. */
 function insideClamp(article, y) {
   const body = article.querySelector(".msg-body");
   return y < body.getBoundingClientRect().top + parseFloat(getComputedStyle(body).lineHeight) * CLAMP_LINES;
 }
-function toggleMessage(hint, event, follow) {
-  const key = hint.dataset.toggle;
-  if (event.detail > 1) {
-    // The later clicks of a double or triple click select words: undo the toggle the first click made.
-    if (messageClick?.key === key) setMessageOpen(hint, messageClick.was, follow);
-    return;
-  }
-  const open = !expanded.has(key);
-  messageClick = { key, was: !open };
-  if (!open && !hint.contains(event.target) && !insideClamp(hint.closest(".msg"), event.clientY)) return;
-  setMessageOpen(hint, open, follow);
-}
-/** Keyboard focus reaching a link the clamp hides opens the message instead of leaving focus on invisible text; `follow` is the transcript's follower. */
+/** Keyboard focus reaching a link the clamp hides reveals the message instead of leaving focus on invisible text; `follow` is the transcript's follower. */
 export function transcriptFocus({ target }, follow) {
   const body = target.closest?.(".msg[data-overflow] .msg-body"),
     hint = body?.closest(".msg").querySelector(".msg-more");
   if (!hint || hint.getAttribute("aria-expanded") !== "false") return;
   // Focusing scrolls the clipped body to the link, so its position is taken from the unscrolled top.
   if (insideClamp(body.closest(".msg"), target.getBoundingClientRect().top + body.scrollTop)) return;
-  setMessageOpen(hint, true, follow);
+  revealMessage(hint, follow);
   target.scrollIntoView({ block: "nearest" });
 }
 
 /** Clicks inside any transcript (chat feed, a worker in the center, the Host agent); `rerender` repaints that transcript, `follow` is its follower. */
 export async function transcriptClick(event, root, rerender, follow) {
-  const hint = event.target.closest(".msg-more") ?? clampedMessageHint(event);
+  const hint = event.target.closest(".msg-more") ?? collapsedMessageHint(event);
   if (hint) {
-    toggleMessage(hint, event, follow);
+    revealMessage(hint, follow);
     return true;
   }
   const toggle = event.target.closest("[data-toggle]");
