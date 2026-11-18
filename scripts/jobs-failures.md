@@ -59,3 +59,22 @@ Live cause: the Coordinator answered "yes, I continue, next I start the full che
 - I5 A dismissed checkpoint, a Ready Job (it waits for the owner, not the Coordinator) or a completed task helper counts as waiting.
 - I6 A paused project wakes its chats.
 - I7 A worker that returns to checkpoint with a new answer after the wake is never announced again.
+
+## A reviewer reads a new revision in the same conversation (owner 2026-11-18: "переиспользовать reviewer, а не спавнить новых каждый раз")
+
+`agents send` to an idle reviewer that reads a full commit may carry `readRef`: the full SHA of the new revision. The reviewer keeps its conversation; the new turn gets a new frozen checkout, and the old one stays bound to the old SHA.
+
+- V1 A send with a new SHA still reads the first checkout: the stored binding of the reviewer is reused, so the turn reads A while the message says B.
+- V2 The new binding replaces or edits the old one: the old report's checkout, a restart of the old turn, or cleanup no longer matches the SHA the old report names.
+- V3 The report of a turn does not name the commit it read, or names the latest one when a newer send already arrived; the old report stops identifying A.
+- V4 An unavailable SHA (not in the repository, malformed, an option-like ref, a branch name) is accepted, or leaves the reviewer labelled with B although it read nothing; a later plain send then reads or claims B.
+- V5 Two sends with different SHAs race: both start, or the second silently replaces the first turn's revision while it runs. Only an idle reviewer changes revision.
+- V6 A retry of the same `requestId` starts a second turn or a second checkout; a retry after the host restarted mid-prepare binds a different SHA than the first attempt.
+- V7 `readRef` on send widens access: it is accepted for a worker, a scout, a reviewer of another chat, a reviewer that reads an agent's worktree or the project checkout, or a paused project.
+- V8 A frozen binding whose SHA differs from the SHA requested for the turn is used anyway.
+- V9 The reviewer is not told that its working directory now holds another commit, and answers from the file contents of the old one.
+- V10 A reviewer is stopped while its turn prepares and a new commit is accepted at once: the old turn prepares the new commit and labels its answer with the old one. A new commit is taken only after every earlier message of the reviewer has been reported, also when a newer message settled first.
+- V11 A failed first SHA, or a plain send that cannot be prepared, is reported as read. Every turn records the commit it was to read and whether its checkout was prepared; only a prepared turn says "Read revision". That line names the commit and says it was confirmed before the review began, never that the checkout is locked or kept checked.
+- V12 A turn stopped before its checkout was prepared becomes the commit the next plain send reads.
+- V13 A worker given a `readRef` gets revision evidence, or a reviewer's reused checkout is not at the commit its report names (git provider: HEAD moved or files changed). A plugin provider is checked through its task attachment's `confirmRevision` (vcs-plugins-failures.md 31-37); one without it is refused.
+- V14 Reopening the host stops on a reviewer whose new commit is unavailable instead of reporting it from its own reporter.

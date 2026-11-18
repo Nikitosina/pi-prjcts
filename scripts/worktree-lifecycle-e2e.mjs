@@ -142,6 +142,17 @@ const model = createServer((req, res) => {
         if (n === 5) return res.end(call("projects_delegate", { role: "reviewer", ref: "f".repeat(40), task: "UNKNOWN-COMMIT" }));
         return res.end(say("Review dispatched."));
       }
+      if (/MARK-REREAD (\S+) (\S+)/.test(userText) && n === 0) {
+        const [, reviewerId, ref] = /MARK-REREAD (\S+) (\S+)/.exec(userText);
+        return res.end(
+          call("projects_worker_control", {
+            threadId: reviewerId,
+            text: `REVIEW-HEAD read again at ${ref.slice(0, 7)}`,
+            ref,
+            requestId: randomUUID(),
+          }),
+        );
+      }
       if (/MARK-DRIFT (\S+)/.test(userText) && n === 0)
         return res.end(call("projects_delegate", { role: "reviewer", ref: /MARK-DRIFT (\S+)/.exec(userText)[1], task: "DRIFT-REVIEW" }));
       if (/MARK-LOCAL/.test(userText) && n === 0)
@@ -553,6 +564,53 @@ try {
     reports.slice(-1500),
   );
 
+  // V1-V4 (jobs-failures.md): the same reviewer reads a second commit B in its own checkout; its first report still names A.
+  {
+    const blob = execFileSync("/usr/bin/git", ["-C", workspace, "hash-object", "-w", "--stdin"], {
+      input: "v2-REVISION-B\n",
+      encoding: "utf8",
+    }).trim();
+    const index = join(root, "revision-index");
+    const env = { ...process.env, GIT_INDEX_FILE: index };
+    const plumbing = (...args) => execFileSync("/usr/bin/git", ["-C", workspace, ...args], { env, encoding: "utf8" }).trim();
+    plumbing("read-tree", brain.sha1);
+    plumbing("update-index", "--cacheinfo", `100644,${blob},feature.txt`);
+    const revisionB = plumbing("commit-tree", plumbing("write-tree"), "-p", brain.sha1, "-m", "Revision B");
+    const chatText = async () => (await rpc({ action: "show", id })).messages.map((m) => m.text ?? "").join("\n");
+    const seenAnswers = () => result.calls.filter((c) => c.role === "reviewer" && /REVIEW-HEAD/.test(c.first)).flatMap((c) => c.results);
+    await ask(`MARK-REREAD ${reviewer.id} ${revisionB}`);
+    await eventually(async () => seenAnswers().some((text) => /v2-REVISION-B/.test(text)), "reviewer did not read B", 300);
+    const sameReviewer = (await rpc({ action: "jobs-snapshot", id })).agents.filter((agent) => agent.readRef === brain.sha1);
+    check(
+      "V1 the same reviewer reads B in its next turn, not A's checkout",
+      sameReviewer.length === 1 && seenAnswers().some((text) => /v2-REVISION-B/.test(text)),
+      seenAnswers(),
+    );
+    const heads = git(workspace, "worktree", "list", "--porcelain");
+    check(
+      "V2 A and B each have their own checkout; A's still sits at A",
+      heads.includes(`HEAD ${brain.sha1}`) && heads.includes(`HEAD ${revisionB}`),
+      heads,
+    );
+    const chat = await chatText();
+    check(
+      "V3 the first report still names A, the second names B",
+      chat.includes(`Read revision: ${brain.sha1}`) && chat.includes(`Read revision: ${revisionB}`),
+      chat.slice(-2500),
+    );
+    // V4: an unavailable SHA reads nothing and does not relabel the reviewer.
+    await ask(`MARK-REREAD ${reviewer.id} ${"e".repeat(40)}`);
+    await eventually(
+      async () => (await chatText()).includes(`Revision ${"e".repeat(40)} was not read.`),
+      "unavailable revision not reported",
+      300,
+    );
+    check(
+      "V4 an unavailable SHA is reported as not read and starts no checkout",
+      !git(workspace, "worktree", "list", "--porcelain").includes("e".repeat(40)),
+    );
+  }
+
   // Step 4: change the setup to a failing command; W3 commits locally only.
   const s2 = await rpc({ action: "settings-snapshot", id });
   await rpc({
@@ -753,7 +811,11 @@ try {
     !existsSync(cacheOf(w1Path)) && !existsSync(orphanCache) && existsSync(cacheOf(w2Path)) && existsSync(notCache),
     { caches: existsSync(caches) ? readdirSync(caches) : null },
   );
-  check("C9 cleanup reports three removed worktrees", cleanup.removed?.length === 3, cleanup);
+  check(
+    "C9 cleanup reports four removed worktrees: W1, the snapshot and both checkouts of the reviewer (A and B)",
+    cleanup.removed?.length === 4 && cleanup.removed.filter((item) => /\/task-/.test(item.path)).length === 2,
+    cleanup,
+  );
   check(
     "C9 manual cleanup removed W1, the snapshot and the reader's worktree; W2 and W3 stay",
     !existsSync(w1Path) && !existsSync(headPath) && existsSync(w2Path) && existsSync(w3Path) && existsSync(join(w2Path, "wip-note.txt")),

@@ -1,7 +1,8 @@
 // A tiny FAKE provider plugin for the core plugin E2E (scripts/vcs-plugins-e2e.mjs): a "fake" checkout kind (a `.fakevcs` folder), plain-directory
 // worktrees, a PR service backed by a JSON file ($FAKE_PLUGIN_DATA), a coordinator tool, a worker tool and namespaced RPCs. It touches nothing outside its state dir,
 // the workspace grant folders and the data file.
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const HEAD = "1".repeat(40);
@@ -135,6 +136,66 @@ export default {
           guard: (command) => command,
           instructions: "\n\nFake mode: your worktree is a plain directory; publish with fake_publish.",
         }),
+        // Chat and task checkouts are the same plain directories. A task checkout's revision lives in `.fake-revision`, so a test can move it or dirty the
+        // directory; `confirmRevision` reports what the directory holds. $FAKE_PLUGIN_DATA: `taskCheckoutRevision` (first materialization differs from the plan),
+        // `noConfirmRevision` (a provider without the revision contract), `confirmFailure` (confirmRevision rejects with this message, which may be empty).
+        coordinator: {
+          plan: async (context) => {
+            const name = context.allocated?.workspaceName ?? `fake-chat-${context.chatId.slice(0, 8)}`;
+            return {
+              name,
+              branch: context.allocated?.branch ?? name,
+              baseRevision: context.allocated?.baseRevision ?? context.scopeBaseRevision,
+              headRevision: context.allocated?.headRevision ?? context.scopeBaseRevision,
+              leaseReason: `fake chat ${context.chatId}`,
+              sharedObjectStore: null,
+            };
+          },
+          attach: async (context) => ({
+            workDir: context.receipt.workspacePath,
+            start: async () => {},
+            checkOwned: async () => {},
+            detach: async () => {},
+          }),
+        },
+        task: {
+          plan: async (context) => {
+            const name =
+              context.allocated?.workspaceName ??
+              `fake-task-${createHash("sha256").update(context.allocationThread).digest("hex").slice(0, 16)}`;
+            return {
+              name,
+              branch: name,
+              baseRevision: context.baseCommit,
+              headRevision: context.baseCommit,
+              leaseReason: `fake task ${context.allocationThread}`,
+              sharedObjectStore: null,
+            };
+          },
+          attach: async (context) => {
+            const dir = context.receipt.workspacePath,
+              marker = join(dir, ".fake-revision");
+            if (!existsSync(marker)) writeFileSync(marker, data().taskCheckoutRevision ?? context.plan.baseRevision);
+            return {
+              workDir: dir,
+              start: async () => {},
+              checkOwned: async () => {},
+              detach: async () => {},
+              instructions: "\n\nFake task checkout.",
+              ...(data().noConfirmRevision
+                ? {}
+                : {
+                    confirmRevision: async () => {
+                      if (typeof data().confirmFailure === "string") throw new Error(data().confirmFailure);
+                      return {
+                        revision: readFileSync(marker, "utf8").trim(),
+                        clean: readdirSync(dir).every((entry) => entry === ".fake-worktree" || entry === ".fake-revision"),
+                      };
+                    },
+                  }),
+            };
+          },
+        },
         workerFacts: async ({ receipt }) => ({
           threadId: /thread (\S+)$/.exec(receipt.scope.leaseReason)?.[1] ?? null,
           branch: receipt.scope.branch,

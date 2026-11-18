@@ -43,6 +43,19 @@ import { BACKGROUND_WAIT_TOOL } from "./worker-environment-tools.ts";
 
 export const FULL_COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 
+/**
+ * The commit a scout or reviewer of a full SHA reads for the turn started by message `seq`, else (no `seq`) for its next one: the turn's own record,
+ * else the newest turn that did not fail, else the commit it was spawned with. `revised` marks a commit other than the spawn one, which has a checkout of its own.
+ */
+export function readRevision(agent: Pick<Agent, "role" | "readRef" | "reads">, seq?: number): { sha: string; revised: boolean } | null {
+  if (agent.role === "worker") return null;
+  const sha =
+    (seq === undefined ? undefined : agent.reads?.find((item) => item.seq === seq)?.sha) ??
+    agent.reads?.findLast((item) => item.state !== "failed")?.sha ??
+    (agent.readRef && FULL_COMMIT.test(agent.readRef) ? agent.readRef : undefined);
+  return sha ? { sha, revised: sha !== agent.readRef } : null;
+}
+
 const context = BACKGROUND_CONTEXT;
 
 // "verifier" remains only so recorded verifier subagents still read; new turns cannot start one.
@@ -166,6 +179,8 @@ export type Job = JobFacts &
         checkpoint?: null;
       }
   );
+/** The commit a reader's turn (message `seq`, 0 for the spawn) was to read; `state` once its checkout was prepared or could not be. */
+export type ReadTurn = { seq: number; sha: string; state?: "read" | "failed" };
 /** An agent the coordinator spawned: a Job's worker, or a scout or reviewer answering one brief. */
 export type Agent = {
   id: string;
@@ -186,6 +201,10 @@ export type Agent = {
   readRef: string | null;
   /** The commit of the agent worktree this reader reads, recorded when its current message started. */
   readHead?: string;
+  /** The commit each turn of a scout or reviewer of a full SHA reads, oldest first; a commit other than `readRef` has a frozen checkout of its own. */
+  reads?: ReadTurn[];
+  /** Messages of a reader whose reporter is done; a reader changes commit only once every message it has taken settled. */
+  settled?: number[];
   /** The host prepared this agent's environment (workspace, tools). */
   prepared: boolean;
   /** Messages sent to it since it was created; a reporter that finishes while a newer message is queued does not settle the Job. */
@@ -411,6 +430,8 @@ export type JobsHost = {
    */
   prepare?(spec: {
     agent: Agent;
+    /** The message this preparation is for (0: the spawn), so a replay prepares the turn it belongs to. */
+    seq: number;
     job: Job | null;
     frame: PromptFrame | null;
   }): Promise<(AgentChange & { prompt?: PreparedPrompt; readHead?: string }) | void>;
@@ -521,6 +542,18 @@ function nextModel(host: JobsHost, role: AgentRole, from: string, moves: readonl
   return offered && offered.label !== from && !moves.some((move) => move.from === offered.label) ? offered : null;
 }
 
+const CONFIRMED_BEFORE_REVIEW = "confirmed in its checkout before the review began; not locked, and not checked again after it";
+
+/** The reporter of message `seq` is done with a reader: it may change commit for its next message. */
+async function settleTurn(tx: Tx, agentId: string, seq: number) {
+  const agent = (await tx.doc(Jobs, ROOT_CONVERSATION_ID)).agents[agentId];
+  if (!agent?.reads || agent.settled?.includes(seq)) return;
+  // A turn that settles without its checkout prepared (it was stopped first) read nothing.
+  const turn = agent.reads.find((item) => item.seq === seq);
+  if (turn && !turn.state) turn.state = "failed";
+  agent.settled = [...(agent.settled ?? []), seq];
+}
+
 /** Prepares an agent, delivers one message and reports its answer once, with large handbacks read on demand. */
 const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) => Promise<void>) =>
   defineTask<Delivery, DeliveryState, null>({
@@ -538,12 +571,15 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
           if (agent)
             change = await host.prepare?.({
               agent: agent as Agent,
+              seq: reporter.input.seq ?? 0,
               job: agent.jobId ? ((state!.jobs[agent.jobId] as Job | undefined) ?? null) : null,
               frame: agent.prepared ? ((await runtime.snapshot(AgentPrompt, conversationId, taskContext))?.frame ?? null) : null,
             });
         } catch (error) {
           if (runtime.signal.aborted) throw error;
-          failure = error instanceof Error ? error.message : String(error);
+          failure =
+            (error instanceof Error ? error.message : typeof error === "string" ? error : "") ||
+            "Workspace preparation failed with no message";
         }
         await runtime.commit(async (tx) => {
           const state = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
@@ -551,7 +587,7 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
           const job = agent?.jobId ? state.jobs[agent.jobId] : undefined;
           if (!agent || state.paused || agent.endedAt !== null || (job && job.status !== "running"))
             return { status: "running", checkpoint: { phase: "report" } } as const;
-          if (!failure) {
+          if (failure === null) {
             if (change?.readHead) agent.readHead = change.readHead;
             if (change) {
               const { prompt, readHead: _readHead, ...built } = change;
@@ -578,8 +614,12 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
               }
             }
             agent.prepared = true;
+            const turn = agent.reads?.find((item) => item.seq === (reporter.input.seq ?? 0));
+            if (turn) turn.state = "read";
             return { status: "running", checkpoint: { phase: "deliver", attempt: 0 } } as const;
           }
+          const turn = agent.reads?.find((item) => item.seq === (reporter.input.seq ?? 0));
+          if (turn) turn.state = "failed";
           if (job && job.status === "running")
             Object.assign(job, { status: "failed", failure: "start", reason: `Did not start: ${failure}`, endedAt: Date.now() });
           agent.endedAt = job?.workspace ? null : Date.now();
@@ -798,10 +838,17 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
         if (report !== undefined && reportRef === undefined) {
           const agent = (await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext))?.agents[reporter.input.agentId];
           const drift = agent?.readHead ? await host.readDrift?.(agent as Agent) : null;
-          // The warning goes right under the report's first line, so a clipped preview still shows it.
+          const read = agent?.reads?.find((item) => item.seq === (reporter.input.seq ?? 0));
+          const notes = [
+            read?.state &&
+              (read.state === "failed" ? `Revision ${read.sha} was not read.` : `Read revision: ${read.sha}, ${CONFIRMED_BEFORE_REVIEW}.`),
+            drift,
+          ].filter(Boolean);
+          // The notes go right under the report's first line, so a clipped preview still shows them.
           const flagged = (text: string) =>
-            drift ? text.replace(/^([^\n]*)(?:\n|$)/, (_, first: string) => `${first}\n${drift}\n`) : text;
+            notes.length ? text.replace(/^([^\n]*)(?:\n|$)/, (_, first: string) => `${first}\n${notes.join("\n")}\n`) : text;
           await runtime.commit(async (tx) => {
+            await settleTurn(tx, reporter.input.agentId, reporter.input.seq ?? 0);
             const entry = await tx.appendEntry(reporter.input.conversationId, {
               kind: "projects.agent-report",
               data: { text: flagged(details ?? report), at: runtime.now() },
@@ -824,7 +871,10 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
             taskContext,
           );
         }
-        await runtime.commit(() => ({ status: "terminal", outcome: { status: "completed", result: null } }), taskContext);
+        await runtime.commit(async (tx) => {
+          await settleTurn(tx, reporter.input.agentId, reporter.input.seq ?? 0);
+          return { status: "terminal", outcome: { status: "completed", result: null } } as const;
+        }, taskContext);
       },
     },
     // An abort (a project pause aborts every chat with its background tasks) skips the report, so end an agent whose Job already ended here.
@@ -833,6 +883,7 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
         const state = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
         const agent = state.agents[reporter.input.agentId];
         if (agent && endedJobAgent(state, agent) && (agent.sends ?? 0) <= (reporter.input.seq ?? 0)) agent.endedAt = Date.now();
+        await settleTurn(tx, reporter.input.agentId, reporter.input.seq ?? 0);
         return { status: "terminal", outcome: { status: "aborted" } };
       }, taskContext),
   });
@@ -990,6 +1041,7 @@ export function createJobs(host: JobsHost) {
         reported: [],
         scopeId: (role === "worker" ? args.scopeId?.trim() || host.defaultScope?.() : args.scopeId?.trim()) || null,
         readRef,
+        ...(role !== "worker" && readRef && FULL_COMMIT.test(readRef) ? { reads: [{ seq: 0, sha: readRef }] } : {}),
         prepared: false,
         brief: "",
         briefed: false,
@@ -1039,7 +1091,7 @@ export function createJobs(host: JobsHost) {
     name: "agents",
     description:
       "Run background agents. spawn: role worker (needs title, acceptance criteria; optional branch to continue), scout or reviewer, with a brief; give a fresh requestId so a retry returns the same agent. A scout or reviewer reads the project checkout, or with readRef an agent's worktree (its id; refused while it has uncommitted changes) or a full commit SHA (read in its own worktree at that commit). " +
-      "send: steer id with a message (followUp queues it after its current answer). stop: id and a reason. dismiss: clear an ended agent or Job from the list (not running; history and files stay). send to a failed or stopped worker retries it in the same Job. report: full Ready evidence and the latest closing answer for id, without waking it. status: live agents, or one id (also dismissed ones). wait: block up to timeoutSec until id is idle. " +
+      "send: steer id with a message (followUp queues it after its current answer). To have an idle reviewer of a full commit SHA read another commit in the same conversation, send with readRef (the new full SHA); its report names the commit it read.  stop: id and a reason. dismiss: clear an ended agent or Job from the list (not running; history and files stay). send to a failed or stopped worker retries it in the same Job. report: full Ready evidence and the latest closing answer for id, without waking it. status: live agents, or one id (also dismissed ones). wait: block up to timeoutSec until id is idle. " +
       "Choose workspace {kind:'shared'} for the chat's prepared workspace or {kind:'isolated',baseCommit:<full SHA>} for a task helper. Explicit workspace rejects branch/scopeId/readRef. Shared allows one live helper per chat. Omit workspace for the independent Job/PR workflow. Helpers return normally, not Ready; completed is not accepted delivery. Ready reports arrive as concise handbacks; read report for detailed evidence.",
     parameters: Type.Object({
       action: Type.Union([
@@ -1188,7 +1240,12 @@ export function createJobs(host: JobsHost) {
         if (!args.message?.trim()) return reply("send needs a message.");
         const glued = gluedWordsDiagnostic(args.message);
         if (glued) api.diagnostic(glued);
-        return reply(await sendTo(api, agent!.id, args.message, args.followUp === true, args.requestId));
+        return reply(
+          await sendTo(api, agent!.id, args.message, args.followUp === true, args.requestId, {
+            chat: api.conversationId,
+            readRef: args.readRef,
+          }),
+        );
       }
       // spawn
       if (!args.role) return reply("spawn needs a role and a brief.");
@@ -1410,7 +1467,14 @@ export function createJobs(host: JobsHost) {
 
   // ── Operations ─────────────────────────────────────────────────────────────
   /** Send a message to an agent (steer, or queue after its answer); a finished Job runs again. */
-  async function sendTo(api: Pick<Session, "commit">, id: string, message: string, followUp: boolean, requestId?: string): Promise<string> {
+  async function sendTo(
+    api: Pick<Session, "commit">,
+    id: string,
+    message: string,
+    followUp: boolean,
+    requestId?: string,
+    revision?: { chat: ConversationId; readRef?: string },
+  ): Promise<string> {
     return api.commit(async (tx) => {
       const doc = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
       const agent = doc.agents[id];
@@ -1421,6 +1485,21 @@ export function createJobs(host: JobsHost) {
       const refusal = job?.workspace ? null : host.refuseSend?.(agent);
       if (refusal) return refusal;
       if (doc.paused) return "The project is paused.";
+      const next = revision?.readRef?.trim();
+      const before = readRevision(agent);
+      // A new revision is a new checkout for the next turn, so only the owning chat may ask, and only of an idle reviewer of a full SHA.
+      if (next !== undefined && next !== "") {
+        if (agent.role !== "reviewer" || !before)
+          return "readRef on send changes the commit of a reviewer that reads a full commit SHA; spawn a new reader instead.";
+        if (revision!.chat !== agent.chat) return `Reviewer ${id} belongs to another chat.`;
+        if (!FULL_COMMIT.test(next))
+          return "readRef must be a full lowercase commit SHA. Resolve a branch or PR to its commit first and pass that SHA.";
+        // Its last message must be reported too: a stopped turn can still be preparing, and would prepare the new commit.
+        if (agent.endedAt !== null && agent.reads?.some((turn) => !agent.settled?.includes(turn.seq)))
+          return `Reviewer ${id} is still working or reporting its last message; wait a moment, or send without readRef.`;
+        if (agent.endedAt === null)
+          return `Reviewer ${id} is still working; its commit changes only between turns. Wait for its answer, or stop it.`;
+      }
       const borrower = job?.workspace?.kind === "shared" ? sharedHandoff(doc, agent.chat, id) : undefined;
       if (borrower) return `Shared workspace is still handed to ${borrower.id}; wait for it to settle.`;
       if (job?.workspace && job.status !== "running" && agent.endedAt === null)
@@ -1428,6 +1507,13 @@ export function createJobs(host: JobsHost) {
       if (key) doc.requests[key] = id;
       // An agent that never received its brief (it failed or was stopped while preparing) gets it first, so a send retries the task.
       if (!agent.briefed && agent.brief && message !== agent.brief) message = `${agent.brief}\n\nOwner's follow-up: ${message}`;
+      if (before) {
+        // Every message to a reader records the commit it reads, so each report names it.
+        const sha = next || before.sha;
+        agent.reads = [...(agent.reads ?? []), { seq: (agent.sends ?? 0) + 1, sha }];
+        if (sha !== before.sha)
+          message = `[The commit under review changed: your working directory now holds ${sha}; before you read ${before.sha}. Read the files again and do not rely on what you saw earlier.]\n\n${message}`;
+      }
       if (job) {
         if (job.status === "ready" || job.status === "ready-with-gaps")
           job.resume = { status: job.status, ready: job.ready!, endedAt: job.endedAt };
@@ -1496,6 +1582,8 @@ export function createJobs(host: JobsHost) {
       const now = clock();
       if (job) Object.assign(job, { status: "stopped", reason, endedAt: now, stalledAt: null, resume: null });
       if (!helper) agent.endedAt = now;
+      // A reader's turn stopped before its checkout was prepared reads nothing, so the next plain send must not inherit its commit.
+      for (const turn of agent.reads ?? []) if (!turn.state) turn.state = "failed";
       return { conversationId: agent.conversationId, helper };
     }, context);
     if (!target.conversationId) return target.text!;
@@ -1588,13 +1676,20 @@ export function createJobs(host: JobsHost) {
     }, context);
     const doc = await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context);
     if (!doc) return;
-    for (const agent of liveAgents(doc))
-      if (agent.prepared && !(doc.paused && agent.jobId && doc.jobs[agent.jobId]?.workspace))
+    for (const agent of liveAgents(doc)) {
+      if (!agent.prepared || (doc.paused && agent.jobId && doc.jobs[agent.jobId]?.workspace)) continue;
+      try {
         await host.prepare?.({
           agent: agent as Agent,
+          seq: agent.sends ?? 0,
           job: agent.jobId ? ((doc.jobs[agent.jobId] as Job | undefined) ?? null) : null,
           frame: (await harness.snapshot(AgentPrompt, agent.conversationId, context))?.frame ?? null,
         });
+      } catch (error) {
+        // A reader whose commit cannot be prepared is reported by its own reporter; it must not keep the project from opening.
+        if (agent.role === "worker") throw error;
+      }
+    }
   }
 
   async function snapshot(harness: Harness): Promise<JobsSnapshot> {
