@@ -1434,10 +1434,18 @@ export async function openDurableProject(input: {
         const state = harness ? await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context) : undefined;
         const worker = Object.values(state?.agents ?? {}).find((item) => Number(item.conversationId) === Number(conversationId));
         // A plugin's task helper is confirmed by its own attachment, never by a guess from the directory.
-        const held = worker ? await taskWorkspaces.confirmWorker(worker.id) : undefined;
+        const held = worker
+          ? await taskWorkspaces.confirmWorker({
+              threadId: worker.id,
+              conversationId: Number(conversationId),
+              workId: worker.id,
+              taskText: "",
+            })
+          : undefined;
         if (!held) return confirmCheckout(cwd);
-        if (!existsSync(cwd) || !existsSync(held.workDir) || realpathSync(held.workDir) !== realpathSync(cwd))
-          return { refusal: "The directory is not the task checkout its provider attached" };
+        if (!existsSync(cwd) || realpathSync(held.cwd) !== realpathSync(cwd))
+          return { refusal: "The directory is not the checkout this task helper owns" };
+        if (!held.state) return confirmCheckout(cwd);
         if (!FULL_COMMIT.test(held.state.revision)) return { refusal: "The task checkout's provider reported no commit" };
         return held.state.clean
           ? { sha: held.state.revision }

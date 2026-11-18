@@ -95,9 +95,9 @@ export type ReviewSpend = { full: number; rechecks: number };
 /** The three-axis pr-review round starts one reviewer per axis. */
 export const FULL_REVIEW_REVIEWERS = 3;
 /** Why the review budget refuses this reviewer, or null: one full round (up to three reviewers, closed by the first re-check), then `rechecks` re-checks. */
-export function reviewRefusal(spent: ReviewSpend, kind: ReviewKind, rechecks: number): string | null {
+export function reviewRefusal(spent: ReviewSpend, kind: ReviewKind, rechecks: number, roundClosed = spent.rechecks > 0): string | null {
   if (kind === "full") {
-    if (spent.rechecks > 0) return "The full review already ran and its re-checks have started.";
+    if (roundClosed) return "The full review already ran and its re-checks have started.";
     if (spent.full >= FULL_REVIEW_REVIEWERS) return `The full review round already has its ${FULL_REVIEW_REVIEWERS} reviewers.`;
     return null;
   }
@@ -1456,6 +1456,7 @@ export function createJobs(host: JobsHost) {
             : await confirmCheckout(api.conversationId, cwd);
       }
       const pinned = pin && "sha" in pin ? pin.sha : undefined;
+      const replayed = reviewer && !!mine?.children.some((item) => item.reads?.some((read) => read.taskId === api.taskId));
       const started = await api.commit(async (tx): Promise<{ id: ConversationId; before?: string }> => {
         const existing = (await tx.scanConversations({ ownerTaskId: api.taskId }, 1)).items[0];
         if (existing) return { id: existing.id };
@@ -1503,7 +1504,13 @@ export function createJobs(host: JobsHost) {
         if (args.role === "reviewer") {
           if (!pin || "refusal" in pin) throw none(`${pin ? pin.refusal : "The checkout was not confirmed"}.`);
           const spent = await countedReviews(tx, job);
-          const refusal = reviewRefusal(spent, args.kind, host.reviewRechecks?.() ?? DEFAULT_REVIEW_RECHECKS);
+          // Given-back re-checks still closed the full round.
+          const refusal = reviewRefusal(
+            spent,
+            args.kind,
+            host.reviewRechecks?.() ?? DEFAULT_REVIEW_RECHECKS,
+            (job.reviews?.rechecks ?? 0) > 0,
+          );
           if (refusal)
             throw new Error(
               `${refusal} No reviewer started. ${job.workspace ? "Return your answer" : "Report with job ready"} and list the still-open P0/P1 findings as gaps for the owner, P2/P3 under Not fixed.`,
@@ -1542,6 +1549,9 @@ export function createJobs(host: JobsHost) {
         Object.values(doc?.jobs ?? {})
           .flatMap((job) => job.children)
           .find((item) => item.id === child);
+      // A call admitted before a restart may not have sent its turn yet: it must not send it to a checkout that moved off the pinned commit.
+      const moved = replayed && pinned ? await checkoutMoved(api.conversationId, cwd, pinned) : undefined;
+      if (moved) throw new Error(`The checkout moved off ${pinned} before the reviewer's turn was sent: ${moved}. No turn was sent.`);
       for (;;) {
         const moves = childRecord(await api.snapshot(Jobs, ROOT_CONVERSATION_ID, callContext))?.modelMoves ?? [];
         // One request id per model, so a replay waits on the attempt it left instead of sending the task again.
@@ -1553,8 +1563,8 @@ export function createJobs(host: JobsHost) {
         );
         if (!failure && settled.status === "done" && settled.type === "input") {
           const entry = await api.commit((tx) => tx.entry(AssistantEntry, settled.answer), callContext);
-          const moved = pinned ? await checkoutMoved(api.conversationId, cwd, pinned) : undefined;
-          const note = moved ? `\n\n[This review is not valid for the current checkout: it was confirmed at ${pinned}, and ${moved}.]` : "";
+          const after = pinned ? await checkoutMoved(api.conversationId, cwd, pinned) : undefined;
+          const note = after ? `\n\n[This review is not valid for the current checkout: it was confirmed at ${pinned}, and ${after}.]` : "";
           const hint = reviewer
             ? `\n\n[reviewer ${child}: after fixing, commit, verify, record it with job candidate, then call subagent kind recheck with continues "${child}" to re-check in this conversation.]`
             : "";

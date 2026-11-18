@@ -41,14 +41,27 @@ const GONE = [
   () => call("bash", { command: 'cd / && rm -rf "$OLDPWD"' }),
   () => call("subagent", { role: "reviewer", kind: "full", task: "REVIEW-GONE read proof.txt." }),
 ];
+// A third Job: the only re-check fails, and that must not reopen the full round.
+const ROUND = [
+  () => call("bash", { command: commit("R1") }),
+  (r) => call("job", { action: "candidate", sha: shaOf(r, 0) }),
+  () => call("subagent", { role: "reviewer", kind: "full", task: "REVIEW-ROUND first." }),
+  (r) => {
+    reviewerId = /reviewer (\d+)/.exec(r[2])?.[1];
+    return call("bash", { command: commit("R2") });
+  },
+  (r) => call("job", { action: "candidate", sha: shaOf(r, 3) }),
+  () => recheck("RECHECK-FAIL round."),
+  () => call("subagent", { role: "reviewer", kind: "full", task: "REVIEW-ROUND second." }),
+];
 const kit = await createKit("reviewer-recheck", {
   handler: ({ role, user, results }) => {
     if (role === "reviewer") {
       if (user.includes("RECHECK-FAIL")) return failed;
       return results.length ? say(`SAW[${results[0].trim()}]`) : call("code_read", { path: "proof.txt" });
     }
-    if (role !== "worker" || !/RECHK|GONE/.test(user)) return undefined;
-    const step = (user.includes("RECHK") ? STEPS : GONE)[results.length];
+    if (role !== "worker" || !/RECHK|GONE|ROUND/.test(user)) return undefined;
+    const step = (user.includes("RECHK") ? STEPS : user.includes("GONE") ? GONE : ROUND)[results.length];
     return step ? step(results) : say("Finished the scripted re-checks.");
   },
 });
@@ -92,6 +105,27 @@ await kit.run(async () => {
     "D1 a worktree that is gone is refused for a full review; no reviewer runs, so none reads the owner checkout",
     /does not exist|cannot be read|no working directory/i.test(gone.results[3] ?? "") && !reviewerRuns("REVIEW-GONE").length,
     gone.results,
+  );
+  const roundId = (
+    await kit.rpc({
+      action: "work-submit",
+      id,
+      threadId: randomUUID(),
+      requestId: randomUUID(),
+      workspaceScopeId: scopeId,
+      text: "ROUND go",
+    })
+  ).id;
+  await kit.eventually(
+    async () => (await kit.jobs(id)).find((item) => item.id === roundId)?.status !== "running",
+    "round worker finished",
+    1200,
+  );
+  const round = kit.result.calls.filter((item) => item.role === "worker" && item.user.includes("ROUND")).at(-1);
+  check(
+    "E2 a failed re-check is given back without reopening the full round: a second full review is refused",
+    /full review already ran/i.test(round.results[6] ?? "") && !reviewerRuns("REVIEW-ROUND second").length,
+    round.results,
   );
 
   check(

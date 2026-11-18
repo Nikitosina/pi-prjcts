@@ -892,12 +892,9 @@ await kit.run(async () => {
       result.calls
         .filter((item) => item.role === "reviewer" && item.user.includes(task) && item.results.length)
         .map((item) => item.results[0]);
-    const startHelper = async (name) => {
+    const startHelper = async (name, workspace = { kind: "isolated", baseCommit: base }) => {
       const before = result.calls.length;
-      await kit.ask(
-        id,
-        `MARK-DELEGATE ${JSON.stringify({ brief: `HELPER-${name} go`, title: `Helper ${name}`, workspace: { kind: "isolated", baseCommit: base } })}`,
-      );
+      await kit.ask(id, `MARK-DELEGATE ${JSON.stringify({ brief: `HELPER-${name} go`, title: `Helper ${name}`, workspace })}`);
       await kit.waitFor(
         async () => result.calls.slice(before).filter((item) => item.role === "worker" && item.user.includes(`HELPER-${name}`)).length > 0,
         `helper ${name}`,
@@ -927,6 +924,12 @@ await kit.run(async () => {
     patchData((data) => {
       delete data.confirmFailure;
     });
+    await startHelper("H4", { kind: "shared" });
+    check(
+      "39 a shared helper of a plugin checkout has no task attachment to confirm, so its reviewer is refused",
+      /No reviewer started/.test(helperRuns("H4").results[0] ?? "") && reviewerSaw("HELPER-REVIEW first").length === 0,
+      helperRuns("H4").results,
+    );
     await startHelper("H1");
     check(
       "39 the confirmed checkout is read by the reviewer's own code tool at A, then at B in the same conversation",

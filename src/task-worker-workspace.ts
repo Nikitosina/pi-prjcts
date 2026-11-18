@@ -407,12 +407,22 @@ export function taskWorkerWorkspaces(input: {
     if (!binding) throw new Error("Task workspace binding is missing");
     return target(request, binding);
   }
-  /** What a task helper's own provider attachment holds right now; undefined for a helper without one (a git checkout). Refuses a provider that cannot confirm. */
-  async function confirmWorker(threadId: string): Promise<{ workDir: string; state: TaskCheckoutState } | undefined> {
-    const attachment = attachments.get(threadId);
-    if (!attachment) return undefined;
-    if (!attachment.confirmRevision) throw new Error("The workspace provider cannot confirm the revision of a task checkout");
-    return { workDir: attachment.workDir, state: await attachment.confirmRevision() };
+  /**
+   * The checkout a task helper's reviewer would read, after the same ownership check its own tools pass. `state` is what its provider attachment reports,
+   * and is absent only for a git checkout, which the caller reads itself. Undefined for a thread that is no task helper. A plugin checkout with no attachment
+   * to ask (a shared one is borrowed from the chat) or one that cannot confirm is refused.
+   */
+  async function confirmWorker(request: Request): Promise<{ cwd: string; state?: TaskCheckoutState } | undefined> {
+    const binding = await read(request.threadId);
+    if (!binding) return undefined;
+    const { plug } = grant(binding.kind === "isolated" ? binding : undefined);
+    if (plug && binding.kind === "shared")
+      throw new Error("A shared checkout of a plugin provider is borrowed from the chat and has no task attachment to confirm");
+    const { cwd } = await target(request, binding);
+    if (!plug) return { cwd };
+    const attachment = attachments.get(slot(request));
+    if (!attachment?.confirmRevision) throw new Error("The workspace provider cannot confirm the revision of a task checkout");
+    return { cwd, state: await attachment.confirmRevision() };
   }
   async function closeThread(threadId: string) {
     for (const controller of controllers.get(threadId) ?? []) controller.abort(new Error("Task worker stopped"));

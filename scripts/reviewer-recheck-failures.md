@@ -12,3 +12,7 @@ These cases come from the independent review of PR #60 and precede the repair. `
 - X8 The re-check turn does not show the content of the new commit: the reviewer answers from the earlier files, or its answer is accepted without any fact read from the disk.
 - X9 Owner-visible start confirmation becomes a lock on the worker's checkout for the whole review.
 - X10 A standalone full review (coordinator-started reader on a commit) or a Job's ownership and permissions change.
+- X11 A given-back failed re-check reopens the full round (a second full reviewer is admitted after the only re-check failed).
+- X12 A shared helper of a plugin checkout, which borrows the chat's attachment and has no task attachment, is confirmed by a generic provider status instead of being refused; a task checkout is confirmed without the ownership check its own tools pass.
+- X13 A call admitted before a restart sends its first turn to a checkout that has moved off the pinned commit.
+- X14 A job subagent with an empty `cwd` reads the project checkout through its code tools.
