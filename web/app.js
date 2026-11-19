@@ -20,6 +20,7 @@ import {
   visibleChats,
 } from "./tree.js";
 import { currentChat, loadChat, stopTurn, toggleSteer } from "./chat.js";
+import "./sidebar.js";
 import { closeMergeDialog, loadJobs, loadSide, mergeDialogOpen, renderWorker } from "./workers.js";
 import { renderMemoryEntry, renderMemoryList } from "./memory.js";
 import { closeSettings, openSettings, SECTIONS, settingsBack, settingsOpen, showSection } from "./settings.js";
@@ -74,8 +75,10 @@ async function select(projectId, chatId = "main", { keepFocus = false } = {}) {
       `/changes?project=${encodeURIComponent(projectId)}`,
       (change) => {
         if (state.projectId !== projectId) return;
-        if (change.t === "sync") void refreshAll();
-        else if (change.t === "topic") onTopic(change, gen);
+        if (change.t === "sync") {
+          emit("plugins-changed");
+          void refreshAll();
+        } else if (change.t === "topic") onTopic(change, gen);
       },
       (up) => {
         state.connected = up;
@@ -98,6 +101,7 @@ function onTopic(change) {
   if (change.topic === "jobs") void loadJobs();
   if (change.topic === "settings") {
     emit("prompts-changed");
+    emit("plugins-changed");
     void loadChat();
     void loadUsage();
   }

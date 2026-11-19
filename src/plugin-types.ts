@@ -441,7 +441,13 @@ export type MergeProvider = {
 // ---- coordinator tools / rpc / writes ----
 export type CoordinatorToolsProvider = {
   /** Installed always (recorded calls resolve), offered only where `applies`. */
-  create(input: { projectId: string; root: () => Conversation | undefined; isCoordinator: (id: Conversation["id"]) => boolean }): {
+  create(input: {
+    projectId: string;
+    root: () => Conversation | undefined;
+    isCoordinator: (id: Conversation["id"]) => boolean;
+    /** The chat of a Coordinator conversation (`main` or the chat id); undefined for any other conversation. Trust it, never a chat named by the model. */
+    chatIdOf: (id: Conversation["id"]) => string | undefined;
+  }): {
     tools: ToolRegistration[];
     extension: Extension;
   };
@@ -489,6 +495,8 @@ export type WebContribution = {
   /** Absolute paths of the browser script and stylesheet, served unauthenticated as /plugins/<name>/ui.js and /plugins/<name>/ui.css; the script registers the plugin's Settings panel. */
   script?: string;
   style?: string;
+  /** Opt-in: the script also registers a `sidebar` section, mounted under Workers and Pull requests of the selected chat. `title` defaults to the plugin name. */
+  sidebar?: { title?: string };
   /** Bearer-authenticated GET /plugins/<name>/<route>?project=<id>. */
   routes?: Record<string, PluginRoute>;
 };

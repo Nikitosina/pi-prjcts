@@ -1350,7 +1350,7 @@ export const Request = Type.Union([
     },
     { additionalProperties: false },
   ),
-  Type.Object({ action: Type.Literal("plugins") }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("plugins"), id: Type.Optional(Id) }, { additionalProperties: false }),
   Type.Object(
     {
       action: Type.Literal("plugin"),

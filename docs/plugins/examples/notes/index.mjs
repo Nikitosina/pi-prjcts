@@ -41,7 +41,11 @@ export default {
       },
       // Clearing loses data, so the Host agent needs the owner's approval for it.
       rpcPolicy: { list: "read", add: "write", clear: "dangerous" },
-      web: { script: fileURLToPath(new URL("ui.js", import.meta.url)), style: fileURLToPath(new URL("ui.css", import.meta.url)) },
+      web: {
+        script: fileURLToPath(new URL("ui.js", import.meta.url)),
+        style: fileURLToPath(new URL("ui.css", import.meta.url)),
+        sidebar: { title: "Notes" },
+      },
 
       coordinatorTools: {
         applies: () => true,

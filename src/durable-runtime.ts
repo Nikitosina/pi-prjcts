@@ -813,6 +813,8 @@ export async function openDurableProject(input: {
     // Main (root) and every chat conversation; worker threads are never coordinators.
     const coordinatorIds = new Set<number>();
     const isCoordinator = (id: Conversation["id"]) => coordinatorIds.has(Number(id));
+    const chatIds = new Map<number, string>();
+    const chatIdOf = (id: Conversation["id"]) => chatIds.get(Number(id));
     const workerManagement = coordinatorJobReadTools({
       projectId: project.id,
       root: () => rootReference,
@@ -855,7 +857,7 @@ export async function openDurableProject(input: {
     const pluginCoordinator = plugins.coordinatorToolSources().map(({ provider, builtIn }) => ({
       provider,
       builtIn,
-      ...provider.create({ projectId: project.id, root: () => rootReference, isCoordinator }),
+      ...provider.create({ projectId: project.id, root: () => rootReference, isCoordinator, chatIdOf }),
     }));
     const pluginExtensions = pluginCoordinator.map((item) => item.extension);
     // A built-in plugin's tools keep their built-in group, so saved Tools/access switches (`group:github`) still apply.
@@ -1545,6 +1547,7 @@ export async function openDurableProject(input: {
     });
     rootReference = root;
     coordinatorIds.add(Number(root.id));
+    chatIds.set(Number(root.id), MAIN_CHAT);
     jobs.attach(harness);
     await root.commit(async (tx) => {
       const identity = await tx.doc(DurableProjectIdentity, root.id);
@@ -1568,7 +1571,10 @@ export async function openDurableProject(input: {
         ),
       );
     };
-    for (const id of await chatConversationIds()) coordinatorIds.add(Number(id));
+    for (const chat of (await storedChats()).chats) {
+      coordinatorIds.add(Number(chat.conversationId));
+      chatIds.set(Number(chat.conversationId), chat.id);
+    }
     const openedHarness = harness;
     const openedStorage = storage;
     // Conversation ownership for the change feed, learned from the documents that commits carry.
@@ -2451,6 +2457,7 @@ export async function openDurableProject(input: {
             return chat;
           }, context);
           coordinatorIds.add(created.conversationId);
+          chatIds.set(created.conversationId, created.id);
           coordinatorSkills.set(created.conversationId, inherited);
           return (await resolveChat(created.id)).chat;
         }),
