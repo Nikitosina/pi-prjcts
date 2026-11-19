@@ -222,9 +222,8 @@ function reconcilePending(view, read) {
         !claimedEntries.has(scope + item.entryId) &&
         (send.baseline === null ? entryTime(item.at) >= send.sentAt : item.entryId > send.baseline),
     );
-    // The host may add skill or reference blocks around what the owner typed, on lines of their own.
-    const match =
-      owner.find((item) => item.text?.trim() === send.text) ?? owner.find((item) => `\n${item.text}\n`.includes(`\n${send.text}\n`));
+    // The host appends reference blocks after what the owner typed, separated by a blank line.
+    const match = owner.find((item) => item.text?.trim() === send.text) ?? owner.find((item) => item.text?.startsWith(`${send.text}\n\n`));
     // A settled job whose message never reached the transcript leaves its outcome in the turn card; the bubble must not outlive it.
     if (match || ["done", "failed", "interrupted"].includes(job.state)) {
       if (match) claimedEntries.add(scope + match.entryId);
