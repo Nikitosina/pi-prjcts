@@ -281,7 +281,10 @@ await kit.run(async () => {
     const got = await allChats(id, chats);
     check(
       "67 the other providers' events arrived while alpha was not loaded",
-      count(got["Chat A"], "Fix login copy") === 1 && count(got.Alerts, "[beta]") === 1,
+      count(got["Chat A"], "Fix login copy") === 1 &&
+        count(got.Alerts, "[beta]") === 1 &&
+        total(got, "Fix login copy") === 1 &&
+        total(got, "[beta]") === 1,
       got,
     );
     check(
@@ -310,7 +313,12 @@ await kit.run(async () => {
     const after = await allChats(id, chats);
     check(
       "67 control: the enable delivered alpha's event once to its chat, nothing else repeated",
-      count(after["Chat B"], "[alpha]") === 1 && count(after["Chat A"], "Fix login copy") === 1 && count(after.Alerts, "[beta]") === 1,
+      count(after["Chat B"], "[alpha]") === 1 &&
+        count(after["Chat A"], "Fix login copy") === 1 &&
+        count(after.Alerts, "[beta]") === 1 &&
+        total(after, "[alpha]") === 1 &&
+        total(after, "Fix login copy") === 1 &&
+        total(after, "[beta]") === 1,
       after,
     );
     await rpc({ action: "follow-poll", id });
@@ -344,6 +352,8 @@ await kit.run(async () => {
       "68 each frozen event reached its own chat once during the outage",
       count(got["Chat A"], "Fix login copy") === 1 &&
         count(got["Chat B"], "[alpha]") === 1 &&
+        total(got, "[alpha]") === 1 &&
+        total(got, "Fix login copy") === 1 &&
         got.Alerts.length === 0 &&
         got.main.length === 0,
       got,
