@@ -21,6 +21,7 @@ import {
   type Harness,
   type Session,
   type SubmissionRecord,
+  type TaskId,
   type Tx,
   UsageDoc,
 } from "@earendil-works/pi-durable";
@@ -94,15 +95,27 @@ export type ReviewSpend = { full: number; rechecks: number };
 /** The three-axis pr-review round starts one reviewer per axis. */
 export const FULL_REVIEW_REVIEWERS = 3;
 /** Why the review budget refuses this reviewer, or null: one full round (up to three reviewers, closed by the first re-check), then `rechecks` re-checks. */
-export function reviewRefusal(spent: ReviewSpend, kind: ReviewKind, rechecks: number): string | null {
+export function reviewRefusal(spent: ReviewSpend, kind: ReviewKind, rechecks: number, roundClosed = spent.rechecks > 0): string | null {
   if (kind === "full") {
-    if (spent.rechecks > 0) return "The full review already ran and its re-checks have started.";
+    if (roundClosed) return "The full review already ran and its re-checks have started.";
     if (spent.full >= FULL_REVIEW_REVIEWERS) return `The full review round already has its ${FULL_REVIEW_REVIEWERS} reviewers.`;
     return null;
   }
   if (spent.full === 0) return "Start with one full review (kind full); a re-check covers the fixes to its findings.";
   if (spent.rechecks >= rechecks) return `All ${rechecks} re-checks of this Job are spent.`;
   return null;
+}
+/** The checkout a worker's reviewer read: the commit the host confirmed before the turn, and the subagent call that sent the turn. */
+export type ReviewRead = { taskId: TaskId; sha: string };
+/** A worker's checkout confirmed for review: its committed HEAD, or why it cannot be reviewed. */
+export type CheckoutConfirmation = { sha: string } | { refusal: string };
+/** The newest read whose subagent call answered; a turn that failed or was stopped is not one. */
+async function lastAnswered(tx: Tx, reads: ReviewRead[]): Promise<ReviewRead | undefined> {
+  for (const read of reads.toReversed()) {
+    const state = (await tx.task(read.taskId))?.state;
+    if (state?.status === "terminal" && state.outcome.status === "completed") return read;
+  }
+  return undefined;
 }
 /** Reviewers that count against the budget: those started, less the ones whose subagent call ended without an answer. */
 async function countedReviews(tx: Tx, job: Job): Promise<ReviewSpend> {
@@ -113,9 +126,15 @@ async function countedReviews(tx: Tx, job: Job): Promise<ReviewSpend> {
     if (!kind) continue;
     const owner = (await tx.conversation(child.id))?.owner;
     const state = owner && (await tx.task(owner.taskId))?.state;
-    if (state?.status !== "terminal" || state.outcome.status === "completed") continue;
-    if (kind === "full") spent.full = Math.max(0, spent.full - 1);
-    else spent.rechecks = Math.max(0, spent.rechecks - 1);
+    if (state?.status === "terminal" && state.outcome.status !== "completed") {
+      if (kind === "full") spent.full = Math.max(0, spent.full - 1);
+      else spent.rechecks = Math.max(0, spent.rechecks - 1);
+    }
+    // A continued turn is a re-check of its own, given back when its call ended without an answer.
+    for (const read of child.reads?.slice(1) ?? []) {
+      const turn = (await tx.task(read.taskId))?.state;
+      if (turn?.status === "terminal" && turn.outcome.status !== "completed") spent.rechecks = Math.max(0, spent.rechecks - 1);
+    }
   }
   return spent;
 }
@@ -141,7 +160,7 @@ type JobFacts = {
   /** Workspace scope the worker runs in (host-persisted id), or null for a plain checkout. */
   scopeId: string | null;
   /** Verifier, reviewer and scout subagents the worker started, oldest first; a reviewer keeps its review kind (absent before 2026-11-11). */
-  children: { id: ConversationId; role: AgentRole; title: string; review?: ReviewKind; modelMoves?: ModelMove[] }[];
+  children: { id: ConversationId; role: AgentRole; title: string; review?: ReviewKind; reads?: ReviewRead[]; modelMoves?: ModelMove[] }[];
   branch: string | null;
   candidate: string | null;
   plan: PlanStep[];
@@ -462,6 +481,8 @@ export type JobsHost = {
   afterApproved?(jobId: string): void;
   /** Minutes without progress before a stall notice. Default 20. */
   stallMinutes?: () => number;
+  /** Confirms that the worker's checkout (git or a plugin kind) at `cwd` is clean at a readable commit. Without it no reviewer starts. */
+  confirmRevision?: (input: { conversationId: ConversationId; cwd: string }) => Promise<CheckoutConfirmation>;
   /** Re-checks a Job may run after its full review. Default DEFAULT_REVIEW_RECHECKS. */
   reviewRechecks?: () => number;
   quotaRetryBaseMs?: number;
@@ -1382,29 +1403,118 @@ export function createJobs(host: JobsHost) {
     },
   });
 
+  /** The worker's checkout as the host confirms it; any failure to confirm (no hook, no directory, a throw) is a refusal, never a pass. */
+  async function confirmCheckout(conversationId: ConversationId, cwd: string | undefined): Promise<CheckoutConfirmation> {
+    if (!cwd) return { refusal: "The worker has no working directory to review" };
+    if (!host.confirmRevision) return { refusal: "The host cannot confirm the worker's checkout" };
+    try {
+      return await host.confirmRevision({ conversationId, cwd });
+    } catch (error) {
+      return {
+        refusal: `The checkout could not be confirmed (${(error instanceof Error ? error.message : String(error)) || "no message"})`,
+      };
+    }
+  }
+  /** Why the checkout no longer holds the commit a review was confirmed at, or undefined. Looked at once after the answer; nothing is locked meanwhile. */
+  async function checkoutMoved(conversationId: ConversationId, cwd: string | undefined, sha: string): Promise<string | undefined> {
+    const now = await confirmCheckout(conversationId, cwd);
+    if ("refusal" in now) return now.refusal;
+    return now.sha === sha ? undefined : `the checkout is now at ${now.sha}`;
+  }
+
   const subagentTool = defineTool({
     name: "subagent",
     description:
       "Run a fresh reviewer or scout on a task and get its answer. It cannot spawn agents and ends when it answers. " +
-      "A reviewer is kind full (the one full review: one reviewer, or one per pr-review axis) or kind recheck (the fix diff and the still-open findings); the project limits re-checks.",
+      "A reviewer is kind full (the one full review: one reviewer, or one per pr-review axis) or kind recheck (the fix diff and the still-open findings); the project limits re-checks. " +
+      "A recheck may set continues to the id of a reviewer of this Job that answered: it keeps its conversation and reads your new candidate (committed, clean, recorded with job candidate). A full review is always a fresh reviewer.",
     parameters: objectUnion([
-      Type.Object({ role: Type.Literal("reviewer"), kind: ReviewKindSchema, task: Type.String() }),
+      Type.Object({ role: Type.Literal("reviewer"), kind: ReviewKindSchema, task: Type.String(), continues: Type.Optional(Type.String()) }),
       Type.Object({ role: Type.Literal("scout"), task: Type.String() }),
     ]),
     replay: "safe",
     execute: async (args, api, callContext) => {
       const glued = gluedWordsDiagnostic(args.task);
       if (glued) api.diagnostic(glued);
-      const cwd = (await api.agent(callContext)).cwd;
-      const child = await api.commit(async (tx) => {
+      const worker = await api.agent(callContext);
+      const cwd = worker.cwd;
+      const reviewer = args.role === "reviewer";
+      const continues = args.role === "reviewer" ? args.continues : undefined;
+      const jobsNow = Object.values((await api.snapshot(Jobs, ROOT_CONVERSATION_ID, callContext))?.jobs ?? {});
+      const mine = jobsNow.find((item) => item.workerConversation === api.conversationId);
+      // A reviewer reads one directory, which the host confirms at the start of each admitted call; a replay keeps what was admitted.
+      let pin: CheckoutConfirmation | undefined;
+      if (reviewer) {
+        const admitted = mine?.children.flatMap((item) => item.reads ?? []).find((item) => item.taskId === api.taskId);
+        const target =
+          continues === undefined ? undefined : mine?.children.find((item) => item.role === "reviewer" && String(item.id) === continues);
+        const reads = target ? (await api.snapshot(AgentDoc, target.id, callContext))?.cwd : cwd;
+        pin = admitted
+          ? { sha: admitted.sha }
+          : reads !== cwd
+            ? { refusal: `Reviewer ${continues} reads ${reads ?? "no directory"}, but your working directory is ${cwd ?? "none"}` }
+            : await confirmCheckout(api.conversationId, cwd);
+      }
+      const pinned = pin && "sha" in pin ? pin.sha : undefined;
+      const replayed = reviewer && !!mine?.children.some((item) => item.reads?.some((read) => read.taskId === api.taskId));
+      const started = await api.commit(async (tx): Promise<{ id: ConversationId; before?: string }> => {
         const existing = (await tx.scanConversations({ ownerTaskId: api.taskId }, 1)).items[0];
-        if (existing) return existing.id;
+        if (existing) return { id: existing.id };
         const doc = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
         const job = Object.values(doc.jobs).find((item) => item.workerConversation === api.conversationId);
         if (!job) throw new Error("subagent belongs to a worker's Job");
+        const none = (why: string) =>
+          new Error(
+            `${why} No reviewer started${continues === undefined ? "" : "; a re-check without continues starts a fresh reviewer"}.`,
+          );
+        if (args.role === "reviewer" && continues !== undefined) {
+          const record = job.children.find((item) => item.role === "reviewer" && String(item.id) === continues);
+          if (!record) throw none(`${continues} is not a reviewer of this Job.`);
+          const reads = record.reads ?? [];
+          const here = reads.findIndex((item) => item.taskId === api.taskId);
+          if (here >= 0) {
+            const before = await lastAnswered(tx, reads.slice(0, here));
+            return { id: record.id, ...(before ? { before: before.sha } : {}) };
+          }
+          if (args.kind !== "recheck") throw none("A full review is an independent, fresh reviewer; only a re-check continues one.");
+          const last = reads.at(-1);
+          if (!last) throw none(`Reviewer ${continues} has no confirmed commit on record.`);
+          const turn = (await tx.task(last.taskId))?.state;
+          if (turn?.status !== "terminal") throw none(`Reviewer ${continues} is still working on its last turn.`);
+          // A turn that failed was given back, so the reviewer is continued from the last turn it answered.
+          const answered = await lastAnswered(tx, reads);
+          if (!answered) throw none(`Reviewer ${continues} has not answered yet.`);
+          if (!pin || "refusal" in pin) throw none(`${pin ? pin.refusal : "The checkout was not confirmed"}.`);
+          if (pin.sha !== job.candidate)
+            throw none(
+              `The checkout is at ${pin.sha}, not the recorded candidate ${job.candidate ?? "(none)"}; verify it, then record it with job candidate.`,
+            );
+          if (pin.sha === answered.sha)
+            throw none(`Reviewer ${continues} already read ${answered.sha}; commit the fixes and record the new candidate first.`);
+          const refusal = reviewRefusal(await countedReviews(tx, job), args.kind, host.reviewRechecks?.() ?? DEFAULT_REVIEW_RECHECKS);
+          if (refusal)
+            throw new Error(
+              `${refusal} No reviewer started. ${job.workspace ? "Return your answer" : "Report with job ready"} and list the still-open P0/P1 findings as gaps for the owner, P2/P3 under Not fixed.`,
+            );
+          const spent = job.reviews ?? { full: 0, rechecks: 0 };
+          job.reviews = { ...spent, rechecks: spent.rechecks + 1 };
+          record.reads = [...reads, { taskId: api.taskId, sha: pin.sha }];
+          return { id: record.id, before: answered.sha };
+        }
         if (args.role === "reviewer") {
+          if (!pin || "refusal" in pin) throw none(`${pin ? pin.refusal : "The checkout was not confirmed"}.`);
+          if (job.candidate && pin.sha !== job.candidate)
+            throw none(
+              `The checkout is at ${pin.sha}, not the recorded candidate ${job.candidate}; verify it, then record it with job candidate.`,
+            );
           const spent = await countedReviews(tx, job);
-          const refusal = reviewRefusal(spent, args.kind, host.reviewRechecks?.() ?? DEFAULT_REVIEW_RECHECKS);
+          // Given-back re-checks still closed the full round.
+          const refusal = reviewRefusal(
+            spent,
+            args.kind,
+            host.reviewRechecks?.() ?? DEFAULT_REVIEW_RECHECKS,
+            (job.reviews?.rechecks ?? 0) > 0,
+          );
           if (refusal)
             throw new Error(
               `${refusal} No reviewer started. ${job.workspace ? "Return your answer" : "Report with job ready"} and list the still-open P0/P1 findings as gaps for the owner, P2/P3 under Not fixed.`,
@@ -1417,7 +1527,7 @@ export function createJobs(host: JobsHost) {
           id: created.id,
           role: args.role,
           title: clip(args.task, 80),
-          ...(args.role === "reviewer" ? { review: args.kind } : {}),
+          ...(args.role === "reviewer" ? { review: args.kind, reads: [{ taskId: api.taskId, sha: pinned! }] } : {}),
         });
         doc.subagents[String(created.id)] = job.id;
         await configure(
@@ -1426,10 +1536,19 @@ export function createJobs(host: JobsHost) {
           host.agentChange({ role: args.role, id: String(created.id), title: args.role, jobId: job.id, parent: api.conversationId, cwd }),
         );
         await configure(tx, created.id, { extensions: { remove: [Worker, Coordinator] } });
-        return created.id;
+        return { id: created.id };
       }, callContext);
+      const child = started.id;
+      const task = started.before
+        ? `[The commit under review changed: your working directory now holds ${pinned}; before you read ${started.before}. Read the files again and do not rely on what you saw earlier.]\n\n${args.task}`
+        : args.task;
       await api.details({ conversationId: child }, callContext);
       const handle = (await api.conversation(child, callContext))!;
+      if (reviewer) {
+        const actual = (await api.snapshot(AgentDoc, child, callContext))?.cwd;
+        if (actual !== cwd)
+          throw new Error(`Reviewer ${child} would read ${actual ?? "no directory"}, not the confirmed ${cwd}; no turn was sent.`);
+      }
       const childRecord = (doc: JobsState | undefined) =>
         Object.values(doc?.jobs ?? {})
           .flatMap((job) => job.children)
@@ -1438,14 +1557,24 @@ export function createJobs(host: JobsHost) {
         const moves = childRecord(await api.snapshot(Jobs, ROOT_CONVERSATION_ID, callContext))?.modelMoves ?? [];
         // One request id per model, so a replay waits on the attempt it left instead of sending the task again.
         const requestId = moves.length ? `subagent:${api.taskId}:${moves.at(-1)!.to}` : `subagent:${api.taskId}`;
-        const settled = await (await handle.submit({ type: "input", content: args.task, requestId }, callContext)).wait(callContext);
+        // A replayed call may not have sent this turn yet: a new one must not go to a checkout that moved off the pinned commit.
+        if (replayed && pinned && (await api.commit((tx) => tx.submissionByRequest(child, requestId), callContext)) === undefined) {
+          const moved = await checkoutMoved(api.conversationId, cwd, pinned);
+          if (moved) throw new Error(`The checkout moved off ${pinned} before the reviewer's turn was sent: ${moved}. No turn was sent.`);
+        }
+        const settled = await (await handle.submit({ type: "input", content: task, requestId }, callContext)).wait(callContext);
         const failure = await turnFailure(
           settled,
           async (at) => (await (await bound?.conversation(child, callContext))?.context(callContext, { at }))?.entries ?? [],
         );
         if (!failure && settled.status === "done" && settled.type === "input") {
           const entry = await api.commit((tx) => tx.entry(AssistantEntry, settled.answer), callContext);
-          return { output: [{ type: "text" as const, text: textOfAnswer(entry) }], details: { conversationId: child } };
+          const after = pinned ? await checkoutMoved(api.conversationId, cwd, pinned) : undefined;
+          const note = after ? `\n\n[This review is not valid for the current checkout: it was confirmed at ${pinned}, and ${after}.]` : "";
+          const hint = reviewer
+            ? `\n\n[reviewer ${child}: after fixing, commit, verify, record it with job candidate, then call subagent kind recheck with continues "${child}" to re-check in this conversation.]`
+            : "";
+          return { output: [{ type: "text" as const, text: textOfAnswer(entry) + note + hint }], details: { conversationId: child } };
         }
         // Quota or a rate limit moves along the tier like a worker; at its end the call fails at once instead of waiting out a quota.
         const kind = failure ? providerFailure(failure) : undefined;

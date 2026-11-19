@@ -43,8 +43,28 @@ const handler = ({ role, user, results }) => {
     return undefined;
   }
   if (role === "worker" && user.includes("PUBLISH-FAKE") && results.length === 0) return call("fake_publish", { title: "Fake PR title" });
+  if (role === "reviewer" && user.includes("HELPER-REVIEW"))
+    return results.length ? say(`SAW[${results[0].trim()}]`) : call("code_read", { path: ".fake-revision" });
+  const helper = /HELPER-(H\d)/.exec(user)?.[1];
+  if (role === "worker" && helper) return helperStep(helper, results);
   return undefined;
 };
+// 39: a task helper in a plugin checkout asks for reviews; its checkout's revision is what the reviewer reads from `.fake-revision`.
+const HELPER_B = "c".repeat(40);
+let helperReviewer = null;
+const helperReview = (kind, task) =>
+  call("subagent", { role: "reviewer", kind, task: `HELPER-REVIEW ${task}`, ...(kind === "recheck" ? { continues: helperReviewer } : {}) });
+function helperStep(name, results) {
+  if (name !== "H1") return results.length ? say("Helper finished.") : helperReview("full", "first");
+  if (results.length === 1) helperReviewer = /reviewer (\d+)/.exec(results[0])?.[1];
+  const steps = [
+    () => helperReview("full", "first"),
+    () => call("bash", { command: `printf '${HELPER_B}\\n' > .fake-revision` }),
+    () => call("job", { action: "candidate", sha: HELPER_B }),
+    () => helperReview("recheck", "second"),
+  ];
+  return steps[results.length] ? steps[results.length]() : say("Helper finished.");
+}
 const kit = await createKit("vcs-plugins", {
   handler,
   env: { FAKE_PLUGIN_DATA: "", PI_PROJECTS_FOLLOW_TICK_MS: "86400000", PI_PROJECTS_PLUGINS: `${secondPath}:${fakePath}` },
@@ -861,6 +881,61 @@ await kit.run(async () => {
       "38 the same provider without the failure is read and reported",
       reviewerCalls(G) === 1 && reportsFor(G).some((text) => text.includes(`Read revision: ${G}, ${CONFIRMED}.`)),
       reportsFor(G),
+    );
+  }
+
+  // ---- 39: a task helper's reviewer is confirmed through the helper's own task attachment, and reads what that checkout holds ----
+  {
+    const base = "a".repeat(40);
+    const helperRuns = (name) => result.calls.filter((item) => item.role === "worker" && item.user.includes(`HELPER-${name}`)).at(-1);
+    const reviewerSaw = (task) =>
+      result.calls
+        .filter((item) => item.role === "reviewer" && item.user.includes(task) && item.results.length)
+        .map((item) => item.results[0]);
+    const startHelper = async (name, workspace = { kind: "isolated", baseCommit: base }) => {
+      const before = result.calls.length;
+      await kit.ask(id, `MARK-DELEGATE ${JSON.stringify({ brief: `HELPER-${name} go`, title: `Helper ${name}`, workspace })}`);
+      await kit.waitFor(
+        async () => result.calls.slice(before).filter((item) => item.role === "worker" && item.user.includes(`HELPER-${name}`)).length > 0,
+        `helper ${name}`,
+        { timeout: 60000 },
+      );
+      await kit.settle(id);
+    };
+    patchData((data) => {
+      data.noConfirmRevision = true;
+    });
+    await startHelper("H2");
+    check(
+      "39 a task attachment without confirmRevision refuses the helper's reviewer: none starts, none reads",
+      /cannot confirm/i.test(helperRuns("H2").results[0] ?? "") && !reviewerSaw("HELPER-REVIEW first").length,
+      helperRuns("H2").results,
+    );
+    patchData((data) => {
+      delete data.noConfirmRevision;
+      data.confirmFailure = "provider crashed";
+    });
+    await startHelper("H3");
+    check(
+      "39 a confirmation that throws fails closed: no reviewer is started",
+      /provider crashed/.test(helperRuns("H3").results[0] ?? "") && !reviewerSaw("HELPER-REVIEW first").length,
+      helperRuns("H3").results,
+    );
+    patchData((data) => {
+      delete data.confirmFailure;
+    });
+    await startHelper("H4", { kind: "shared" });
+    check(
+      "39 a shared helper of a plugin checkout has no task attachment to confirm, so its reviewer is refused",
+      /No reviewer started/.test(helperRuns("H4").results[0] ?? "") && reviewerSaw("HELPER-REVIEW first").length === 0,
+      helperRuns("H4").results,
+    );
+    await startHelper("H1");
+    check(
+      "39 the confirmed checkout is read by the reviewer's own code tool at A, then at B in the same conversation",
+      reviewerSaw("HELPER-REVIEW first").some((text) => text.includes(base)) &&
+        reviewerSaw("HELPER-REVIEW second").some((text) => text.includes(HELPER_B)),
+      { first: reviewerSaw("HELPER-REVIEW first"), second: reviewerSaw("HELPER-REVIEW second"), helper: helperRuns("H1").results },
     );
   }
 
