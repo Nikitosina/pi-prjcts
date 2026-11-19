@@ -105,6 +105,7 @@ await kit.run(async () => {
       delay(ms).then(() => ({ done: false })),
     ]);
   const count = (list, needle) => list.filter((text) => text.includes(needle)).length;
+  const total = (got, needle) => Object.values(got).reduce((sum, list) => sum + count(list, needle), 0);
   const allChats = async (id, chats) =>
     Object.fromEntries(await Promise.all(Object.entries(chats).map(async ([title, chatId]) => [title, await events(id, chatId)])));
 

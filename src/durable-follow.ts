@@ -557,6 +557,7 @@ export function followRuntime(
         );
         failed.push(...seen.failed.map((item) => ({ ...item, provider: provider.id })));
       }
+      owed = undefined;
       if (isClosed() || controller.signal.aborted) return { skipped: "closed" };
       // Records and attempts an older host stored under a bare key move to their provider's key before anything new is written under either.
       if (superseded.length)
