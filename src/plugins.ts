@@ -218,17 +218,19 @@ export const plugins = {
     if (blocked) throw new Error(blocked);
     const before = gate.started(project.id, name);
     const paused = pauseOf(project, name);
+    let latest: Project;
     try {
       const unresolved = await plugins.unresolvedWrites(name, root);
       if (unresolved) throw new Error(unresolved);
       if (gate.started(project.id, name) !== before)
         throw new Error(`Cannot disable "${name}": work began while its writes were being checked. Try again.`);
+      // Read again: the project may have been saved (outside the project lock) while the writes were being checked.
+      latest = read();
     } catch (error) {
       release(paused);
       throw error;
     }
-    // Read again: the project may have been saved (outside the project lock) while the writes were being checked.
-    return plugins.setEnabled(read(), name, false, save, paused);
+    return plugins.setEnabled(latest, name, false, save, paused);
   },
   /** `paused` is a lifecycle pause already taken for this disable; setEnabled owns it from here and releases it on every refusal. */
   setEnabled: (project: Project, name: string, enabled: boolean, save: (next: Project) => void, paused?: () => void): Project => {
