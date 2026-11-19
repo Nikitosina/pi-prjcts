@@ -33,3 +33,8 @@ UI
 16. The button stays pressable after the click, so a second click sends a second request; it is disabled while the request runs and the row shows the new state after.
 17. The catalog hides or replaces the loaded plugin cards and panels. It is an extra block above them; a loaded plugin's card and panel stay as they were.
 18. The catalog overflows on a phone. At 390 px wide the rows wrap and the buttons stay reachable.
+
+Combined with the per-project switches (plugin-enable-failures.md); e2e checks C1-C11
+21. The merged Settings → Plugins list loses the catalog block when a switch redraws it, wires the activate handler once per redraw, or shows the catalog row as off for a project that turned the plugin off. The catalog is host-wide: its row stays and says loaded; only the project's switch changes.
+22. A refused disable (unresolved write) redraws the list without the catalog block, or changes `plugins.json`.
+23. Chat sends or project switches read the catalog. It is read only when Settings → Plugins draws (the first read, and a redraw after a changed switch); no timer, no feed topic.
