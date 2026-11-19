@@ -1,12 +1,12 @@
 // Center: the Coordinator chat. Transcript from `show`, older pages from `chat-history`, live frames from `/live`.
 // Tool calls are compact rows; a finished turn folds runs of two or more rows into one group; reports link to the worker.
-import { call, stream, uuid } from "./api.js";
+import { HostError, call, stream, uuid } from "./api.js";
 import { clip, clock, dur, esc, imagesHtml, markdown, oneLine } from "./format.js";
 import { hydrateMedia } from "./media.js";
 import { FILE_ONLY_NOTE, PathSource, insertText, pathsFromTransfer } from "./path-drop.js";
 import { slashCommand, slashKey } from "./slash.js";
 import { chatArgs, emit, fail, on, stale, state, toast } from "./state.js";
-import { loadRecentMemory, markMemoryUndone, memoryEntry, memoryKind, memoryTitle, memoryWrite } from "./memory.js";
+import { markMemoryUndone, memoryEntry, memoryKind, memoryReady, memoryTitle, memoryWrite } from "./memory.js";
 import { follower } from "./follow.js";
 
 const feed = document.querySelector("#feed"),
@@ -20,6 +20,8 @@ let live = null,
   olderBefore = null,
   loading = null,
   held = null; // live text and thinking of a step the host just committed, shown until a transcript read that includes it renders
+const pendingSends = []; // owner messages sent from this page that the transcript does not show yet, oldest first
+const claimedEntries = new Set(); // `<project>:<chat>:<entryId>` of transcript messages a pending send already matched
 const expanded = new Set(); // tool callIds and group keys the owner opened
 const revealed = new Set(); // long owner messages opened during this chat visit, keyed by transcript scope; they stay open until the owner navigates away
 const CHAT_SCOPE = "msg:"; // the coordinator chat's keys have no scope prefix
@@ -49,10 +51,11 @@ export async function loadChat() {
           id = state.projectId,
           entries = state.live?.entries ?? 0;
         if (!id) return;
-        const [view] = await Promise.all([call("show", { id, ...chatArgs(), messageText: "full" }), loadRecentMemory().catch(fail)]);
+        const view = await call("show", { id, ...chatArgs(), messageText: "full" });
         // Another chat or project was selected meanwhile: drop this read, but still run the one that selection queued.
         if (stale(gen)) continue;
         state.view = view;
+        reconcilePending(view);
         if (held && (entries >= held.entries || committed(view, held))) held = state.liveHeld = null;
         emit("view", view);
         renderFeed();
@@ -81,6 +84,8 @@ on("select", () => {
   live = null;
   liveKey = "";
 });
+
+on("memory-recent", () => renderFeed());
 
 on("chat-display", (ui) => {
   if (!state.view) return;
@@ -161,17 +166,99 @@ export function renderFeed() {
     busy = !!state.live?.running || !!currentChat()?.busy;
   const html = [];
   if (older.length ? olderBefore : state.view.before) html.push(`<button type="button" class="earlier" data-earlier>Show earlier</button>`);
-  if (!all.length)
+  const sends = pendingSends.filter(inCurrentChat);
+  if (!all.length && !sends.length)
     html.push(
       `<div class="empty-chat" data-key="empty"><p class="empty-title">${esc(state.view.project?.name ?? "")}</p><p class="muted">Ask the coordinator for something. It plans, delegates to workers and reports back here.</p><div class="starters" role="list" aria-label="Starter prompts">${STARTERS.map((text, index) => `<button type="button" role="listitem" class="starter" data-starter="${index}"><span class="starter-glyph" aria-hidden="true">❯</span>${esc(text)}</button>`).join("")}</div><p class="muted small">A starter fills the composer; <kbd>Enter</kbd> sends it.</p></div>`,
     );
   html.push(transcriptHtml(all, busy, "Coordinator", { groups: mergeGroups(olderGroups, state.view.toolGroups) }));
+  html.push(...sends.map(pendingHtml));
   html.push(failureHtml());
   html.push(`<div id="live-turn"></div>`);
   follow.render(() => {
     morph(feed, html.join(""));
     renderLive();
   });
+}
+const inCurrentChat = (send) => send.projectId === state.projectId && send.chatId === state.chatId;
+const entryTime = (at) => (typeof at === "number" ? at : Date.parse(at));
+/** Drops the pending sends the transcript now shows. Each takes the oldest unclaimed owner message newer than what the chat held when it was sent. */
+function reconcilePending(view) {
+  const ledger = view.jobs ?? [];
+  for (const send of pendingSends.filter(inCurrentChat)) {
+    if (send.state !== "failed") {
+      const claim = (item) => `${send.projectId}:${send.chatId}:${item.entryId}`;
+      const match = (view.messages ?? []).find(
+        (item) =>
+          item.kind === "message" &&
+          item.role === "user" &&
+          item.origin === "owner" &&
+          !claimedEntries.has(claim(item)) &&
+          (send.baseline === null ? entryTime(item.at) >= send.sentAt - 5000 : item.entryId > send.baseline) &&
+          item.text?.includes(send.text),
+      );
+      if (match) {
+        claimedEntries.add(claim(match));
+        pendingSends.splice(pendingSends.indexOf(send), 1);
+        continue;
+      }
+      const job = ledger.find((item) => item.id === send.id);
+      if (job) send.state = "sent";
+      // A settled job whose message never reached the transcript leaves its outcome in the turn card; the bubble must not outlive it.
+      if (job && ["done", "failed", "interrupted"].includes(job.state)) pendingSends.splice(pendingSends.indexOf(send), 1);
+    }
+  }
+}
+const DELIVERY = { sending: "Sending…", sent: "Sent", failed: "Not sent", unconfirmed: "Delivery not confirmed" };
+function pendingHtml(send) {
+  const note =
+    send.state === "failed"
+      ? `${esc(clip(oneLine(send.error), 300))}${send.restored ? " The text is back in the composer." : ""}`
+      : send.state === "unconfirmed"
+        ? "The host did not answer, so the message may or may not have arrived. It is not sent again on its own."
+        : "";
+  const retry = send.state === "unconfirmed" || (send.state === "failed" && !send.restored);
+  const actions =
+    send.state === "failed" || send.state === "unconfirmed"
+      ? `<div class="pending-note" role="status">${note}${retry ? ` <button type="button" class="link-btn" data-pending-retry="${esc(send.id)}">Retry</button>` : ""} <button type="button" class="link-btn" data-pending-dismiss="${esc(send.id)}">Dismiss</button></div>`
+      : "";
+  const sig = hash(`${send.state}|${send.error}|${send.restored}`);
+  return `<section class="turn" data-key="p${esc(send.id)}" data-sig="${sig}"><article class="msg owner pending" data-delivery="${send.state}"><div class="msg-meta"><span class="who">You</span><span class="delivery">${DELIVERY[send.state]}</span></div><div class="bubble">${markdown(send.text)}</div>${actions}</article></section>`;
+}
+/** Sends one pending message. A refusal is shown as not sent; an answer that may never have come is shown as unconfirmed. Neither sends again on its own. */
+async function deliver(send, gen) {
+  send.state = "sending";
+  send.error = "";
+  try {
+    await call("message", {
+      id: send.projectId,
+      text: send.text,
+      requestId: send.id,
+      ...(send.chatId === "main" ? {} : { chatId: send.chatId }),
+    });
+  } catch (error) {
+    if (!pendingSends.includes(send)) return; // the transcript already shows it
+    const unconfirmed = !(error instanceof HostError) || error.answered === false;
+    send.state = unconfirmed ? "unconfirmed" : "failed";
+    send.error = error.message;
+    if (unconfirmed) toast(`Delivery not confirmed: ${error.message}`, { error: true, ms: 8000 });
+    else {
+      if (!stale(gen) && !input.value) {
+        input.value = send.text;
+        send.restored = true;
+        grow();
+      }
+      fail(error);
+    }
+    if (stale(gen)) return;
+    renderFeed();
+    if (unconfirmed) await loadChat();
+    return;
+  }
+  if (pendingSends.includes(send)) send.state = "sent";
+  if (stale(gen)) return;
+  renderFeed();
+  await loadChat();
 }
 /** The chat's newest turn when it failed or was interrupted: the provider error and Retry (coordinator-stability-failures.md S4-S6). */
 function failureHtml() {
@@ -464,7 +551,7 @@ function memoryRowHtml(item, result, args, status) {
       : write && !write.current
         ? `<span class="muted small">Changed since</span>`
         : `<button type="button" class="link-btn" data-memory-undo="${esc(path)}" data-revision="${esc(revision)}">Undo</button>`;
-    return `<div class="memory-row" data-tool="${esc(item.name)}" data-status="${status}"><span class="mem-icon" aria-hidden="true">◆</span><span class="mem-text">${status === "error" ? "Could not remember" : "Remembered"}: <button type="button" class="link-btn" data-memory="${esc(path)}">${esc(title)}</button></span>${status === "ok" && revision ? action : ""}<button type="button" class="link-btn" data-memory="${esc(path)}" data-edit="1">Edit</button></div>`;
+    return `<div class="memory-row" data-tool="${esc(item.name)}" data-status="${status}"><span class="mem-icon" aria-hidden="true">◆</span><span class="mem-text">${status === "error" ? "Could not remember" : "Remembered"}: <button type="button" class="link-btn" data-memory="${esc(path)}">${esc(title)}</button></span>${status === "ok" && revision && memoryReady() ? action : ""}<button type="button" class="link-btn" data-memory="${esc(path)}" data-edit="1">Edit</button></div>`;
   }
   const kind = path ? memoryKindLabel(path) : "";
   return `<div class="memory-row used" data-tool="${esc(item.name)}" data-status="${status}"><span class="mem-icon" aria-hidden="true">◇</span><span class="mem-text">Used memory: ${kind ? `${esc(kind)} · ` : ""}${path ? `<button type="button" class="link-btn" data-memory="${esc(path)}">${esc(title)}</button>` : esc(item.name === "projects_knowledge_list" ? "index" : title)}</span></div>`;
@@ -619,14 +706,21 @@ form.addEventListener("submit", async (event) => {
     }
     return;
   }
-  try {
-    await call("message", { id: state.projectId, text, requestId: uuid(), ...chatArgs() });
-    if (stale(gen)) return;
-    await loadChat();
-  } catch (error) {
-    if (!stale(gen) && !input.value) input.value = text;
-    fail(error);
-  }
+  const ids = (state.view?.messages ?? []).flatMap((item) => (typeof item.entryId === "number" ? [item.entryId] : []));
+  const send = {
+    id: uuid(),
+    projectId: state.projectId,
+    chatId: state.chatId,
+    text,
+    sentAt: Date.now(),
+    baseline: state.view ? Math.max(-1, ...ids) : null,
+    state: "sending",
+    error: "",
+    restored: false,
+  };
+  pendingSends.push(send);
+  renderFeed();
+  await deliver(send, gen);
 });
 export async function stopTurn() {
   if (!state.live?.running) return;
@@ -751,6 +845,23 @@ feed.addEventListener("click", async (event) => {
     return;
   }
   if (await transcriptClick(event, feed, renderFeed, follow)) return;
+  const pendingRetry = event.target.closest("[data-pending-retry]"),
+    pendingDismiss = event.target.closest("[data-pending-dismiss]");
+  if (pendingRetry || pendingDismiss) {
+    const send = pendingSends.find(
+      (item) => item.id === (pendingRetry ?? pendingDismiss).dataset[pendingRetry ? "pendingRetry" : "pendingDismiss"],
+    );
+    if (!send) return;
+    if (pendingDismiss) pendingSends.splice(pendingSends.indexOf(send), 1);
+    follow.follow();
+    if (pendingRetry) {
+      send.state = "sending";
+      send.restored = false;
+    }
+    renderFeed();
+    if (pendingRetry) await deliver(send, state.generation);
+    return;
+  }
   const retry = event.target.closest("[data-retry-job]");
   if (retry) {
     const job = (state.view?.jobs ?? []).find((item) => item.id === retry.dataset.retryJob);

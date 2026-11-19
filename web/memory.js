@@ -2,7 +2,7 @@
 // toggle and broken links listed. Entries open and save through knowledge-read/-write; chat rows undo a write with `memory-undo`.
 import { call } from "./api.js";
 import { ago, esc, markdown } from "./format.js";
-import { fail, stale, state, toast } from "./state.js";
+import { emit, fail, on, stale, state, toast } from "./state.js";
 
 const KINDS = [
   { id: "preference", label: "Preferences", one: "Preference" },
@@ -30,7 +30,6 @@ export function memoryTitle(path) {
 }
 
 let cache = { projectId: null, entries: [], source: "", brokenLinks: [] };
-let recentWrites = new Map();
 let query = "";
 
 let archive = false;
@@ -44,20 +43,52 @@ export async function loadMemory() {
 }
 export const memoryEntry = (path) => (cache.projectId === state.projectId ? cache.entries.find((item) => item.path === path) : null);
 
-/** Host-owned Undo state, including writes made and undone before this page loaded. */
-export async function loadRecentMemory() {
-  const gen = state.generation,
-    projectId = state.projectId;
-  if (!projectId) return;
-  const recent = await call("memory-recent", { projectId });
-  if (stale(gen) || projectId !== state.projectId) return;
-  recentWrites = new Map(recent.writes.map((write) => [`${write.path}@${write.revision}`, write]));
+// Host-owned Undo state, including writes made and undone before this page loaded. It belongs to a project, not to a chat, and the host
+// computes it with a knowledge scan, so it loads on project selection and knowledge changes, never with a transcript read.
+let recent = { projectId: null, writes: new Map(), ready: false };
+let recentLoad = null;
+
+/** Reads `memory-recent` for the selected project. A call while one is in flight joins it, or with `again` runs once more after it. */
+export function refreshRecentMemory({ again = false } = {}) {
+  const projectId = state.projectId;
+  if (!projectId) return null;
+  if (recentLoad?.projectId === projectId) {
+    if (again) recentLoad.again = true;
+    return recentLoad.promise;
+  }
+  const run = { projectId, again: false };
+  recentLoad = run;
+  run.promise = (async () => {
+    try {
+      do {
+        run.again = false;
+        const read = await call("memory-recent", { projectId });
+        // Another project was selected meanwhile, or a newer load took over: this answer is not for the page any more.
+        if (recentLoad !== run || projectId !== state.projectId) return;
+        recent = { projectId, writes: new Map(read.writes.map((write) => [`${write.path}@${write.revision}`, write])), ready: true };
+        emit("memory-recent", projectId);
+      } while (run.again);
+    } catch (error) {
+      fail(error);
+    } finally {
+      if (recentLoad === run) recentLoad = null;
+    }
+  })();
+  return run.promise;
 }
-export const memoryWrite = (path, revision) => recentWrites.get(`${path}@${revision}`);
+on("select", ({ projectId }) => {
+  if (recent.projectId !== projectId) recent = { projectId, writes: new Map(), ready: false };
+  else if (recent.ready || recentLoad?.projectId === projectId) return;
+  void refreshRecentMemory();
+});
+/** The write's Undo state; null when unknown. `ready` is false until the project's first read arrived. */
+export const memoryWrite = (path, revision) =>
+  recent.projectId === state.projectId ? recent.writes.get(`${path}@${revision}`) : undefined;
+export const memoryReady = () => recent.projectId === state.projectId && recent.ready;
 export function markMemoryUndone(path, revision) {
   const key = `${path}@${revision}`,
-    write = recentWrites.get(key);
-  recentWrites.set(key, { ...write, path, revision, undone: true, current: false });
+    write = recent.writes.get(key);
+  recent.writes.set(key, { ...write, path, revision, undone: true, current: false });
 }
 
 /** The Memory list in the center. */
