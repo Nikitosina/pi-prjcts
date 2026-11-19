@@ -254,6 +254,10 @@ export const Job = Type.Object(
     chatId: Type.Optional(Id),
     /** Owner uploads attached to the message. */
     attachments: Type.Optional(Type.Array(Id, { minItems: 1, maxItems: 10, uniqueItems: true })),
+    /** Set once the runtime holds the message's submission; a ledger record without it was recorded but not necessarily admitted. */
+    admitted: Type.Optional(Type.Literal(true)),
+    /** Transcript entry the message became, once the runtime placed it. */
+    entry: Type.Optional(Type.Integer({ minimum: 0 })),
     /** When the host first saw the job settle (done or failed); drives the chat tab's "finished" dot. */
     settledAt: Type.Optional(Type.Number()),
   },

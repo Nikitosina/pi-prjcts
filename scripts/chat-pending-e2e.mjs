@@ -1,6 +1,9 @@
 // Browser E2E: the owner's message shows as pending the moment it is sent and reconciles to one canonical message; Undo state
 // (`memory-recent`) loads on project selection and knowledge changes only. Failure cases: chat-pending-failures.md.
 // The page's fetch is wrapped to hold, delay or fail single actions; the host and the fake model are real. Artifact: artifacts/chat-pending-<time>/.
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { createKit, call, say } from "./lib/e2e-kit.mjs";
 
 const kit = await createKit("chat-pending", {
@@ -363,6 +366,57 @@ await kit.run(async () => {
     "P9 one canonical message after the retry",
     (await owners("MARK-P7")).length === 1 && (await hostCount(A, undefined, "MARK-P7")) === 1,
   );
+
+  // P10: a job the host recorded but never admitted is not delivery, and no other message is taken for it; Retry admits it once.
+  await reset();
+  await ev(`__rule("message", { fail: "network" })`);
+  await typeAndSend("stranded MARK-STRAND");
+  await page.waitFor(
+    `[...document.querySelectorAll('#feed .msg.owner')].some((n) => n.dataset.delivery === "unconfirmed")`,
+    "unconfirmed bubble for P10",
+  );
+  const stranded = (await calls("message"))[0];
+  const inbox = join(kit.home, A, "inbox");
+  mkdirSync(inbox, { recursive: true });
+  writeFileSync(
+    join(inbox, `${stranded.requestId}.json`),
+    JSON.stringify({ id: stranded.requestId, text: "stranded MARK-STRAND", at: new Date().toISOString(), state: "queued", error: null }),
+  );
+  await rpc({ action: "message", id: A, text: "stranded MARK-STRAND", requestId: randomUUID() });
+  await rpc({ action: "message", id: A, text: "stranded MARK-STRAND\n\nextra block", requestId: randomUUID() });
+  await page.waitFor(`document.querySelector('#feed').innerText.includes("ACK stranded MARK-STRAND extra block")`, "other sends answered");
+  await select(chatButton(A, other));
+  await page.waitFor(
+    `document.querySelector(${JSON.stringify(chatButton(A, other))}).getAttribute("aria-current") === "true"`,
+    "other selected for P10",
+  );
+  await select(chatButton(A, "main"));
+  await page.waitFor(`document.querySelector('#feed').innerText.includes("ACK stranded MARK-STRAND extra block")`, "main again for P10");
+  await kit.delay(500);
+  const unadmitted = await owners("MARK-STRAND");
+  check(
+    "P10 a recorded, never admitted job stays unconfirmed beside two canonical messages",
+    unadmitted.length === 3 && unadmitted.filter((item) => item.delivery === "unconfirmed").length === 1,
+    unadmitted,
+  );
+  check("P10 it never says Sent", !unadmitted.some((item) => /\bSent\b/.test(item.text)), unadmitted);
+  check("P10 nothing was sent on its own", (await countCalls("message")) === 1);
+  await page.shot("03-unadmitted", { force: true });
+  await ev(`document.querySelector('#feed [data-pending-retry]').click()`);
+  await page.waitFor(
+    `[...document.querySelectorAll('#feed .msg.owner')].filter((n) => n.innerText.includes("MARK-STRAND") && !n.classList.contains("pending")).length === 3`,
+    "three canonical messages after Retry",
+  );
+  await kit.delay(400);
+  const admittedNow = await owners("MARK-STRAND");
+  check(
+    "P10 Retry delivers once: three canonical messages, no pending",
+    admittedNow.length === 3 && admittedNow.every((item) => !item.pending),
+    admittedNow,
+  );
+  const retriedStranded = await calls("message");
+  check("P10 Retry reused the request id", retriedStranded.length === 2 && retriedStranded[0].requestId === retriedStranded[1].requestId);
+  check("P10 the host stored three", (await hostCount(A, undefined, "MARK-STRAND")) === 3);
 
   // P8: slash commands do not create a pending bubble.
   await reset();

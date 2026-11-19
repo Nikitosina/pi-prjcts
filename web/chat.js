@@ -22,7 +22,6 @@ let live = null,
   reads = 0, // transcript reads started so far; a pending send's refusal is only proven by a read that starts after it
   held = null; // live text and thinking of a step the host just committed, shown until a transcript read that includes it renders
 const pendingSends = []; // owner messages sent from this page that the transcript does not show yet, oldest first
-const claimedEntries = new Set(); // `<project>:<chat>:<entryId>` of transcript messages a pending send already matched
 const expanded = new Set(); // tool callIds and group keys the owner opened
 const revealed = new Set(); // long owner messages opened during this chat visit, keyed by transcript scope; they stay open until the owner navigates away
 const CHAT_SCOPE = "msg:"; // the coordinator chat's keys have no scope prefix
@@ -201,37 +200,23 @@ export function renderFeed() {
   });
 }
 const inCurrentChat = (send) => send.projectId === state.projectId && send.chatId === state.chatId;
-const entryTime = (at) => (typeof at === "number" ? at : Date.parse(at));
-/** Settles the pending sends of the open chat against transcript read number `read`. The host records a message's job before it admits it,
- * so only a recorded job can be matched to a transcript message, and only a read after a refusal without that job proves the refusal. */
+/** Settles the pending sends of the open chat against transcript read number `read`. Only the host's own records count: a job it admitted is
+ * delivered, and the transcript entry the runtime linked to that job is the message. A record the host never admitted, or a text that merely
+ * looks alike, proves nothing, and only a read after a refusal without any record proves the refusal. */
 function reconcilePending(view, read) {
-  const ledger = view.jobs ?? [],
-    scope = `${state.projectId}:${state.chatId}:`;
+  const ledger = view.jobs ?? [];
   for (const send of pendingSends.filter(inCurrentChat)) {
     const job = ledger.find((item) => item.id === send.id);
     if (!job) {
       if (send.state === "unconfirmed" && send.answered && read > send.failedRead) failSend(send);
       continue;
     }
-    if (send.state === "sending") send.state = "sent";
-    const owner = (view.messages ?? []).filter(
-      (item) =>
-        item.kind === "message" &&
-        item.role === "user" &&
-        item.origin === "owner" &&
-        !claimedEntries.has(scope + item.entryId) &&
-        (send.baseline === null ? entryTime(item.at) >= send.sentAt : item.entryId > send.baseline),
-    );
-    // The host appends reference blocks after what the owner typed, separated by a blank line.
-    const match = owner.find((item) => item.text?.trim() === send.text) ?? owner.find((item) => item.text?.startsWith(`${send.text}\n\n`));
+    if (!job.admitted) continue;
+    send.state = "sent";
+    const placed = job.entry !== undefined && (view.messages ?? []).some((item) => item.kind === "message" && item.entryId === job.entry);
     // A settled job whose message never reached the transcript leaves its outcome in the turn card; the bubble must not outlive it.
-    if (match || ["done", "failed", "interrupted"].includes(job.state)) {
-      if (match) claimedEntries.add(scope + match.entryId);
-      pendingSends.splice(pendingSends.indexOf(send), 1);
-    }
+    if (placed || ["done", "failed", "interrupted"].includes(job.state)) pendingSends.splice(pendingSends.indexOf(send), 1);
   }
-  if (!pendingSends.some((send) => inCurrentChat(send) && send.state !== "failed"))
-    for (const key of claimedEntries) if (key.startsWith(scope)) claimedEntries.delete(key);
 }
 /** A refusal the host reported and recorded no job for: the message was not sent, and its text goes back to an empty composer of the same chat. */
 function failSend(send) {
@@ -262,8 +247,9 @@ function pendingHtml(send) {
 async function deliver(send) {
   send.state = "sending";
   send.error = "";
+  let job;
   try {
-    await call("message", {
+    job = await call("message", {
       id: send.projectId,
       text: send.text,
       requestId: send.id,
@@ -284,7 +270,16 @@ async function deliver(send) {
     }
     return;
   }
-  if (pendingSends.includes(send) && send.state === "sending") send.state = "sent";
+  // Only an ack that says the host admitted the message is delivery; any other answer waits for the ledger.
+  if (pendingSends.includes(send) && send.state === "sending") {
+    if (job?.admitted) send.state = "sent";
+    else {
+      send.state = "unconfirmed";
+      send.answered = false;
+      send.error = "The host did not confirm it took the message.";
+      send.failedRead = reads;
+    }
+  }
   if (!inCurrentChat(send)) return;
   renderFeed();
   await loadChat();
@@ -738,14 +733,11 @@ form.addEventListener("submit", async (event) => {
   // Sending the restored text again supersedes the bubble it came from.
   for (const old of pendingSends.filter((item) => item.restored && item.state === "failed" && item.text === text && inCurrentChat(item)))
     pendingSends.splice(pendingSends.indexOf(old), 1);
-  const ids = (state.view?.messages ?? []).flatMap((item) => (typeof item.entryId === "number" ? [item.entryId] : []));
   const send = {
     id: uuid(),
     projectId: state.projectId,
     chatId: state.chatId,
     text,
-    sentAt: Date.now(),
-    baseline: state.view ? Math.max(-1, ...ids) : null,
     state: "sending",
     error: "",
     restored: false,
@@ -902,7 +894,7 @@ feed.addEventListener("click", async (event) => {
     if (!job || retry.disabled) return;
     retry.disabled = true; // a second click must not resend
     try {
-      await call("message", { id: state.projectId, text: job.text, requestId: uuid(), ...chatArgs() });
+      const job = await call("message", { id: state.projectId, text: job.text, requestId: uuid(), ...chatArgs() });
       follow.follow();
     } catch (error) {
       retry.disabled = false;

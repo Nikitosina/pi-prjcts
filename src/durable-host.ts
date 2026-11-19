@@ -62,7 +62,7 @@ function settleLedger(projectId: string, ledger: JobLedger, submissions: Durable
   for (const job of ledger) {
     const submission = submissions.find((item) => item.requestId === job.id);
     if (!submission) continue;
-    const before = `${job.state}\0${job.error}`,
+    const before = `${job.state}\0${job.error}\0${job.admitted}\0${job.entry}`,
       wasSettled = job.state === "done" || job.state === "failed";
     switch (submission.status) {
       case "queued":
@@ -88,7 +88,9 @@ function settleLedger(projectId: string, ledger: JobLedger, submissions: Durable
     }
     // Stamped on the observed transition only, so turns that finished before this field existed do not light up.
     if ((job.state === "done" || job.state === "failed") && !wasSettled) job.settledAt = Date.now();
-    if (`${job.state}\0${job.error}` !== before || alwaysSave) saveJob(projectId, job);
+    job.admitted = true;
+    if (submission.entry !== null) job.entry = submission.entry;
+    if (`${job.state}\0${job.error}\0${job.admitted}\0${job.entry}` !== before || alwaysSave) saveJob(projectId, job);
   }
 }
 

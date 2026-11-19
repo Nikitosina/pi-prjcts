@@ -1670,6 +1670,12 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           ...(input.attachments ? { attachments: input.attachments } : {}),
         } satisfies import("./state.ts").Job;
       };
+      // The runtime may have settled the job while it was being admitted, so the saved record is the base.
+      const markAdmitted = (job: import("./state.ts").Job) => {
+        const held = { ...(jobs(input.id).find((item) => item.id === job.id) ?? job), admitted: true as const };
+        saveJob(input.id, held);
+        return held;
+      };
       return withDurableOwner({
         id: input.id,
         validate: (project) => {
@@ -1677,10 +1683,11 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           if (project.archived) throw new Error("Project is archived; admission is denied");
         },
         operation: async (owner) => {
-          // A repeated request ID (Telegram update replay) returns the job it already admitted.
+          // A repeated request ID (Telegram update replay) returns the job the runtime already holds; a record the runtime never admitted is admitted now.
           const prior = input.requestId ? jobs(input.id).find((job) => job.id === input.requestId) : undefined;
-          if (prior) return prior;
-          const job = prepareJob();
+          if (prior?.admitted) return prior;
+          if (prior && (await owner.ledgerSubmissions(input.chatId ?? "main", [prior.id])).length) return markAdmitted(prior);
+          const job = prior ?? prepareJob();
           // The job keeps what the owner typed; the coordinator receives the expanded skill.
           // `/skill:<name>` anywhere: skill blocks precede the owner's words. `@issue:/@doc:/@upload:/@file:` and `#123` / `PR #123`: compact untrusted blocks follow them.
           const text =
@@ -1696,14 +1703,14 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           const chat = (await owner.chats()).find((item) => item.id === (input.chatId ?? "main"));
           if (!chat) throw new Error("Unknown chat for this project");
           if (chat.archived) throw new Error("Chat is archived; restore it before sending");
-          saveJob(input.id, job);
+          if (!prior) saveJob(input.id, job);
           await owner.admit(attachmentContent(ownedProjectDir(input.id), text, job.attachments, owner.acceptsImages), {
             requestId: job.id,
             origin: input.origin,
             chatId: input.chatId,
             title: job.text,
           });
-          return job;
+          return markAdmitted(job);
         },
       });
     }

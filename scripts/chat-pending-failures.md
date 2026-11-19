@@ -28,3 +28,6 @@ Written before the code. Each case names how the page can go wrong; `scripts/cha
 - P7b The host recorded the job and then reported an error: the bubble says Not sent and the restored draft invites a second send.
 - P4c A recorded short text takes a longer message that contains it as its own canonical message.
 - P6c A restored draft that the owner edited keeps the bubble's claim that it is in the composer, hiding Retry.
+- P10 A job the host recorded but never admitted is shown as Sent, or Retry returns it without admitting, so the message never arrives.
+- P10b A pending message is matched by its text (equal, or followed by a blank line and appended blocks) to a different transcript message, so one message swallows another.
+- P10c Without a transcript entry linked to the pending message's own request, a bubble guesses; it must stay unconfirmed instead.
