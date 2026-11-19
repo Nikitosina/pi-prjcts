@@ -1,6 +1,12 @@
 // Unit: the per-project plugin gate (scripts/plugin-enable-failures.md 1, 3, 5). No host, no model.
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createPluginGate } from "../src/plugin-gate.ts";
+
+process.env.PI_PROJECTS_HOME = mkdtempSync(join(tmpdir(), "plugin-gate-unit-"));
+process.env.PI_PROJECTS_PLUGINS = new URL("./fixtures/fake-vcs-plugin", import.meta.url).pathname;
 
 const off = new Set();
 const gate = createPluginGate((project, plugin) => off.has(`${project}:${plugin}`));
@@ -82,6 +88,21 @@ void before;
   );
   assert.equal(ran, false, "25 the work did not run");
   assert.equal(plugins.gate.isOff("00000000-0000-4000-8000-000000000000", "simulator"), true, "25 unreadable state counts as off");
+}
+
+// 28/29: a project that turned a VCS plugin off gets none of its worker rules, and the plugin's grant rebind does not run for it.
+{
+  const { plugins } = await import("../src/plugins.ts");
+  await plugins.load();
+  const on = { id: "p", disabledPlugins: [] },
+    off = { id: "p", disabledPlugins: ["fake"] };
+  assert.ok(
+    plugins.workerRules(on).some((rule) => /Fake VCS rule/.test(rule)),
+    "28 the enabled project gets the rule",
+  );
+  assert.deepEqual(plugins.workerRules(off), [], "28 the disabled project gets none");
+  const fake = plugins.workspaceProviders().find((item) => item.id === "fake");
+  assert.equal(fake?.rebind?.(off), off, "29 rebind leaves a project that turned the plugin off untouched");
 }
 
 console.log("plugin-gate-unit passed");

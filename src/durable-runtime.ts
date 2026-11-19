@@ -3899,9 +3899,9 @@ const rolePromptSection = (project: Project, role: ProfileId) => {
     behavior.text,
   );
 };
-const workRules = () =>
+const workRules = (project: Project) =>
   `${plugins
-    .workerRules()
+    .workerRules(project)
     .map((rule) => `${rule} `)
     .join("")}`;
 const AGENT_NAMES = { worker: "worker", scout: "scout", reviewer: "reviewer" } as const;
@@ -3923,7 +3923,7 @@ function workerPromptSections(
       true,
       hostContract(project, `You are a ${helper ? "task helper" : AGENT_NAMES[role]} for ${project.name}.`, [
         knowledgeAccess === "maintain" ? "You may write revision-checked knowledge topics with projects_knowledge_write." : "",
-        workRules().trim(),
+        workRules(project).trim(),
         verification,
       ]),
     ),

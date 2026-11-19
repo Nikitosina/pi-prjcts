@@ -72,6 +72,7 @@ on("select", () => dialog.open && paint());
 dialog.addEventListener("cancel", (event) => event.preventDefault()); // Esc goes through the hotkey registry (leave-focus)
 dialog.addEventListener("close", () => leaveSection());
 function leaveSection() {
+  pluginsRefresh = null;
   unmount?.();
   unmount = null;
 }
@@ -535,16 +536,28 @@ async function storage(body, alive) {
 
 // ---------------------------------------------------------------------------------------------------------------- Plugins
 
+let pluginsRefresh = null;
+const pluginsSignature = (status) =>
+  JSON.stringify(status.plugins.map((plugin) => [plugin.name, plugin.state, plugin.enabled, plugin.lock]));
+on("plugins-changed", () => void pluginsRefresh?.().catch(() => {}));
+
 /** Every plugin the host loaded, and the panels plugins provide for this project (web/plugins.js). */
 async function pluginsSection(body, alive) {
+  let shown = "";
   const draw = async () => {
     const status = await call("plugins", state.projectId ? { id: state.projectId } : {});
     if (!alive()) return;
+    shown = pluginsSignature(status);
     unmount?.();
     body.innerHTML = `${line("Plugins this host loaded at its start. Turn one off to stop it in this project only; its saved data stays.", "A plugin with active work, or one this project's checkout needs, cannot be turned off. A panel is the plugin's own code running in this page. A changed plugin shows here after a host restart and a page reload.")}${pluginCards(status) || `<p class="muted">No plugins are loaded. List one in plugins.json and restart the host.</p>`}`;
     unmount = mountPanels(body, state.projectId, status.web);
   };
   await draw();
+  // A switch changed elsewhere (another tab, the Host agent) redraws the open list; an unchanged status leaves the mounted panels alone.
+  pluginsRefresh = async () => {
+    const status = await call("plugins", state.projectId ? { id: state.projectId } : {});
+    if (alive() && pluginsSignature(status) !== shown) await draw();
+  };
   body.addEventListener("change", async (event) => {
     const toggle = event.target.closest("[data-plugin-toggle]");
     if (!toggle) return;

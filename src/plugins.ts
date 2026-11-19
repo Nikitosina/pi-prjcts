@@ -222,6 +222,7 @@ export const plugins = {
           setupCards: provider.setupCards
             ? (project) => (disabledIn(project, item.plugin) ? [] : provider.setupCards!(project))
             : undefined,
+          rebind: provider.rebind ? (project) => (disabledIn(project, item.plugin) ? project : provider.rebind!(project)) : undefined,
         }),
       ];
     }),
@@ -369,7 +370,10 @@ export const plugins = {
   },
   privateDirs: (): string[] => each((caps) => caps.vcs).flatMap((item) => [...(item.privateDirs ?? [])]),
   vcsExecutables: (): string[] => each((caps) => caps.vcs).flatMap((item) => [...(item.executables ?? [])]),
-  workerRules: (): string[] => each((caps) => caps.vcs).flatMap((item) => (item.workerRule ? [item.workerRule] : [])),
+  workerRules: (project: Pick<Project, "disabledPlugins">): string[] =>
+    [...builtins(), ...loaded].flatMap((item) =>
+      item.capabilities.vcs?.workerRule && !disabledIn(project, item.plugin) ? [item.capabilities.vcs.workerRule] : [],
+    ),
   status: (): PluginStatus[] => statuses.map((item) => ({ ...item })),
   /** Display labels of providers with PR cards or follow events (for event titles). */
   labels: (): Record<string, string> => ({

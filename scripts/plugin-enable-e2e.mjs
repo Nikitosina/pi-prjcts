@@ -187,6 +187,21 @@ await kit.run(async () => {
   await set(alpha, "gated", true);
   check("15 the enable released the pause once", !(await counters()).paused.includes(alpha), await counters());
   check("10 re-enabled", (await call(alpha, "ping")).pong === alpha && (await route(alpha)) === `200:data:${alpha}`);
+  // 30: a poll that another connected provider completes keeps the saved follow state of a provider the project turned off.
+  await rpc({ action: "plugin", plugin: "fake", method: "connect", id: alpha, params: { confirm: alpha } });
+  const followRepos = async () => (await rpc({ action: "follow-poll", id: alpha })).follow.repos.map((item) => item.repositoryId);
+  check(
+    "30 both providers are followed while the plugin is on",
+    (await followRepos()).includes(`gated/${alpha}`) && (await followRepos()).includes("fake-repo"),
+    await followRepos(),
+  );
+  await set(alpha, "gated", false);
+  check(
+    "30 a poll completed by the other provider keeps the disabled provider's saved state",
+    (await followRepos()).includes(`gated/${alpha}`),
+    await followRepos(),
+  );
+  await set(alpha, "gated", true);
   // The Settings → Plugins switches: a locked plugin is on and disabled with its reason; a busy one refuses with a message.
   const js = JSON.stringify;
   const toggle = (name) => `#settings [data-plugin-toggle="${name}"]`;
@@ -248,6 +263,11 @@ await kit.run(async () => {
   await click(toggle("gated"));
   await page.waitFor(`document.querySelector(${js(toggle("gated"))}).checked`, "switch on");
   check("10 the switch turns it back on", (await entry(alpha, "gated")).enabled === true);
+  // 31: a switch changed elsewhere (another tab) shows in the open Plugins list without reopening it.
+  await set(alpha, "gated", false);
+  await page.waitFor(`!document.querySelector(${js(toggle("gated"))})?.checked`, "open list shows the switch off");
+  await set(alpha, "gated", true);
+  await page.waitFor(`document.querySelector(${js(toggle("gated"))})?.checked`, "open list shows the switch on");
   // 14b: a disable whose project save fails changes nothing and does not leave the lifecycle pause held (the plugin is still on).
   const projectFolder = join(kit.home, alpha);
   chmodSync(projectFolder, 0o555);

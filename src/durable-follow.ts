@@ -311,16 +311,21 @@ export function followRuntime(
       : `auto-fix ${attempt.mode === "follow-up" ? "sent to the thread that opened it" : "dispatched to a new worker"} (thread ${attempt.threadId}, attempt ${number} of ${cap})`;
   }
 
-  /** Records of a provider whose plugin is not loaded (or untagged older ones that this poll did not claim) stay as they are. */
   const loadedProviders = () => new Set(plugins.followProviders().map((item) => item.id));
-  const foreignRepos = (existing: FollowState["repos"], claimed: FollowState["repos"]): FollowState["repos"] =>
-    Object.fromEntries(
+  /** Providers the project follows through now: a plugin the project turned off follows nothing but keeps its saved records. */
+  const followedProviders = () =>
+    new Set(plugins.followProviders().flatMap((item) => (item.repository(loadProject(projectId)) ? [item.id] : [])));
+  /** Records this poll did not claim stay when their provider is not followed now (plugin not loaded or off for the project) and for untagged older ones. */
+  const foreignRepos = (existing: FollowState["repos"], claimed: FollowState["repos"]): FollowState["repos"] => {
+    const followed = followedProviders();
+    return Object.fromEntries(
       Object.entries(existing).filter(
         ([id, repo]) =>
           !(id in claimed) &&
-          (repo.provider === undefined ? !/^[^/]+\/[^/]+$/.test(id) : repo.provider !== "github" && !loadedProviders().has(repo.provider)),
+          (repo.provider === undefined ? !/^[^/]+\/[^/]+$/.test(id) : repo.provider !== "github" && !followed.has(repo.provider)),
       ),
     );
+  };
   /** PR number -> chat conversation of the Job that opened it (a verified publication receipt, or the Job's own PR link). */
   async function prOwners(
     repos: Array<{ numericId: number }>,
