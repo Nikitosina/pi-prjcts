@@ -8,7 +8,7 @@ import { setUi } from "./ui.js";
 import { STATUS_ITEMS } from "./statusline.js";
 import { promptSection } from "./prompts.js";
 import { connectCursor, limitShown, loadLimits, refreshLimits, setLimitShown } from "./limits.js";
-import { mountPanels, pluginCards } from "./plugins.js";
+import { catalogBlock, mountPanels, pluginCards, wireCatalog } from "./plugins.js";
 
 const dialog = document.querySelector("#settings");
 const PROFILES = [
@@ -554,9 +554,11 @@ async function pluginsSection(body, alive) {
     if (!alive() || ask !== readId) return;
     const signature = pluginsSignature(status);
     if (!force && signature === shown) return;
+    const catalog = await call("plugin-catalog");
+    if (!alive() || ask !== readId) return;
     shown = signature;
     unmount?.();
-    body.innerHTML = `${line("Plugins this host loaded at its start. Turn one off to stop it in this project only; its saved data stays.", "A plugin with active work, or one this project's checkout needs, cannot be turned off. A panel is the plugin's own code running in this page. A changed plugin shows here after a host restart and a page reload.")}${pluginCards(status) || `<p class="muted">No plugins are loaded. List one in plugins.json and restart the host.</p>`}`;
+    body.innerHTML = `${line("Plugins this host loaded at its start. Turn one off to stop it in this project only; its saved data stays.", "A plugin with active work, or one this project's checkout needs, cannot be turned off. A panel is the plugin's own code running in this page. A changed plugin shows here after a host restart and a page reload.")}${catalogBlock(catalog.entries)}${pluginCards(status) || `<p class="muted">No plugins are loaded. List one in plugins.json and restart the host.</p>`}`;
     unmount = mountPanels(body, state.projectId, status.web);
   };
   pluginsRefresh = draw;
@@ -571,6 +573,7 @@ async function pluginsSection(body, alive) {
     }
     if (alive()) await draw(true);
   });
+  wireCatalog(body, [], () => showSection("deploy"));
   await draw(true);
 }
 

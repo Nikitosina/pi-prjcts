@@ -1,0 +1,133 @@
+// E2E: the bundled plugin catalog in Settings → Plugins (scripts/plugin-catalog-failures.md, numbers in check labels). Fake model, private HOME
+// with an external plugin already configured, headless Chrome on the inbox at `/`, desktop and mobile, and a real host restart.
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { createKit } from "./lib/e2e-kit.mjs";
+
+const kit = await createKit("plugin-catalog");
+const external = join(process.cwd(), "scripts/fixtures/second-plugin");
+const configFile = join(kit.home, "plugins.json");
+mkdirSync(kit.home, { recursive: true });
+writeFileSync(configFile, JSON.stringify({ plugins: [external], keep: "me" }, null, 2) + "\n");
+const tasksDir = join(process.cwd(), "plugins/tasks");
+
+await kit.run(async () => {
+  const { check, rpc } = kit;
+  kit.initRepo();
+  const alpha = await kit.createProject("Alpha");
+  const page = await kit.openPage(await kit.webUrl(alpha));
+  await page.waitFor(`document.body.dataset.ready === "1"`, "inbox ready");
+  const js = (value) => JSON.stringify(value);
+  const shot = (label) => page.shot(label, { force: true });
+  const click = async (selector) => {
+    const point = await page.evaluate(
+      `(() => { const node = document.querySelector(${js(selector)}); if (!node) return null; node.scrollIntoView({ block: "center" }); const box = node.getBoundingClientRect(); return { x: box.x + box.width / 2, y: box.y + box.height / 2 }; })()`,
+    );
+    if (!point) throw Error(`nothing to click: ${selector}`);
+    for (const type of ["mousePressed", "mouseReleased"])
+      await page.cdp("Input.dispatchMouseEvent", { type, x: point.x, y: point.y, button: "left", clickCount: 1 });
+  };
+  const row = (id) => `#settings .catalog-row[data-catalog="${id}"]`;
+  const rowState = (id) => page.evaluate(`document.querySelector(${js(row(id))})?.dataset.state ?? null`);
+  const config = () => JSON.parse(readFileSync(configFile, "utf8"));
+  const openPlugins = async () => {
+    if (!(await page.evaluate(`document.querySelector("#settings").open`))) await click(`[data-cmd="settings"]`);
+    await page.waitFor(`document.querySelector("#settings").open`, "settings open");
+    await click(`#settings nav [data-section="plugins"]`);
+    await page.waitFor(`document.querySelector(${js(row("tasks"))})`, "catalog drawn");
+  };
+
+  // 2: before anything is loaded, both bundled plugins are listed with their description.
+  const first = await rpc({ action: "plugin-catalog" });
+  check(
+    "2 both listed as available",
+    first.entries.map((item) => `${item.id}:${item.state}`).join() === "tasks:available,simulator:available",
+    first,
+  );
+  check("14 the private host's config is the temp one", kit.home.startsWith(kit.root) && config().keep === "me");
+  await openPlugins();
+  check(
+    "2 the UI lists tasks and simulator as available",
+    (await rowState("tasks")) === "available" && (await rowState("simulator")) === "available",
+  );
+  check(
+    "17 the external plugin's card is still below the catalog",
+    await page.evaluate(
+      `!!document.querySelector('#settings .plugin-card[data-plugin="second"]') && document.querySelector("#settings .plugin-catalog").compareDocumentPosition(document.querySelector('#settings .plugin-card')) & Node.DOCUMENT_POSITION_FOLLOWING`,
+    ),
+  );
+  await shot("01-catalog-desktop-available");
+
+  // 16/7: one click activates; the button is gone after, and repeated requests change nothing.
+  await click(`${row("tasks")} [data-catalog-activate]`);
+  await page.waitFor(`document.querySelector(${js(row("tasks"))})?.dataset.state === "configured"`, "tasks configured");
+  check("16 no activate button after", await page.evaluate(`!document.querySelector(${js(`${row("tasks")} [data-catalog-activate]`)})`));
+  check(
+    "13 the card names the existing deploy command and says a restart is needed",
+    await page.evaluate(
+      `/restart/.test(document.querySelector(${js(row("tasks"))}).innerText) && /npm run projects -- deploy/.test(document.querySelector(${js(row("tasks"))}).innerText) && !!document.querySelector(${js(`${row("tasks")} [data-catalog-deploy]`)})`,
+    ),
+  );
+  const afterClick = readFileSync(configFile, "utf8");
+  check(
+    "6 the external entry, its order and the extra key are kept",
+    config().plugins[0] === external && config().plugins[1] === tasksDir && config().keep === "me" && config().plugins.length === 2,
+    config(),
+  );
+  await Promise.all([rpc({ action: "plugin-activate", plugin: "tasks" }), rpc({ action: "plugin-activate", plugin: "tasks" })]);
+  check("7 duplicate requests leave the file byte for byte", readFileSync(configFile, "utf8") === afterClick);
+  const running = await rpc({ action: "plugins" });
+  check(
+    "12/13 the running host did not load it",
+    !running.plugins.some((item) => item.name === "tasks") &&
+      running.plugins.some((item) => item.name === "second" && item.state === "loaded"),
+    running.plugins,
+  );
+  check("12 the catalog says configured", (await rpc({ action: "plugin-catalog" })).entries[0].state === "configured");
+  await shot("02-catalog-desktop-configured");
+
+  // 3: ids outside the catalog are refused by the schema.
+  for (const plugin of ["../tasks", tasksDir, "github", "https://example.invalid/x"])
+    check(`3 refused: ${plugin}`, (await kit.rejects({ action: "plugin-activate", plugin })) !== null);
+  check("3 the file did not change", readFileSync(configFile, "utf8") === afterClick);
+
+  // 13: the Deploy settings button opens the existing Deploy section.
+  await click(`${row("tasks")} [data-catalog-deploy]`);
+  await page.waitFor(`document.querySelector("#settings").dataset.section === "deploy"`, "deploy section");
+  await shot("03-deploy-pointer");
+  await click(`#settings nav [data-section="plugins"]`);
+  await page.waitFor(`document.querySelector(${js(row("tasks"))})`, "catalog drawn again");
+
+  // 18: phone width.
+  await page.viewport(390, 844, true);
+  await page.waitFor(`document.querySelector(${js(row("simulator"))})`, "mobile layout");
+  const fits = await page.evaluate(
+    `(() => { const box = document.querySelector(${js(row("simulator"))}).getBoundingClientRect(); const button = document.querySelector(${js(`${row("simulator")} [data-catalog-activate]`)}).getBoundingClientRect(); return box.right <= innerWidth && button.right <= innerWidth && button.left >= 0 && document.documentElement.scrollWidth <= innerWidth; })()`,
+  );
+  check("18 rows and buttons fit a 390 px phone", fits);
+  await shot("04-catalog-mobile-configured");
+  await page.viewport(1440, 1000);
+
+  // 12: a separate restart loads it; the external plugin loads too, and the catalog says loaded.
+  await kit.restartHost();
+  const reloaded = await rpc({ action: "plugins" });
+  check(
+    "12 after the restart tasks and the external plugin are loaded",
+    ["tasks", "second"].every((name) => reloaded.plugins.find((item) => item.name === name)?.state === "loaded"),
+    reloaded.plugins,
+  );
+  check(
+    "12 the catalog says loaded with a version",
+    (await rpc({ action: "plugin-catalog" })).entries[0].state === "loaded" &&
+      (await rpc({ action: "plugin-catalog" })).entries[0].version === "1.0.0",
+  );
+  check(
+    "7 activating a loaded plugin changes nothing",
+    (await rpc({ action: "plugin-activate", plugin: "tasks" })) && readFileSync(configFile, "utf8") === afterClick,
+  );
+  await page.navigate(await kit.webUrl(alpha));
+  await page.waitFor(`document.body.dataset.ready === "1"`, "inbox ready after restart");
+  await openPlugins();
+  await page.waitFor(`document.querySelector(${js(row("tasks"))})?.dataset.state === "loaded"`, "tasks loaded in the UI");
+  await shot("05-catalog-desktop-loaded");
+});

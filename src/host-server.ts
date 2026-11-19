@@ -43,6 +43,7 @@ import { ensureKnowledge, historyKnowledge, listKnowledge, readKnowledge, writeK
 import { searchProject } from "./knowledge-search.ts";
 import { loadProjectResourceLoader } from "./project-resources.ts";
 import { referencedPrBlock } from "./pr-monitor.ts";
+import { pluginCatalog } from "./plugin-catalog.ts";
 import { plugins } from "./plugins.ts";
 import { expandSkillCommand, listSkills, skillNames, skillPreview } from "./coordinator-skills.ts";
 import { refCandidates, referencedItemsBlock, refPreview } from "./inline-refs.ts";
@@ -1276,6 +1277,15 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         feed.publish(input.id, { topic: "settings" });
         return { plugin: input.plugin, enabled: input.enabled };
       });
+    }
+    case "plugin-catalog":
+      return { entries: pluginCatalog.list() };
+    case "plugin-activate": {
+      const before = pluginCatalog.list().find((entry) => entry.id === input.plugin)?.state;
+      const entries = pluginCatalog.activate(input.plugin);
+      if (before === "available")
+        recordHostEvent("plugins", `${input.plugin} added to plugins.json by the owner; it loads at the next restart`);
+      return { entries };
     }
     case "plugin": {
       const handler = plugins.rpc(input.plugin, input.method);

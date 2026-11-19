@@ -220,3 +220,52 @@ async function mountOne(node, item, { projectId, chatId }, signal, kind) {
     fail(mountError);
   }
 }
+
+const CATALOG_STATES = {
+  available: { label: "available", tone: "" },
+  configured: { label: "configured · restart needed", tone: "t-needs" },
+  loaded: { label: "loaded", tone: "t-ready" },
+  failed: { label: "failed", tone: "bad" },
+};
+
+/** The plugins shipped with pi-prjcts and what this host does with each; the loaded plugins' cards stay below it. */
+export function catalogBlock(entries, error = "") {
+  const rows = entries
+    .map((entry) => {
+      const state = CATALOG_STATES[entry.state];
+      const action =
+        entry.state === "available"
+          ? `<button type="button" class="ghost-btn small" data-catalog-activate="${esc(entry.id)}">Add to host config</button>`
+          : entry.state === "configured"
+            ? `<button type="button" class="ghost-btn small" data-catalog-deploy>Deploy settings</button>`
+            : "";
+      const note =
+        entry.state === "configured"
+          ? `<p class="small muted">Configured on this host. It loads at the next host restart: run <code>npm run projects -- deploy</code>.</p>`
+          : entry.state === "failed"
+            ? `<p class="small plugin-error">${esc(clip(entry.error ?? "failed", 300))}</p>`
+            : "";
+      return `<div class="catalog-row" data-catalog="${esc(entry.id)}" data-state="${esc(entry.state)}"><div class="plugin-head"><span class="mono">${esc(entry.name)}</span>${entry.version ? `<span class="muted small mono">${esc(entry.version)}</span>` : ""}<span class="badge ${state.tone}"${entry.state === "failed" ? ' data-tone="bad"' : ""}>${state.label}</span>${action}</div><p class="small muted">${esc(entry.description)}</p>${note}</div>`;
+    })
+    .join("");
+  return `<section class="plugin-catalog" aria-label="Plugins shipped with pi-prjcts"><h2 class="small">Shipped with pi-prjcts</h2><p class="small muted">Adding one writes it to this host's plugins.json for every project. Nothing restarts; the plugin loads at the next host restart.</p>${error ? `<p class="plugin-error small" role="alert">${esc(error)}</p>` : ""}${rows}</section>`;
+}
+
+/** Wires the catalog block inside `container`: one request per click, the block redrawn with the host's answer. `openDeploy` shows Settings → Deploy. */
+export function wireCatalog(container, entries, openDeploy) {
+  const draw = (list, error = "") => {
+    entries = list;
+    container.querySelector(".plugin-catalog").outerHTML = catalogBlock(list, error);
+  };
+  container.addEventListener("click", async (event) => {
+    if (event.target.closest("[data-catalog-deploy]")) return openDeploy();
+    const button = event.target.closest("[data-catalog-activate]");
+    if (!button || button.disabled) return;
+    button.disabled = true;
+    try {
+      draw((await call("plugin-activate", { plugin: button.dataset.catalogActivate })).entries);
+    } catch (error) {
+      draw(entries, messageOf(error));
+    }
+  });
+}
