@@ -34,7 +34,6 @@ import { cloneUsage, deviceLastUse, idleClones, strayTestClones } from "../plugi
 import { verifiedWorkspaceRoots } from "../src/workspace-roots.ts";
 import {
   pruneTestProducts,
-  hourlyPruneApplies,
   pruneProjectProducts,
   pruneEnabledProjects,
   workspaceKeyForRoot,
