@@ -25,11 +25,17 @@ const pendingSends = []; // owner messages sent from this page that the transcri
 // The recovery handle of an unsettled send survives a reload: its id, project, chat and exact text, so Retry sends the same message under the same id.
 // One storage key per attempt, so tabs never overwrite each other's handles.
 const HANDLE_PREFIX = "pi-pending-send:",
-  MAX_HANDLES = 20;
+  LEGACY_HANDLES = "pi-pending-sends";
 const savedHandles = new Map(); // attempt id → the stored text of its handle
 function loadHandles() {
   const found = [];
   try {
+    // The first version kept one list under one key; its handles move to their own keys before the list goes.
+    const old = JSON.parse(localStorage.getItem(LEGACY_HANDLES) ?? "[]");
+    for (const item of Array.isArray(old) ? old : [])
+      if (typeof item?.id === "string" && /^[0-9a-f-]{36}$/.test(item.id) && !localStorage.getItem(HANDLE_PREFIX + item.id))
+        localStorage.setItem(HANDLE_PREFIX + item.id, JSON.stringify(item));
+    localStorage.removeItem(LEGACY_HANDLES);
     for (let index = 0; index < localStorage.length; index++) {
       const key = localStorage.key(index);
       if (!key?.startsWith(HANDLE_PREFIX)) continue;
@@ -62,7 +68,7 @@ function loadHandles() {
       }
     }
   } catch {}
-  return found.slice(-MAX_HANDLES);
+  return found;
 }
 function saveHandles() {
   try {
@@ -112,6 +118,14 @@ async function knownWorker(id) {
     return false;
   }
 }
+/** The request id of a failed turn's Retry comes from the turn, so another tab's click, or this one after a reload, names the same delivery. */
+async function retryId(failedId) {
+  if (!crypto.subtle) return uuid();
+  const hex = [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`retry:${failedId}`)))]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
 const reportPattern = /^\[(worker|scout|reviewer) ([0-9a-f-]{36}) ([\w-]+(?: to start)?): ([^\]\n]*)\]([\s\S]*)$/;
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/;
 
@@ -155,33 +169,41 @@ export async function loadChat() {
 }
 // A draft restored after a refusal, and whatever the owner makes of it, belongs to the chat it was sent from: the composer gives it up when another
 // chat opens and takes it back when its chat returns. An edit makes it a different message than the failed bubble's, so that bubble gets its own Retry.
-let draft = null; // { projectId, chatId, text, original, sendId }
-const inDraftChat = () => draft && draft.projectId === state.projectId && draft.chatId === state.chatId;
+const drafts = new Map(); // "project/chat" → { text, original, sendId }: restored drafts, and what the owner made of them
+const draftKey = (projectId = state.projectId, chatId = state.chatId) => `${projectId}/${chatId}`;
+let composerKey = null; // the chat whose draft the composer shows
 const forgetRestored = (sendId) => {
   const send = pendingSends.find((item) => item.id === sendId);
   if (send?.restored) send.restored = false;
 };
 input.addEventListener("input", () => {
-  if (!inDraftChat()) return;
-  draft.text = input.value;
-  if (input.value !== draft.original) {
-    forgetRestored(draft.sendId);
+  const held = drafts.get(draftKey());
+  if (!held) return;
+  held.text = input.value;
+  if (input.value !== held.original) {
+    forgetRestored(held.sendId);
     renderFeed();
   }
 });
 on("select", () => {
-  if (draft && !inDraftChat()) {
-    if (input.value === draft.text) {
+  const now = draftKey(),
+    left = composerKey;
+  composerKey = now;
+  const away = left && left !== now ? drafts.get(left) : undefined;
+  if (away) {
+    if (input.value === away.text) {
       input.value = "";
       grow();
     }
     // An unedited restored draft goes back to the bubble's own Retry; an edited one waits for its chat.
-    if (draft.text === draft.original) {
-      forgetRestored(draft.sendId);
-      draft = null;
+    if (away.text === away.original) {
+      forgetRestored(away.sendId);
+      drafts.delete(left);
     }
-  } else if (draft && !input.value) {
-    input.value = draft.text;
+  }
+  const here = drafts.get(now);
+  if (here && !input.value) {
+    input.value = here.text;
     grow();
   }
   older = [];
@@ -323,7 +345,8 @@ function failSend(send) {
   if (inCurrentChat(send) && !input.value) {
     input.value = send.text;
     send.restored = true;
-    draft = { projectId: send.projectId, chatId: send.chatId, text: send.text, original: send.text, sendId: send.id };
+    composerKey = draftKey(send.projectId, send.chatId);
+    drafts.set(composerKey, { text: send.text, original: send.text, sendId: send.id });
     grow();
   }
 }
@@ -819,7 +842,7 @@ form.addEventListener("submit", async (event) => {
   const text = input.value.trim();
   if (!text || !state.projectId) return;
   const gen = state.generation;
-  if (inDraftChat()) draft = null;
+  drafts.delete(draftKey());
   input.value = "";
   grow();
   follow.follow();
@@ -986,12 +1009,13 @@ feed.addEventListener("click", async (event) => {
     if (!send) return;
     if (pendingDismiss) {
       pendingSends.splice(pendingSends.indexOf(send), 1);
-      if (draft?.sendId === send.id) {
-        if (input.value === draft.text) {
+      const held = drafts.get(draftKey(send.projectId, send.chatId));
+      if (held?.sendId === send.id) {
+        if (input.value === held.text) {
           input.value = "";
           grow();
         }
-        draft = null;
+        drafts.delete(draftKey(send.projectId, send.chatId));
       }
     }
     follow.follow();
@@ -1012,7 +1036,7 @@ feed.addEventListener("click", async (event) => {
     let send = pendingSends.find((item) => item.retryOf === failed.id && inCurrentChat(item));
     if (!send) {
       send = {
-        id: uuid(),
+        id: await retryId(failed.id),
         retryOf: failed.id,
         projectId: state.projectId,
         chatId: state.chatId,

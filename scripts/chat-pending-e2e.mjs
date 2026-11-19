@@ -780,11 +780,32 @@ await kit.run(async () => {
       origin: "telegram",
     });
     check("R12 a replay with other text is refused", /different message/.test(conflict ?? ""), conflict);
-    const replayed = await send({ text: "older MARK-R12", requestId: olderThanOrigins, origin: "telegram" });
+    const unproven = await kit.rejects({
+      action: "message",
+      id: A,
+      text: "older MARK-R12",
+      requestId: olderThanOrigins,
+      origin: "telegram",
+    });
+    check("R12 a Telegram replay cannot deliver a record that proves no origin", /does not prove/.test(unproven ?? ""), unproven);
+    check("R12 nothing was delivered", (await hostCount(A, undefined, "MARK-R12")) === 0);
+    const replayed = await send({ text: "older MARK-R12", requestId: olderThanOrigins });
     check(
-      "R12 the same message from a legacy record is accepted once",
-      replayed.admitted === true && replayed.id === olderThanOrigins,
+      "R12 the owner's own retry delivers it once",
+      replayed.admitted === true && (await hostCount(A, undefined, "MARK-R12")) === 1,
       replayed,
+    );
+    const legacyAdmitted = randomUUID();
+    await send({ text: "legacy receipt MARK-R12R", requestId: legacyAdmitted, origin: "telegram" });
+    const legacyRecord = JSON.parse(ledgerText(legacyAdmitted));
+    delete legacyRecord.origin;
+    delete legacyRecord.admitted;
+    writeFileSync(ledgerPath(legacyAdmitted), JSON.stringify(legacyRecord));
+    const acknowledged = await send({ text: "legacy receipt MARK-R12R", requestId: legacyAdmitted, origin: "telegram" });
+    check(
+      "R12 a Telegram replay of a legacy record the runtime holds is acknowledged, not delivered again",
+      acknowledged.admitted === true && (await hostCount(A, undefined, "MARK-R12R")) === 1,
+      acknowledged,
     );
     const webRecord = randomUUID();
     await send({ text: "web MARK-R12W", requestId: webRecord });

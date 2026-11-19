@@ -1723,6 +1723,15 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
             throw new Refused("This request id belongs to a different message; nothing was changed");
           if (prior?.admitted) return prior;
           if (prior && (await owner.ledgerSubmissions(chatId, [prior.id])).length) return markAdmitted(prior);
+          // A record from before origins and saved content proves neither where it came from nor what it said: only the owner's own retry may deliver it.
+          if (
+            prior &&
+            !prior.delivery &&
+            prior.origin === undefined &&
+            origin !== "owner" &&
+            (prior.state === "queued" || prior.state === "running")
+          )
+            throw new Refused("This saved message does not prove where it came from; send it again as a new message");
           // A settled record the runtime has no submission for is history, not a message waiting to be sent.
           if (prior && prior.state !== "queued" && prior.state !== "running") return prior;
           // Everything that can refuse runs before anything is recorded or granted.
@@ -1746,6 +1755,8 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
             // The limit applies to what the runtime receives, attachment block included, so a skill is never granted for a message it would refuse.
             if (content.length > 120_000)
               throw new Error(`Message with its skills and references is too large to send (${content.length} characters; limit 120000)`);
+            if (saved && saved.images === undefined && job.attachments?.length)
+              throw new Error("The saved message does not say which images went with it; send it again as a new message");
             const images = saved ? (saved.images ?? []) : inlineImageIds(dir, job.attachments, owner.acceptsImages);
             if (attachmentImages(dir, images, true).length !== images.length)
               throw new Error("An image attached to the saved message is no longer available; send it again as a new message");
@@ -1754,7 +1765,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
             const chat = (await owner.chats()).find((item) => item.id === chatId);
             if (!chat) throw new Error("Unknown chat for this project");
             if (chat.archived) throw new Error("Chat is archived; restore it before sending");
-            return { ...job, origin, delivery: { content, ...(images.length ? { images } : {}) } };
+            return { ...job, origin, delivery: { content, images } };
           });
           for (const invoked of skillNames(job.text)) recordInvokedSkill(ownedProjectDir(input.id), invoked);
           saveJob(input.id, job);

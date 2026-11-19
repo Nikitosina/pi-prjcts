@@ -59,3 +59,7 @@ Written before the code. The saved request is the intent: a restart continues it
 - R21 Retrying the original bubble while an edited draft is in the composer leaves that draft unowned, and it follows the owner into another chat.
 - R22 A snapshot returns the saved effective content of an unadmitted record.
 - R23 The Undo answer of a read that began before a reconnect is shown as current; the first connection of a stream withdraws Undo it just loaded.
+- R24 A Telegram replay supplies the origin and re-expands the content of a legacy record that proves neither; only a receipt or the owner's own retry may settle it.
+- R25 A saved message that does not say which images went with it is admitted as text only, or one over the runtime limit is recovered after granting its skill.
+- R26 The first version's single handle list is lost on upgrade; more handles than the display cap are deleted as settled.
+- R27 A turn-card Retry in a second tab, or after a reload, gets a new request id; an edited draft in one chat is replaced by another chat's draft.

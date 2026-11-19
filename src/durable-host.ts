@@ -66,6 +66,8 @@ async function recoverUnadmitted(owner: DurableProjectRuntime, project: Project)
         const chat = (await owner.chats()).find((item) => item.id === chatId);
         if (!chat || chat.archived) continue;
         // The images that went in with the saved content are the ones that go in now; a missing one leaves the message unconfirmed.
+        if (job.delivery!.content.length > 120_000) continue;
+        if (job.delivery!.images === undefined && job.attachments?.length) continue;
         const images = attachmentImages(dir, job.delivery!.images, true);
         if (images.length !== (job.delivery!.images?.length ?? 0)) continue;
         for (const invoked of skillNames(job.text)) recordInvokedSkill(dir, invoked);

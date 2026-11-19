@@ -79,7 +79,7 @@ async function select(projectId, chatId = "main", { keepFocus = false } = {}) {
         if (change.t === "sync") {
           emit("plugins-changed");
           void refreshAll();
-          if (connected) void refreshRecentMemory({ invalidate: true });
+          void refreshRecentMemory(connected ? { invalidate: true } : { again: true });
           connected = true;
         } else if (change.t === "topic") onTopic(change, gen);
       },
