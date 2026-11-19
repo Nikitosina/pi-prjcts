@@ -187,6 +187,24 @@ await kit.run(async () => {
     proven,
   );
 
+  // Revisions are content hashes: writing the same text again after an undo is a new write, current and not undone.
+  const again = await rpc({
+    action: "knowledge-write",
+    id,
+    path: "decisions/new.md",
+    text: "# New\n\nJust made.\n",
+    expectedRevision: null,
+  });
+  const rewritten = (
+    await rpc({ action: "memory-writes", projectId: id, writes: [{ path: "decisions/new.md", revision: again.revision }] })
+  ).writes[0];
+  const listedAgain = (await rpc({ action: "memory-recent", projectId: id })).writes.find((item) => item.path === "decisions/new.md");
+  check(
+    "M15 the same text written again after an undo is current and not undone",
+    again.revision === created.revision && rewritten?.current === true && rewritten.undone === false && listedAgain?.undone === false,
+    [rewritten, listedAgain],
+  );
+
   // The prompt carries the preferences brief for every role and no memory index; agents search memory with projects_knowledge_list.
   await kit.ask(id, "MEMORY-TURN hello");
   const coordinator = result.calls.findLast((call) => call.role === "coordinator").system;

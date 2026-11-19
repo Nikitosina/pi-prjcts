@@ -48,7 +48,8 @@ export const memoryEntry = (path) => (cache.projectId === state.projectId ? cach
 let recent = { projectId: null, writes: new Map(), ready: false };
 // Writes outside the recent list (it holds 50), proven one by one by `memory-writes`; absence from both is unknown, never undoable.
 let proven = new Map(),
-  asked = new Set(),
+  asked = new Set(), // keys sent to the host (answered or in flight)
+  wanted = new Set(), // keys rows are waiting on, not yet sent
   askTimer = null,
   provenEpoch = 0; // bumped whenever the Undo state is replaced: an answer to a question asked before it is dropped
 let recentLoad = null,
@@ -101,6 +102,7 @@ function dropProven() {
   provenEpoch++;
   proven = new Map();
   asked = new Set();
+  wanted = new Set();
 }
 on("select", ({ projectId }) => {
   if (recent.projectId !== projectId) {
@@ -117,32 +119,37 @@ export function memoryWrite(path, revision) {
 }
 /** Asks the host about a chat row's write that the recent list does not hold; rows on screen join one question. */
 export function wantMemoryWrite(path, revision) {
-  const key = `${path}@${revision}`,
-    projectId = state.projectId;
-  if (!recent.ready || recent.projectId !== projectId || recent.writes.has(key) || asked.has(key)) return;
-  asked.add(key);
+  const key = `${path}@${revision}`;
+  if (!recent.ready || recent.projectId !== state.projectId || recent.writes.has(key) || asked.has(key) || wanted.has(key)) return;
+  wanted.add(key);
   clearTimeout(askTimer);
-  askTimer = setTimeout(() => void askWrites(projectId), 0);
+  askTimer = setTimeout(() => void askWrites(state.projectId), 0);
 }
 async function askWrites(projectId) {
-  const wanted = [...asked].filter((key) => !proven.has(key)).slice(0, 20),
+  const batch = [...wanted].slice(0, 20),
     began = provenEpoch;
-  if (!wanted.length || projectId !== state.projectId) return;
+  if (!batch.length || projectId !== state.projectId) return;
+  for (const key of batch) {
+    wanted.delete(key);
+    asked.add(key);
+  }
   try {
     const answer = await call("memory-writes", {
       projectId,
-      writes: wanted.map((key) => {
+      writes: batch.map((key) => {
         const at = key.lastIndexOf("@");
         return { path: key.slice(0, at), revision: key.slice(at + 1) };
       }),
     });
     if (began !== provenEpoch || projectId !== state.projectId) return;
-    for (const key of wanted) proven.set(key, null);
+    for (const key of batch) proven.set(key, null);
     for (const write of answer.writes) proven.set(`${write.path}@${write.revision}`, write);
     emit("memory-recent", projectId);
   } catch (error) {
+    if (began === provenEpoch) for (const key of batch) asked.delete(key);
     fail(error);
   }
+  if (began === provenEpoch && wanted.size) await askWrites(projectId);
 }
 export const memoryReady = () => recent.projectId === state.projectId && recent.ready;
 export function markMemoryUndone(path, revision) {

@@ -1695,8 +1695,10 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return withDurableOwner({
         id: input.id,
         validate: (project) => {
-          if (project.deleted) throw new Refused("Project is deleted; admission is denied");
-          if (project.archived) throw new Refused("Project is archived; admission is denied");
+          if (!project.deleted && !project.archived) return;
+          // A repeat of a message the host already holds may have been admitted before the project went inactive, so only a first send is proven refused.
+          const text = `Project is ${project.deleted ? "deleted" : "archived"}; admission is denied`;
+          throw input.requestId && jobById(input.id, input.requestId) ? new Error(text) : new Refused(text);
         },
         operation: async (owner) => {
           // A request ID names one message: a repeat must carry the same chat, text, attachments and origin, or it is refused before anything is touched.
@@ -1720,7 +1722,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           // Everything that can refuse runs before anything is recorded or granted.
           const { job, parts } = await refusing(async () => {
             const job = prior ?? prepareJob();
-            // The saved content is the message; only a record without it (legacy) or a new message is built from the text.
+            // The saved content is the message; only a new message is built from the text (a legacy record without it never reaches here).
             // The job keeps what the owner typed; the coordinator receives the expanded skill.
             // `/skill:<name>` anywhere: skill blocks precede the owner's words. `@issue:/@doc:/@upload:/@file:` and `#123` / `PR #123`: compact untrusted blocks follow them.
             const dir = ownedProjectDir(input.id);

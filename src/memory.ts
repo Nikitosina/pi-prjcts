@@ -174,21 +174,28 @@ export async function memoryRecent(dir: string): Promise<{ writes: MemoryWrite[]
   const records = await recentKnowledgeHistory(dir, RECENT_LIMIT * 4);
   const newest = new Map<string, string>();
   for (const record of records) if (!newest.has(record.path)) newest.set(record.path, record.revision);
-  const undone = new Set(
-    records.filter((record) => record.author === "memory-undo").map((record) => `${record.path}\0${record.priorRevision}`),
-  );
-  const writes = records
-    .filter((record) => record.author !== "memory-undo")
-    .slice(0, RECENT_LIMIT)
-    .map((record) => ({
+  // Newest first: an undo counts for the writes after it in the list, never for a later write that happens to produce the same revision (revisions are content hashes).
+  const undone = new Set<string>(),
+    listed = new Set<string>(),
+    writes: MemoryWrite[] = [];
+  for (const record of records) {
+    const key = `${record.path}\0${record.revision}`;
+    if (record.author === "memory-undo") {
+      undone.add(`${record.path}\0${record.priorRevision}`);
+      continue;
+    }
+    if (writes.length >= RECENT_LIMIT || listed.has(key)) continue;
+    listed.add(key);
+    writes.push({
       path: record.path,
       revision: record.revision,
       author: record.author,
       updatedAt: record.updatedAt,
       created: record.priorText === null,
-      undone: undone.has(`${record.path}\0${record.revision}`),
+      undone: undone.has(key),
       current: newest.get(record.path) === record.revision,
-    }));
+    });
+  }
   return { writes };
 }
 
@@ -205,18 +212,22 @@ export async function memoryWrites(dir: string, wanted: readonly { path: string;
     } catch {
       continue;
     }
-    const newest = history.at(-1)?.revision;
+    // The entry itself says which revision is current; a document edited outside the history, or removed, makes no write current.
+    const current = await readKnowledge(dir, path).then(
+      (entry) => entry.revision,
+      () => undefined,
+    );
     for (const { revision } of wanted.slice(0, WRITES_LIMIT).filter((item) => item.path === path)) {
-      const record = history.findLast((item) => item.revision === revision && item.author !== "memory-undo");
-      if (record)
+      const at = history.findLastIndex((item) => item.revision === revision && item.author !== "memory-undo");
+      if (at >= 0)
         writes.push({
           path,
           revision,
-          author: record.author,
-          updatedAt: record.updatedAt,
-          created: record.priorText === null,
-          undone: history.some((item) => item.author === "memory-undo" && item.priorRevision === revision),
-          current: newest === revision,
+          author: history[at]!.author,
+          updatedAt: history[at]!.updatedAt,
+          created: history[at]!.priorText === null,
+          undone: history.slice(at + 1).some((item) => item.author === "memory-undo" && item.priorRevision === revision),
+          current: current === revision,
         });
     }
   }

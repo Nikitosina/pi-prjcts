@@ -62,7 +62,7 @@ const wrapFetch = `(() => {
   window.fetch = async (url, init) => {
     if (url !== "/api" || !init?.body) return real(url, init);
     const body = JSON.parse(init.body);
-    const entry = { action: body.action, project: body.projectId ?? body.id, chat: body.chatId ?? "main", text: body.text, requestId: body.requestId, start: performance.now() };
+    const entry = { size: body.writes?.length, action: body.action, project: body.projectId ?? body.id, chat: body.chatId ?? "main", text: body.text, requestId: body.requestId, start: performance.now() };
     window.__calls.push(entry);
     const rule = window.__rules[body.action] ?? {};
     if (rule.delay) await sleep(rule.delay);
@@ -833,17 +833,30 @@ await kit.run(async () => {
     check("R12 a web message is not claimed by a Telegram replay", /different message/.test(forged ?? ""), forged);
   });
 
+  const viaEndpoint = (action, input) =>
+    ev(
+      `(async () => { const api = await import("/api.js"); try { const data = await api.call(${JSON.stringify(action)}, ${JSON.stringify(input)}); return { ok: true, data }; } catch (error) { return { ok: false, refused: error.refused, message: error.message }; } })()`,
+    );
   // R30: the page's own request to the browser endpoint tells a proven refusal from an unknown error.
   await section("R30", async () => {
-    const viaEndpoint = (action, input) =>
-      ev(
-        `(async () => { const api = await import("/api.js"); try { await api.call(${JSON.stringify(action)}, ${JSON.stringify(input)}); return { ok: true }; } catch (error) { return { ok: false, refused: error.refused, message: error.message }; } })()`,
-      );
     const refused = await viaEndpoint("message", { id: A, text: "refused MARK-R30", requestId: randomUUID(), chatId: randomUUID() });
     check("R30 a refusal before admission carries the host's marker through the browser endpoint", refused.refused === true, refused);
     const unknown = await viaEndpoint("message", { id: randomUUID(), text: "unknown MARK-R30", requestId: randomUUID() });
     check("R30 an error that is not a proven refusal carries no marker", unknown.ok === false && unknown.refused === false, unknown);
     check("R30 neither stored a message", (await hostCount(A, undefined, "MARK-R30")) === 0);
+    // A repeat of a message the host already holds, to a project that went inactive meanwhile, is not a proven refusal.
+    const C = await kit.createProject("Pending C"),
+      held = randomUUID();
+    await rpc({ action: "message", id: C, text: "held MARK-R30C", requestId: held });
+    await rpc({ action: "archive", id: C });
+    const repeat = await viaEndpoint("message", { id: C, text: "held MARK-R30C", requestId: held });
+    check(
+      "R30 a repeat of an admitted message to an archived project is not marked refused",
+      repeat.ok === false && repeat.refused === false,
+      repeat,
+    );
+    const first = await viaEndpoint("message", { id: C, text: "new MARK-R30C", requestId: randomUUID() });
+    check("R30 a first send to an archived project is a proven refusal", first.ok === false && first.refused === true, first);
   });
   // R32: a crash after the runtime took the message and before the skill grant finishes the original grant from the receipt, without sending again.
   await section("R32", async () => {
@@ -875,6 +888,26 @@ await kit.run(async () => {
       requestId: randomUUID(),
       chatId: randomUUID(),
     });
+    // The chat is archived before the restart, so any new admission would be refused: only the receipt can finish the grant.
+    const archivedAfter = (await rpc({ action: "chat-create", id: A, title: "Crash chat" })).id,
+      second = randomUUID();
+    await send({ text: "/skill:pend-skill-crash again MARK-R32D", requestId: second, chatId: archivedAfter });
+    await kit.eventually(async () => JSON.parse(ledgerText(second)).state === "done", "R32 second settled");
+    const secondRecord = JSON.parse(ledgerText(second));
+    delete secondRecord.admitted;
+    delete secondRecord.entry;
+    writeFileSync(ledgerPath(second), JSON.stringify({ ...secondRecord, state: "queued", delivery: { content: "expanded MARK-R32D" } }));
+    writeFileSync(
+      join(kit.home, A, "invoked-skills.txt"),
+      crashSkills()
+        .filter((name) => name && name !== "pend-skill-crash")
+        .join("\n") + "\n",
+    );
+    await rpc({ action: "chat-update", id: A, chatId: archivedAfter, archived: true });
+    await kit.restartHost();
+    await kit.eventually(async () => crashSkills().includes("pend-skill-crash"), "R32 grant finished from the receipt alone");
+    await kit.eventually(async () => JSON.parse(ledgerText(second)).admitted === true, "R32 second record admitted from the receipt");
+    check("R32 the receipt finished it without a new submission", (await hostCount(A, archivedAfter, "MARK-R32D")) === 1);
     check("R32 a refused send is refused", /Unknown chat/.test(refusedSkill ?? ""), refusedSkill);
     check("R32 a refused send grants nothing", !invokedSkills().includes("pend-skill-denied"), invokedSkills());
   });
@@ -913,6 +946,44 @@ await kit.run(async () => {
       "R34 dismissing the unedited restore clears it",
       (await composer()) === "" && (await owners("MARK-R34")).length === 0,
       await composer(),
+    );
+  });
+  // R37: a handle another tab removed is stored again before Retry sends; without storage Retry does not send.
+  await section("R37", async () => {
+    await clearComposer();
+    await reset();
+    await ev(`__rule("message", { fail: "network" })`);
+    await typeAndSend("other tab MARK-R37");
+    await page.waitFor(
+      `[...document.querySelectorAll('#feed .msg.owner')].some((n) => n.dataset.delivery === "unconfirmed")`,
+      "R37 unconfirmed",
+    );
+    const requestId = (await calls("message"))[0].requestId;
+    await ev(`localStorage.removeItem("pi-pending-send:${requestId}")`);
+    await ev(
+      `(() => { window.__realSet = Storage.prototype.setItem; Storage.prototype.setItem = function (key, value) { if (String(key).startsWith("pi-pending-send:")) throw new DOMException("full", "QuotaExceededError"); return window.__realSet.call(this, key, value); }; })()`,
+    );
+    await ev(`document.querySelector('#feed [data-pending-retry]').click()`);
+    await kit.delay(700);
+    check("R37 Retry without a handle that can be stored sends nothing", (await countCalls("message")) === 1, await calls("message"));
+    await ev(`(Storage.prototype.setItem = window.__realSet, true)`);
+    await ev(`document.querySelector('#feed [data-pending-retry]').click()`);
+    await page.waitFor(`document.querySelector('#feed').innerText.includes("ACK other tab MARK-R37")`, "R37 retried");
+    check("R37 the stored handle returned and the retry kept the id", (await calls("message")).at(-1).requestId === requestId);
+    check("R37 the host stored it once", (await hostCount(A, undefined, "MARK-R37")) === 1);
+  });
+  // R38: more writes outside the recent list than one question holds are all asked about, in several questions.
+  await section("R38", async () => {
+    await reset();
+    await ev(
+      `(async () => { const memory = await import("/memory.js"); for (let index = 0; index < 25; index++) memory.wantMemoryWrite(\`decisions/none-\${index}.md\`, "f".repeat(64)); })()`,
+    );
+    await kit.delay(1200);
+    const asks = await calls("memory-writes");
+    check(
+      "R38 25 unknown writes are asked about in two questions, none left out",
+      asks.length === 2 && asks.reduce((sum, item) => sum + item.size, 0) === 25,
+      asks,
     );
   });
   // R35: only a write the host proves is offered Undo; an old, still current write keeps its Undo.

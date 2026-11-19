@@ -75,7 +75,6 @@ function loadHandles() {
 /** Stores the handle before anything is sent; false when the browser cannot keep it, and then nothing may be sent: a reload would lose the message without a trace. */
 function rememberSend({ id, projectId, chatId, text, attachments, retryOf }) {
   const stored = JSON.stringify({ id, projectId, chatId, text, ...(retryOf ? { retryOf } : {}), ...(attachments ? { attachments } : {}) });
-  if (savedHandles.get(id) === stored) return true;
   try {
     localStorage.setItem(HANDLE_PREFIX + id, stored);
     if (localStorage.getItem(HANDLE_PREFIX + id) !== stored) return false;
