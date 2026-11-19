@@ -216,7 +216,7 @@ export function scheduleRuntime(
   const running = new Set<string>();
   const actionRuns = new Set<Promise<void>>();
   const automaticBlocker = async (tx: Tx): Promise<DurableScheduleSnapshot["automaticAdmissionBlocker"]> =>
-    (await hasUncertainGithubWrites(tx, root.id)) || (await plugins.anyUncertainWrites(tx, root.id))
+    (await hasUncertainGithubWrites(tx, root.id)) || (await plugins.anyUncertainWrites(tx, root.id, projectId))
       ? "uncertain-provider-write"
       : (await hasUncertainCommands(tx, root.id))
         ? "uncertain-command"

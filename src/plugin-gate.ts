@@ -10,16 +10,20 @@ type Executable = { execute: (...args: never[]) => unknown };
 
 export function createPluginGate(isDisabled: (projectId: string, plugin: string) => boolean) {
   const running = new Map<string, number>();
+  const began = new Map<string, number>();
   const key = (projectId: string, plugin: string) => `${projectId}\0${plugin}`;
   const gate = {
     /** True while the project has the plugin turned off. */
     isOff: isDisabled,
     /** Calls in flight for the plugin in this project. */
     active: (projectId: string, plugin: string): number => running.get(key(projectId, plugin)) ?? 0,
+    /** Calls that began for the plugin in this project since the host started; a disable compares it before and after its async checks. */
+    started: (projectId: string, plugin: string): number => began.get(key(projectId, plugin)) ?? 0,
     async run<T>(projectId: string, plugin: string, work: () => T | Promise<T>): Promise<T> {
       if (isDisabled(projectId, plugin)) throw new Error(disabledMessage(plugin));
       const id = key(projectId, plugin);
       running.set(id, (running.get(id) ?? 0) + 1);
+      began.set(id, (began.get(id) ?? 0) + 1);
       try {
         return await work();
       } finally {

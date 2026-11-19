@@ -5,17 +5,26 @@ const paused = new Set();
 let toolRuns = 0,
   listCalls = 0;
 const observed = new Map();
-const uncertain = new Map(),
-  asked = new Map(),
-  checking = [];
+const asked = new Map(),
+  checking = [],
+  roots = new Map();
 const touchedBy = new Map(),
   publishedBy = new Map(),
   listedBy = new Map();
 export default {
   name: "gated",
   register(api) {
-    const { defineTool, defineExtension } = api.lib.durable,
+    const { defineTool, defineExtension, defineDoc } = api.lib.durable,
       { Type } = api.lib.typebox;
+    const Uncertain = defineDoc({
+      kind: "gated.uncertain",
+      version: 1,
+      scope: "conversation",
+      history: "latest",
+      fork: "initial",
+      checkpointWhen: () => false,
+      initial: () => ({ mode: "no", project: "" }),
+    });
     const ping = defineTool({
       name: "gated_ping",
       description: "Counts one run; for the per-project enable test.",
@@ -77,9 +86,18 @@ export default {
           ),
         holdin: async ({ params, withRoot }) =>
           withRoot(params.projectId, () => new Promise((resolve) => waiting.push(resolve)).then(() => ({ held: true }))),
-        // The root conversation id of a project, so a test can set what `uncertainWrites` answers for it (the hook receives only the root).
-        "root-of": async ({ params, withRoot }) => withRoot(params.projectId, async (root) => ({ root: String(root.id) })),
-        "set-uncertain": async ({ params }) => (uncertain.set(params.root, params.mode), { set: params.mode }),
+        // The unresolved-write record lives in the project's own durable store, like a real plugin's. The root is kept so a test can write it
+        // while the project has the plugin off (the gate refuses `withRoot` then).
+        "mark-uncertain": async ({ params, withRoot }) => {
+          const root = roots.get(params.projectId) ?? (await withRoot(params.projectId, async (value) => value));
+          roots.set(params.projectId, root);
+          await root.commit(async (tx) => {
+            const doc = await tx.doc(Uncertain, root.id);
+            doc.mode = params.mode;
+            doc.project = params.projectId;
+          }, api.lib.chord.BACKGROUND_CONTEXT);
+          return { set: params.mode };
+        },
         "release-check": async () => (checking.splice(0).forEach((resolve) => resolve()), { released: true }),
         "check-waiting": async () => ({ count: checking.length }),
         release: async () => (waiting.splice(0).forEach((resolve) => resolve()), { released: true }),
@@ -95,17 +113,15 @@ export default {
           paused: [...paused],
         }),
       },
-      uncertainWrites: async (_tx, root) => {
-        const key = String(root),
-          mode = uncertain.get(key);
-        asked.set(key, (asked.get(key) ?? 0) + 1);
+      uncertainWrites: async (tx, root) => {
+        const { mode, project } = await tx.doc(Uncertain, root);
+        asked.set(project, (asked.get(project) ?? 0) + 1);
         if (mode === "fail") throw new Error("gated record unreadable");
         if (mode === "hold") await new Promise((resolve) => checking.push(resolve));
         return mode === "yes";
       },
       rpcPolicy: {
-        "root-of": "read",
-        "set-uncertain": "write",
+        "mark-uncertain": "write",
         "release-check": "write",
         "check-waiting": "read",
         touch: "write",
