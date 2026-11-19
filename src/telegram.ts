@@ -33,9 +33,9 @@ type DeliveryError = { at: number; method: string; description: string } & (
   { kind: "api"; httpStatus: number; code: number; descriptionProvided: boolean } | { kind: "network" | "not-sent" | "incomplete-response" }
 );
 export type HeldOutcome = "resend" | "delivered";
-type SentPart = { seq: number; parts: number; plan?: TelegramPart[]; pendingMedia?: boolean; anchorMessageId?: number };
+type SentPart = { seq: number; chatId?: number; parts: number; plan?: TelegramPart[]; pendingMedia?: boolean; anchorMessageId?: number };
 /** A notice whose attachment upload may or may not have reached Telegram. It no longer blocks later notices; the owner resolves it. */
-type HeldNotice = { seq: number; at: number; ownerChatId: number; sentPart: SentPart };
+type HeldNotice = { seq: number; at: number; ownerChatId: number; sentPart: SentPart; notice?: Notice };
 type State = {
   version: 1;
   token: string | null;
@@ -877,7 +877,7 @@ export function startTelegram(options: {
       persist();
       throw new Error(UNCERTAIN_MEDIA);
     }
-    if (state.sentPart?.seq !== notice.seq) state.sentPart = { seq: notice.seq, parts: 0, plan };
+    if (state.sentPart?.seq !== notice.seq) state.sentPart = { seq: notice.seq, chatId: state.owner.chatId, parts: 0, plan };
     const parts = state.sentPart.plan ?? plan;
     state.sentPart.plan = parts;
     persist();
@@ -1051,52 +1051,58 @@ export function startTelegram(options: {
     }));
     return current;
   }
-  /** Moves an upload that may have reached Telegram out of the outbox cursor, so later notices go on; its parts and plan stay recoverable. */
+  /** Moves an upload that may have reached Telegram out of the outbox cursor, so later notices go on; its parts, plan and notice stay recoverable.
+   *  A cursor behind `sentSeq` is a recovery the host left half done: its progress replaces the older held record. */
   function hold(): boolean {
     const part = state.sentPart;
-    if (!part?.pendingMedia || !state.owner) return false;
+    const chatId = part?.chatId ?? state.owner?.chatId;
+    if (!part || chatId === undefined || (!part.pendingMedia && part.seq > state.sentSeq)) return false;
+    const notice = options.notifier.feed(part.seq - 1).items.find((item) => item.seq === part.seq);
+    const previous = (state.held ?? []).find((item) => item.seq === part.seq);
     state.held = [
       ...(state.held ?? []).filter((item) => item.seq !== part.seq),
-      { seq: part.seq, at: Date.now(), ownerChatId: state.owner.chatId, sentPart: part },
+      { seq: part.seq, at: Date.now(), ownerChatId: chatId, sentPart: part, notice: notice ?? previous?.notice },
     ];
     state.sentSeq = Math.max(state.sentSeq, part.seq);
     delete state.sentPart;
-    state.lastError = UNCERTAIN_MEDIA;
+    if (part.pendingMedia) state.lastError = UNCERTAIN_MEDIA;
     persist();
     return true;
   }
   /** Runs after any flush in progress, so it never shares the outbox cursor with one. */
   async function resolveHeld(seq: number, outcome: HeldOutcome) {
     const run = async () => {
-      const index = (state.held ?? []).findIndex((item) => item.seq === seq);
-      if (index < 0) throw new Error(`No held notice ${seq}`);
-      const held = state.held![index];
+      hold();
+      const held = (state.held ?? []).find((item) => item.seq === seq);
+      if (!held) throw new Error(`No held notice ${seq}`);
       const remove = () => {
         state.held = state.held!.filter((item) => item !== held);
-        if (!state.held.length) state.lastError = null;
+        if (!state.held.some((item) => item.sentPart.pendingMedia)) state.lastError = null;
         persist();
       };
-      if (outcome === "delivered") return remove();
+      const plan = held.sentPart.plan;
+      // Delivered confirms only the part that was in flight; parts after it were never attempted.
+      const confirmed = outcome === "delivered" && plan ? held.sentPart.parts + 1 : held.sentPart.parts;
+      if (outcome === "delivered" && (!plan || confirmed >= plan.length)) return remove();
       if (!state.owner) throw new Error("Telegram is not paired");
       if (held.ownerChatId !== state.owner.chatId)
         throw new Error("Held notice was for a different Telegram account; mark it delivered to drop it");
-      if (!held.sentPart.plan)
-        throw new Error("Held notice has no saved plan, so what was sent is unknown; verify in Telegram and mark it delivered");
-      const notice = options.notifier.feed(seq - 1).items.find((item) => item.seq === seq);
+      if (!plan) throw new Error("Held notice has no saved plan, so what was sent is unknown; verify in Telegram and mark it delivered");
+      if (state.sentPart) throw new Error("A notice is being delivered; retry shortly");
+      const notice = held.notice ?? options.notifier.feed(seq - 1).items.find((item) => item.seq === seq);
       if (!notice) throw new Error("Held notice has left the notification feed; verify in Telegram and mark it delivered");
-      const saved = state.sentPart;
       const { pendingMedia: _, ...resumed } = held.sentPart;
-      state.sentPart = resumed;
+      state.sentPart = { ...resumed, parts: confirmed };
       try {
         await sendNotice(notice);
       } catch (error) {
         held.sentPart = state.sentPart!;
         held.at = Date.now();
-        state.sentPart = saved;
+        delete state.sentPart;
         persist();
         throw error;
       }
-      state.sentPart = saved;
+      delete state.sentPart;
       remove();
     };
     const previous = flushing ?? Promise.resolve();
@@ -1113,6 +1119,7 @@ export function startTelegram(options: {
     try {
       await done;
     } finally {
+      await gate;
       void flush();
     }
     return snapshot();

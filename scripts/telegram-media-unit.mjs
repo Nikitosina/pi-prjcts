@@ -610,18 +610,23 @@ try {
     );
     assert.match(sends[1].input.text, /Later notice/);
     await assert.rejects(bridge.resolveHeld(9, "resend"), /No held/);
+    // The notice left the rolling feed, and a newer one arrives while recovery runs.
+    notices = notices.filter((n) => n.seq > 1);
+    notices.push(notice(4, "During recovery"));
     await bridge.resolveHeld(1, "resend");
+    await bridge.flush();
     assert.deepEqual(
       sends.map((s) => s.method),
-      ["sendMessage", "sendMessage", "sendMediaGroup"],
+      ["sendMessage", "sendMessage", "sendMediaGroup", "sendMessage"],
     );
+    assert.match(sends[3].input.text, /During recovery/);
     state = JSON.parse(readFileSync(statePath));
     assert.deepEqual(state.held, []);
-    assert.equal(state.sentSeq, 3);
+    assert.equal(state.sentSeq, 4);
     assert.equal(state.sentPart, undefined);
     mapped();
     await bridge.flush();
-    assert.equal(sends.length, 3);
+    assert.equal(sends.length, 4);
   }
 
   reset(`![Photo](${ref("demo.png")}) ![Video](${ref("demo.mp4")})`);
@@ -660,6 +665,51 @@ try {
   );
   assert.equal(JSON.parse(sends[0].input.reply_parameters).message_id, 77);
   assert.deepEqual(JSON.parse(readFileSync(statePath)).held, []);
+
+  // Delivered confirms only the part in flight; the part after it is still sent, once.
+  reset(`![Photo](${ref("demo.png")}) ![Video](${ref("demo.mp4")})`);
+  partial = JSON.parse(readFileSync(statePath));
+  partial.sentPart = {
+    seq: 1,
+    parts: 0,
+    pendingMedia: true,
+    plan: [
+      { kind: "media", ref: ref("demo.png"), caption: "<b>Test · Main</b>" },
+      { kind: "media", ref: ref("demo.mp4"), caption: "" },
+    ],
+  };
+  writeFileSync(statePath, JSON.stringify(partial));
+  start();
+  await bridge.flush();
+  await bridge.resolveHeld(1, "delivered");
+  assert.deepEqual(
+    sends.map((s) => s.method),
+    ["sendVideo"],
+  );
+  assert.deepEqual(JSON.parse(readFileSync(statePath)).held, []);
+
+  // A restart in the middle of a recovery keeps its progress in the held record, not in the outbox cursor.
+  reset(`![Photo](${ref("demo.png")}) ![Video](${ref("demo.mp4")})`);
+  notices.push(notice(2, "Next"));
+  partial = JSON.parse(readFileSync(statePath));
+  const midPlan = [
+    { kind: "media", ref: ref("demo.png"), caption: "<b>Test · Main</b>" },
+    { kind: "media", ref: ref("demo.mp4"), caption: "" },
+  ];
+  partial.sentSeq = 1;
+  partial.held = [{ seq: 1, at: 0, ownerChatId: 1, sentPart: { seq: 1, parts: 0, plan: midPlan } }];
+  partial.sentPart = { seq: 1, parts: 1, plan: midPlan, anchorMessageId: 5 };
+  writeFileSync(statePath, JSON.stringify(partial));
+  start();
+  await bridge.flush();
+  assert.deepEqual(
+    sends.map((s) => s.method),
+    ["sendMessage"],
+  );
+  partial = JSON.parse(readFileSync(statePath));
+  assert.equal(partial.held[0].sentPart.parts, 1);
+  assert.equal(partial.sentPart, undefined);
+  assert.equal(partial.sentSeq, 2);
 
   // Incident shape: state persisted by the old release.
   reset(`![Photo](${ref("demo.png")}) ![Video](${ref("demo.mp4")})`);
