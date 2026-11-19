@@ -543,10 +543,12 @@ on("plugins-changed", () => void pluginsRefresh?.().catch(() => {}));
 
 /** Every plugin the host loaded, and the panels plugins provide for this project (web/plugins.js). */
 async function pluginsSection(body, alive) {
-  let shown = "";
+  let shown = "",
+    drawId = 0;
   const draw = async () => {
+    const ask = ++drawId;
     const status = await call("plugins", state.projectId ? { id: state.projectId } : {});
-    if (!alive()) return;
+    if (!alive() || ask !== drawId) return;
     shown = pluginsSignature(status);
     unmount?.();
     body.innerHTML = `${line("Plugins this host loaded at its start. Turn one off to stop it in this project only; its saved data stays.", "A plugin with active work, or one this project's checkout needs, cannot be turned off. A panel is the plugin's own code running in this page. A changed plugin shows here after a host restart and a page reload.")}${pluginCards(status) || `<p class="muted">No plugins are loaded. List one in plugins.json and restart the host.</p>`}`;
