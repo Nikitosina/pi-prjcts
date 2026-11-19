@@ -255,7 +255,9 @@ export const Job = Type.Object(
     /** Owner uploads attached to the message. */
     attachments: Type.Optional(Type.Array(Id, { minItems: 1, maxItems: 10, uniqueItems: true })),
     /** Where the message came from; a repeat of its request id must carry the same origin. */
-    origin: messageOrigin,
+    origin: Type.Optional(Type.Union([Type.Literal("telegram"), Type.Literal("owner")])),
+    /** The exact content handed to the runtime (skills and references expanded, attachment block added), kept until the runtime holds the message so a restart delivers this, not a rebuilt prompt. */
+    delivery: Type.Optional(Type.Object({ content: Type.String({ minLength: 1, maxLength: 130_000 }) }, { additionalProperties: false })),
     /** Set once the runtime holds the message's submission; a ledger record without it was recorded but not necessarily admitted. */
     admitted: Type.Optional(Type.Literal(true)),
     /** Transcript entry the message became, once the runtime placed it. */

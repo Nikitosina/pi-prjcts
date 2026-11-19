@@ -48,10 +48,16 @@ export const memoryEntry = (path) => (cache.projectId === state.projectId ? cach
 let recent = { projectId: null, writes: new Map(), ready: false };
 let recentLoad = null;
 
-/** Reads `memory-recent` for the selected project. A call while one is in flight joins it, or with `again` runs once more after it. */
-export function refreshRecentMemory({ again = false } = {}) {
+/** Reads `memory-recent` for the selected project. A call while one is in flight joins it, or with `again` runs once more after it.
+ * `invalidate` (after a reconnect) withdraws the Undo state held so far: events may have been missed, so it is not offered until a read that starts now answers. */
+export function refreshRecentMemory({ again = false, invalidate = false } = {}) {
   const projectId = state.projectId;
   if (!projectId) return null;
+  if (invalidate && recent.projectId === projectId && recent.ready) {
+    recent = { ...recent, ready: false };
+    emit("memory-recent", projectId);
+    again = true;
+  }
   if (recentLoad?.projectId === projectId) {
     if (again) recentLoad.again = true;
     return recentLoad.promise;

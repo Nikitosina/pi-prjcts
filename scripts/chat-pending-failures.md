@@ -31,3 +31,24 @@ Written before the code. Each case names how the page can go wrong; `scripts/cha
 - P10 A job the host recorded but never admitted is shown as Sent, or Retry returns it without admitting, so the message never arrives.
 - P10b A pending message is matched by its text (equal, or followed by a blank line and appended blocks) to a different transcript message, so one message swallows another.
 - P10c Without a transcript entry linked to the pending message's own request, a bubble guesses; it must stay unconfirmed instead.
+
+## Delivery recovery (decisions/message-delivery-recovery.md)
+
+Written before the code. The saved request is the intent: a restart continues it under its own id, or leaves it visibly unknown.
+
+- R1 A message the host recorded but never admitted (any client, including one that supplied no id, or Telegram) is lost on restart, or admitted from a rebuilt prompt instead of the content that was saved (skill expansion, references, attachment block).
+- R2 The runtime holds the submission but the ledger was not marked admitted (crash between the two): a restart admits it again, so the chat gets a second turn.
+- R3 An admitted message is admitted again after a restart.
+- R4 A legacy record without saved content is delivered from a guess, or hidden; it must stay unconfirmed, and only the owner's explicit Send again delivers it (once).
+- R5 A saved message whose chat was archived meanwhile is delivered into the main chat, or the check is skipped; it must stay undelivered and unconfirmed.
+- R6 The saved effective content stays in the record after admission.
+- R7 The attachment block delivered after a restart differs from the one saved (a renamed or deleted upload changes the text).
+- R8 A turn-card Retry whose ack was lost sends under a new request id on the next click, so the chat gets two turns.
+- R9 A browser reload with a message in flight loses the bubble: the owner types it again (a duplicate) or sees nothing about it. A recovery handle must survive the reload, belong to one project and chat, and never leak into another.
+- R10 A restored draft that the owner edited stays tied to the old bubble: the old bubble hides Retry, or sending the edit reuses the old request id.
+- R11 A JSON error that did not come from the host's own refusal (a gateway) is taken as proof that nothing was sent, so the draft is restored and a second copy can be sent.
+- R12 A Telegram replay of a record saved before origins were stored is refused as a different message, or a conflicting replay (other text, other chat, a web record) is accepted.
+- R13 A denied recovery or admission grants the invoked skill's access.
+- R14 Undo is offered from a stale answer after a reconnect or while a read is in flight, or the worker feed never learns the Undo state.
+- R15 A long pending message is not clamped like the saved one.
+- R16 A job id embedded in the page (a report link in a message) is trusted without being one of the project's jobs.

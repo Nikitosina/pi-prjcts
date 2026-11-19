@@ -4,6 +4,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { createKit, call, say } from "./lib/e2e-kit.mjs";
 
 const kit = await createKit("chat-pending", {
@@ -19,12 +20,29 @@ const kit = await createKit("chat-pending", {
     return say(`ACK ${user.replace(/\s+/g, " ").slice(0, 120)}`);
   },
 });
-const { check, rpc } = kit;
+const { rpc } = kit;
+// E2E_SOFT=1 reports failing checks of the recovery sections instead of stopping at the first (used to show every red case before the fix).
+const soft = process.env.E2E_SOFT === "1";
+const check = (label, ok, detail) =>
+  soft && !ok ? console.log(`RED ${label}: ${JSON.stringify(detail ?? null).slice(0, 300)}`) : kit.check(label, ok, detail);
+const section = async (name, body) => {
+  if (!soft) return body();
+  try {
+    await body();
+  } catch (error) {
+    console.log(`RED ${name}: ${String(error.message).split("\n")[0].slice(0, 300)}`);
+  }
+};
 kit.initRepo();
 mkdirSync(join(kit.agentDir, "skills", "pend-skill"), { recursive: true });
 writeFileSync(
   join(kit.agentDir, "skills", "pend-skill", "SKILL.md"),
   "---\nname: pend-skill\ndescription: Pending-send fixture skill.\n---\n\nBODY-pend-skill\n",
+);
+mkdirSync(join(kit.agentDir, "skills", "pend-skill-denied"), { recursive: true });
+writeFileSync(
+  join(kit.agentDir, "skills", "pend-skill-denied", "SKILL.md"),
+  "---\nname: pend-skill-denied\ndescription: Pending-send fixture skill for denied recovery.\n---\n\nBODY-pend-skill-denied\n",
 );
 
 const wrapFetch = `(() => {
@@ -46,7 +64,12 @@ const wrapFetch = `(() => {
     if (rule.fail === "json") {
       delete rule.fail;
       entry.end = performance.now();
-      return new Response(JSON.stringify({ ok: false, error: "Not admitted: simulated refusal" }), { status: 500, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify({ ok: false, refused: true, error: "Not admitted: simulated refusal" }), { status: 400, headers: { "content-type": "application/json" } });
+    }
+    if (rule.fail === "gateway") {
+      delete rule.fail;
+      entry.end = performance.now();
+      return new Response(JSON.stringify({ ok: false, error: "Bad gateway: simulated proxy error" }), { status: 502, headers: { "content-type": "application/json" } });
     }
     if (rule.fail === "recorded") {
       delete rule.fail;
@@ -556,4 +579,273 @@ await kit.run(async () => {
   await Promise.all([send({ text: "race MARK-RACE", requestId: racing }), send({ text: "race MARK-RACE", requestId: racing })]);
   await kit.delay(500);
   check("H5 concurrent sends of one id deliver once", (await hostCount(A, undefined, "MARK-RACE")) === 1);
+
+  const sendButtonRetry = (id) => ev(`document.querySelector('[data-retry-job="${id}"]').click()`);
+  const waitChat = async (id, chat) => {
+    await select(chatButton(id, chat));
+    await page.waitFor(
+      `document.querySelector(${JSON.stringify(chatButton(id, chat))}).getAttribute("aria-current") === "true"`,
+      `${chat} selected`,
+    );
+  };
+  const clearComposer = () =>
+    ev(`(() => { const box = document.querySelector('#composer-input'); box.value = ""; box.dispatchEvent(new Event("input")); })()`);
+  await clearComposer();
+
+  // R8: a turn-card Retry whose ack was lost is the same delivery on the next click.
+  await section("R8", async () => {
+    const lostRetry = randomUUID();
+    plant({
+      id: lostRetry,
+      text: "turn lost MARK-R8",
+      state: "failed",
+      error: "provider exploded",
+      at: new Date(Date.now() + 120000).toISOString(),
+      admitted: true,
+    });
+    await waitChat(A, other);
+    await waitChat(A, "main");
+    await page.waitFor(`!!document.querySelector('[data-retry-job="${lostRetry}"]')`, "R8 turn card Retry");
+    await reset();
+    await ev(`__rule("message", { fail: "network" })`);
+    await sendButtonRetry(lostRetry);
+    await page.waitFor(
+      `[...document.querySelectorAll('#feed .msg.owner')].some((n) => n.dataset.delivery === "unconfirmed") && !document.querySelector('[data-retry-job]')?.disabled`,
+      "R8 unconfirmed",
+    );
+    await sendButtonRetry(lostRetry);
+    await page.waitFor(`document.querySelector('#feed').innerText.includes("ACK turn lost MARK-R8")`, "R8 answered");
+    const lostCalls = await calls("message");
+    check("R8 both clicks use one request id", lostCalls.length === 2 && lostCalls[0].requestId === lostCalls[1].requestId, lostCalls);
+    check("R8 the chat got one turn", (await hostCount(A, undefined, "MARK-R8")) === 1);
+  });
+  // R9: a reload keeps a recovery handle for the message in flight; it is not shown in another project and Retry reuses the id.
+  await section("R9", async () => {
+    await reset();
+    await ev(`__rule("message", { fail: "network" })`);
+    await typeAndSend("reload MARK-R9");
+    await page.waitFor(
+      `[...document.querySelectorAll('#feed .msg.owner')].some((n) => n.dataset.delivery === "unconfirmed")`,
+      "R9 unconfirmed",
+    );
+    const beforeReload = (await calls("message"))[0].requestId;
+    await ev(`delete window.__calls`);
+    await page.reload();
+    await page.waitFor(
+      `!window.__calls && document.body.dataset.ready === "1" && !!document.querySelector('#composer-input')`,
+      "R9 reloaded",
+    );
+    await ev(wrapFetch);
+    await page.waitFor(`(document.querySelector('#feed')?.innerText ?? "").includes("ACK turn lost MARK-R8")`, "R9 transcript");
+    const reloaded = await owners("MARK-R9");
+    check("R9 the message survives a reload as unconfirmed", reloaded.length === 1 && reloaded[0].delivery === "unconfirmed", reloaded);
+    await waitChat(A, other);
+    check("R9 the handle is not shown in another chat", (await owners("MARK-R9")).length === 0);
+    await select(inTree(B));
+    await page.waitFor(`document.querySelector('#feed').innerText.includes("seed B MARK-SEED-B")`, "R9 B transcript");
+    check("R9 the handle is not shown in another project", (await owners("MARK-R9")).length === 0);
+    await select(chatButton(A, "main"));
+    await page.waitFor(`document.querySelector('#feed').innerText.includes("ACK turn lost MARK-R8")`, "R9 A again");
+    await reset();
+    await ev(`document.querySelector('#feed [data-pending-retry]').click()`);
+    await page.waitFor(`document.querySelector('#feed').innerText.includes("ACK reload MARK-R9")`, "R9 retried");
+    const afterReload = await calls("message");
+    check(
+      "R9 Retry after the reload reuses the request id",
+      afterReload.length === 1 && afterReload[0].requestId === beforeReload,
+      afterReload,
+    );
+    check("R9 the host stored it once", (await hostCount(A, undefined, "MARK-R9")) === 1);
+    await ev(`__rule("message", { fail: "lost" })`);
+    await typeAndSend("reload in flight MARK-R9B");
+    await kit.eventually(async () => (await hostCount(A, undefined, "MARK-R9B")) === 1, "R9B reached the host");
+    await ev(`delete window.__calls`);
+    await page.reload();
+    await page.waitFor(
+      `!window.__calls && document.body.dataset.ready === "1" && !!document.querySelector('#composer-input')`,
+      "R9B reloaded",
+    );
+    await ev(wrapFetch);
+    await page.waitFor(`document.querySelector('#feed').innerText.includes("ACK reload in flight MARK-R9B")`, "R9B reply");
+    await kit.delay(500);
+    const inFlight = await owners("MARK-R9B");
+    check("R9 an admitted message becomes one canonical message after a reload", inFlight.length === 1 && !inFlight[0].pending, inFlight);
+    check(
+      "R9 nothing was sent again after the reload",
+      (await countCalls("message")) === 0 && (await hostCount(A, undefined, "MARK-R9B")) === 1,
+    );
+  });
+  // R10: an edited restored draft is its own message and stays in its chat; the old bubble keeps its text and id.
+  await section("R10", async () => {
+    await reset();
+    await ev(`__rule("message", { fail: "json" })`);
+    await typeAndSend("restored MARK-R10");
+    await page.waitFor(`[...document.querySelectorAll('#feed .msg.owner')].some((n) => n.dataset.delivery === "failed")`, "R10 failed");
+    const refusedId = (await calls("message"))[0].requestId;
+    await ev(`document.querySelector('#composer-input').focus()`);
+    await page.cdp("Input.insertText", { text: " edited" });
+    await waitChat(A, other);
+    check("R10 the edited draft does not follow the owner into another chat", (await composer()) === "", await composer());
+    await waitChat(A, "main");
+    check("R10 it is back in its own chat", (await composer()) === "restored MARK-R10 edited", await composer());
+    await reset();
+    await ev(`document.querySelector('#composer').requestSubmit()`);
+    await page.waitFor(`document.querySelector('#feed').innerText.includes("ACK restored MARK-R10 edited")`, "R10 edited answered");
+    await ev(`document.querySelector('#feed [data-pending-retry]').click()`);
+    await page.waitFor(`document.querySelectorAll('#feed .msg.owner.pending').length === 0`, "R10 old retried");
+    const isolated = await calls("message");
+    check(
+      "R10 the edit is a new message and the old bubble retries its own text and id",
+      isolated.length === 2 &&
+        isolated[0].requestId !== refusedId &&
+        isolated[1].requestId === refusedId &&
+        isolated[1].text === "restored MARK-R10",
+      isolated,
+    );
+  });
+  // R11: a JSON error that is not the host's own refusal is unconfirmed, not "Not sent".
+  await section("R11", async () => {
+    await reset();
+    await ev(`__rule("message", { fail: "gateway" })`);
+    await typeAndSend("gateway MARK-R11");
+    await page.waitFor(`[...document.querySelectorAll('#feed .msg.owner')].some((n) => n.dataset.delivery)`, "R11 settled");
+    await kit.delay(600);
+    const gateway = await owners("MARK-R11");
+    check(
+      "R11 a gateway error is unconfirmed",
+      gateway.some((item) => item.delivery === "unconfirmed"),
+      gateway,
+    );
+    check("R11 the draft was not restored", (await composer()) === "");
+    await ev(`document.querySelector('#feed [data-pending-retry]').click()`);
+    await page.waitFor(`document.querySelector('#feed').innerText.includes("ACK gateway MARK-R11")`, "R11 retried");
+    check("R11 one turn", (await hostCount(A, undefined, "MARK-R11")) === 1);
+  });
+  // R15: a long pending message is clamped like a saved one.
+  await section("R15", async () => {
+    await reset();
+    await ev(`__hold("message")`);
+    const longText = Array.from({ length: 40 }, (_, index) => `line ${index} MARK-R15`).join("\n\n");
+    await ev(
+      `(() => { const box = document.querySelector('#composer-input'); box.value = ${JSON.stringify(longText)}; box.dispatchEvent(new Event("input")); document.querySelector('#composer').requestSubmit(); })()`,
+    );
+    await page.waitFor(`document.querySelectorAll('#feed .msg.owner.pending').length === 1`, "R15 pending");
+    await kit.delay(300);
+    const clamp = await ev(
+      `(() => { const n = document.querySelector('#feed .msg.owner.pending'); return { overflow: n.dataset.overflow, height: n.querySelector('.bubble').getBoundingClientRect().height }; })()`,
+    );
+    check("R15 the pending bubble is clamped", clamp.overflow === "1" && clamp.height < 260, clamp);
+    await ev(`__release("message")`);
+    await page.waitFor(`document.querySelector('#feed').innerText.includes("ACK line 0 MARK-R15")`, "R15 answered");
+  });
+  // R16: a worker link that is not one of the project's jobs does not open a worker.
+  await section("R16", async () => {
+    await ev(
+      `document.querySelector('#feed').insertAdjacentHTML("beforeend", '<button id="forged" data-open-worker="00000000-0000-4000-8000-000000000000">forged</button>')`,
+    );
+    await ev(`document.querySelector('#forged').click()`);
+    await kit.delay(500);
+    check(
+      "R16 a forged job id opens nothing",
+      await ev(
+        `(() => { const view = document.querySelector('#focus-view'); return !view || view.hidden || !view.querySelector('.focus-head'); })()`,
+      ),
+    );
+    await ev(`document.querySelector('#forged')?.remove()`);
+  });
+  // R14: after a reconnect, Undo waits for a fresh answer instead of trusting the old one.
+  await section("R14", async () => {
+    await kit.ask(A, "MARK-REMEMBERX please");
+    await page.waitFor(`[...document.querySelectorAll('[data-memory-undo]')].length >= 1`, "R14 Undo shown");
+    await ev(`__hold("memory-recent")`);
+    await reset();
+    await kit.restartHost();
+    await page.waitFor(`(__calls.filter((c) => c.action === "memory-recent").length) >= 1`, "R14 refresh after the reconnect", 400);
+    check(
+      "R14 Undo is withheld while the post-reconnect read is in flight",
+      (await ev(`document.querySelectorAll('[data-memory-undo]').length`)) === 0,
+    );
+    await ev(`__release("memory-recent")`);
+    await page.waitFor(`document.querySelectorAll('[data-memory-undo]').length >= 1`, "R14 Undo back after the fresh answer");
+  });
+  // R12: a record saved before origins were stored takes a Telegram replay of the same message; conflicts are refused.
+  await section("R12", async () => {
+    const olderThanOrigins = randomUUID();
+    plant({ id: olderThanOrigins, text: "older MARK-R12", state: "queued" });
+    const conflict = await kit.rejects({
+      action: "message",
+      id: A,
+      text: "older MARK-R12 other",
+      requestId: olderThanOrigins,
+      origin: "telegram",
+    });
+    check("R12 a replay with other text is refused", /different message/.test(conflict ?? ""), conflict);
+    const replayed = await send({ text: "older MARK-R12", requestId: olderThanOrigins, origin: "telegram" });
+    check(
+      "R12 the same message from a legacy record is accepted once",
+      replayed.admitted === true && replayed.id === olderThanOrigins,
+      replayed,
+    );
+    const webRecord = randomUUID();
+    await send({ text: "web MARK-R12W", requestId: webRecord });
+    const forged = await kit.rejects({ action: "message", id: A, text: "web MARK-R12W", requestId: webRecord, origin: "telegram" });
+    check("R12 a web message is not claimed by a Telegram replay", /different message/.test(forged ?? ""), forged);
+  });
+  // R1-R6: records the host saved before admitting (the CLI and the web page supply no id the host could not make up itself).
+  await section("R1-R6", async () => {
+    const saved = (id, content, extra = {}) =>
+      plant({ id, text: extra.text ?? content, state: "queued", delivery: { content }, origin: "owner", ...extra });
+    const recoverTelegram = randomUUID(),
+      recoverMain = randomUUID(),
+      recoverDenied = randomUUID(),
+      recoverTwice = randomUUID();
+    saved(recoverTelegram, "EFFECTIVE-ONLY expanded text MARK-R1", {
+      text: "/skill:pend-skill short MARK-R1",
+      chatId: other,
+      origin: "telegram",
+    });
+    saved(recoverMain, "EFFECTIVE-MAIN no client id MARK-R1B");
+    saved(recoverDenied, "EFFECTIVE-DENIED MARK-R5", { text: "/skill:pend-skill-denied go MARK-R5", chatId: archived });
+    const twice = await send({ text: "delivered once MARK-R2", requestId: recoverTwice });
+    const twiceRecord = JSON.parse(ledgerText(recoverTwice));
+    delete twiceRecord.admitted;
+    delete twiceRecord.entry;
+    writeFileSync(ledgerPath(recoverTwice), JSON.stringify({ ...twiceRecord, delivery: { content: "delivered once MARK-R2" } }));
+    await kit.restartHost();
+    await kit.eventually(async () => (await hostCount(A, other, "EFFECTIVE-ONLY")) === 1, "saved Telegram message recovered");
+    await kit.eventually(async () => (await hostCount(A, undefined, "EFFECTIVE-MAIN")) === 1, "saved main message recovered");
+    await kit.delay(800);
+    check("R1 the saved content, not a rebuilt prompt, reached its own chat once", (await hostCount(A, other, "EFFECTIVE-ONLY")) === 1);
+    check("R1 it did not reach the main chat", (await hostCount(A, undefined, "EFFECTIVE-ONLY")) === 0);
+    check("R1 a record without a client id is recovered once", (await hostCount(A, undefined, "EFFECTIVE-MAIN")) === 1);
+    const recovered = JSON.parse(ledgerText(recoverTelegram));
+    check("R1 the record is admitted and keeps its origin", recovered.admitted === true && recovered.origin === "telegram", recovered);
+    check(
+      "R6 the saved content is dropped once admitted",
+      !("delivery" in recovered) && !("delivery" in JSON.parse(ledgerText(recoverMain))),
+    );
+    check("R2 an admitted message is reconciled, not admitted again", (await hostCount(A, undefined, "MARK-R2")) === 1);
+    check(
+      "R2 and its record is marked admitted",
+      JSON.parse(ledgerText(recoverTwice)).admitted === true && !("delivery" in JSON.parse(ledgerText(recoverTwice))),
+    );
+    check(
+      "R3 an already admitted message stays single over a restart",
+      (await hostCount(A, other, "MARK-ID")) === 1 && twice.admitted === true,
+    );
+    check(
+      "R5 a message whose chat was archived is not delivered anywhere",
+      (await hostCount(A, archived, "EFFECTIVE-DENIED")) === 0 && (await hostCount(A, undefined, "EFFECTIVE-DENIED")) === 0,
+    );
+    check("R5 it stays unadmitted for the owner to see", JSON.parse(ledgerText(recoverDenied)).admitted !== true);
+    check("R13 the denied recovery granted no skill access", !invokedSkills().includes("pend-skill-denied"), invokedSkills());
+    const cli = spawnSync(process.execPath, [join(kit.core, "src", "cli.ts"), "send", A, "from the CLI MARK-CLI"], {
+      cwd: kit.core,
+      env: kit.hostEnv,
+      encoding: "utf8",
+      timeout: 60000,
+    });
+    await kit.eventually(async () => (await hostCount(A, undefined, "MARK-CLI")) === 1, "CLI message delivered");
+    check("R1 the CLI send is admitted once with a host-made id", cli.status === 0 && /"admitted": true/.test(cli.stdout), cli);
+  });
 });

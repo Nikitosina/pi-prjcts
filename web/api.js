@@ -26,11 +26,11 @@ export function setToken(value) {
 }
 
 export class HostError extends Error {
-  /** `answered` is false when the reply was not the host's own (no JSON body), so the request may still have been acted on. */
-  constructor(message, status, answered = true) {
+  /** `refused` is true only when the host itself said it changed nothing; any other failure, a gateway's JSON included, leaves the request possibly acted on. */
+  constructor(message, status, refused = false) {
     super(message);
     this.status = status;
-    this.answered = answered;
+    this.refused = refused;
   }
 }
 export async function call(action, input = {}) {
@@ -44,9 +44,9 @@ export async function call(action, input = {}) {
   try {
     body = await response.json();
   } catch {
-    throw new HostError(`Host answered HTTP ${response.status}`, response.status, false);
+    throw new HostError(`Host answered HTTP ${response.status}`, response.status);
   }
-  if (!body.ok) throw new HostError(String(body.error ?? "Request failed"), response.status);
+  if (!body.ok) throw new HostError(String(body.error ?? "Request failed"), response.status, body.refused === true);
   return body.data;
 }
 

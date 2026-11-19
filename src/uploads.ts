@@ -215,4 +215,14 @@ export function attachmentContent(
   const block = `${text}\n\n${ATTACHMENT_HEADER}\n${lines.join("\n")}`;
   return images.length ? [{ type: "text", text: block }, ...images] : block;
 }
+/** The reduced image copies of an owner message's attachments, for content whose text was saved earlier. */
+export function attachmentImages(dir: string, ids: readonly string[] | undefined, acceptsImages: boolean): ImagePart[] {
+  if (!ids?.length || !acceptsImages) return [];
+  const known = new Map(listUploads(dir).map((record) => [record.id, record]));
+  return ids.flatMap((id) => {
+    const record = known.get(id),
+      copy = record?.kind === "image" ? uploadModelCopy(dir, id) : null;
+    return copy ? [copy] : [];
+  });
+}
 export const ATTACHMENT_HEADER = "[Attached files: project uploads; read with projects_upload_read, find with projects_search]";

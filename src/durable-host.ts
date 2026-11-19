@@ -1,7 +1,9 @@
 import { inbox } from "./inbox.ts";
 import { evidence } from "./evidence.ts";
 import { openDurableProject, type DurableProjectRuntime, type DurableSubmissionState } from "./durable-runtime.ts";
-import { listUploads } from "./uploads.ts";
+import { attachmentImages, listUploads } from "./uploads.ts";
+import { skillNames } from "./coordinator-skills.ts";
+import { recordInvokedSkill } from "./skill-profiles.ts";
 import { plugins } from "./plugins.ts";
 import { feed } from "./change-feed.ts";
 import type { MessageText } from "./transcript-reader.ts";
@@ -40,11 +42,43 @@ export async function openDurableHost(
   });
   opened = owner;
   try {
+    await recoverUnadmitted(owner, project);
     await settle();
     return owner;
   } catch (error) {
     await owner.close();
     throw error;
+  }
+}
+
+// A message the host saved with its exact content but never marked admitted is continued under its own request id: the runtime's receipt is read
+// first, and only a message the runtime does not hold is admitted, from the saved content, to the saved chat. A refusal leaves the record unconfirmed.
+async function recoverUnadmitted(owner: DurableProjectRuntime, project: Project): Promise<void> {
+  const waiting = jobs(project.id).filter((job) => job.delivery && !job.admitted && (job.state === "queued" || job.state === "running"));
+  if (!waiting.length) return;
+  const dir = projectDir(project.id);
+  for (const job of waiting) {
+    const chatId = job.chatId ?? "main";
+    try {
+      if (!(await owner.ledgerSubmissions(chatId, [job.id])).length) {
+        const current = loadProject(project.id);
+        if (current.deleted || current.archived || (await owner.jobs()).paused) continue;
+        const chat = (await owner.chats()).find((item) => item.id === chatId);
+        if (!chat || chat.archived) continue;
+        for (const invoked of skillNames(job.text)) recordInvokedSkill(dir, invoked);
+        const images = attachmentImages(dir, job.attachments, owner.acceptsImages);
+        await owner.admit(images.length ? [{ type: "text", text: job.delivery!.content }, ...images] : job.delivery!.content, {
+          requestId: job.id,
+          origin: job.origin === "telegram" ? "telegram" : undefined,
+          chatId: job.chatId,
+          title: job.text,
+        });
+      }
+      const { delivery: _saved, ...held } = jobs(project.id).find((item) => item.id === job.id) ?? job;
+      saveJob(project.id, { ...held, admitted: true });
+    } catch {
+      // Stays unconfirmed; the owner's explicit retry carries the same request id.
+    }
   }
 }
 
@@ -54,7 +88,7 @@ function settleLedger(projectId: string, ledger: JobLedger, submissions: Durable
   for (const job of ledger) {
     const submission = submissions.find((item) => item.requestId === job.id);
     if (!submission) continue;
-    const before = `${job.state}\0${job.error}\0${job.admitted}\0${job.entry}`,
+    const before = `${job.state}\0${job.error}\0${job.admitted}\0${job.entry}\0${!!job.delivery}`,
       wasSettled = job.state === "done" || job.state === "failed";
     switch (submission.status) {
       case "queued":
@@ -81,8 +115,9 @@ function settleLedger(projectId: string, ledger: JobLedger, submissions: Durable
     // Stamped on the observed transition only, so turns that finished before this field existed do not light up.
     if ((job.state === "done" || job.state === "failed") && !wasSettled) job.settledAt = Date.now();
     job.admitted = true;
+    delete job.delivery;
     if (submission.entry !== null) job.entry = submission.entry;
-    if (`${job.state}\0${job.error}\0${job.admitted}\0${job.entry}` !== before || alwaysSave) saveJob(projectId, job);
+    if (`${job.state}\0${job.error}\0${job.admitted}\0${job.entry}\0${!!job.delivery}` !== before || alwaysSave) saveJob(projectId, job);
   }
 }
 

@@ -110,7 +110,7 @@ import {
 } from "./github-authorization.ts";
 import { settingsApplication } from "./settings-application.ts";
 import { libraryImport, libraryList, libraryRead } from "./project-library.ts";
-import { attachmentContent, deleteUpload, listUploads, saveUpload, uploadRecord, uploadText } from "./uploads.ts";
+import { attachmentContent, attachmentImages, deleteUpload, listUploads, saveUpload, uploadRecord, uploadText } from "./uploads.ts";
 import { createModelRuntime, loadProviderExtensions } from "./provider-extensions.ts";
 import { openToolSummaries } from "./tool-summaries.ts";
 import { projectModelCatalog, projectModelPicker } from "./project-models.ts";
@@ -226,6 +226,20 @@ async function withProjectLock<T>(id: string, operation: () => Promise<T>, durin
   }
 }
 
+/** An error raised before the host recorded or changed anything: the client may treat the request as not sent. */
+class Refused extends Error {}
+async function refusing<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    throw error instanceof Refused ? error : new Refused(errorText(error));
+  }
+}
+/** The text of an owner message with its attachment block, as the runtime receives it. */
+function attachmentText(dir: string, text: string, job: import("./state.ts").Job, acceptsImages: boolean): string {
+  const content = attachmentContent(dir, text, job.attachments, acceptsImages);
+  return typeof content === "string" ? content : content[0].type === "text" ? content[0].text : text;
+}
 async function withDurableOwner<T>({
   id,
   validate,
@@ -1656,7 +1670,9 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         },
       });
     case "message": {
-      const prepareJob = () => {
+      const origin: "telegram" | "owner" = input.origin ?? "owner",
+        chatId = input.chatId ?? "main";
+      const prepareJob = (): import("./state.ts").Job => {
         const project = loadProject(input.id);
         if (project.deleted) throw new Error("Project is deleted; admission is denied");
         if (project.archived) throw new Error("Project is archived; admission is denied");
@@ -1667,58 +1683,71 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           at: new Date().toISOString(),
           state: "queued",
           error: null,
+          origin,
           ...(input.chatId && input.chatId !== "main" ? { chatId: input.chatId } : {}),
           ...(input.attachments ? { attachments: input.attachments } : {}),
-          ...(input.origin ? { origin: input.origin } : {}),
-        } satisfies import("./state.ts").Job;
+        };
       };
-      // The runtime may have settled the job while it was being admitted, so the saved record is the base.
+      // The runtime may have settled the job while it was being admitted, so the saved record is the base. Once the runtime holds the message, its saved content is dropped.
       const markAdmitted = (job: import("./state.ts").Job) => {
-        const held = { ...(jobById(input.id, job.id) ?? job), admitted: true as const };
+        const { delivery: _saved, ...held } = { ...(jobById(input.id, job.id) ?? job), admitted: true as const };
         saveJob(input.id, held);
         return held;
       };
       return withDurableOwner({
         id: input.id,
         validate: (project) => {
-          if (project.deleted) throw new Error("Project is deleted; admission is denied");
-          if (project.archived) throw new Error("Project is archived; admission is denied");
+          if (project.deleted) throw new Refused("Project is deleted; admission is denied");
+          if (project.archived) throw new Refused("Project is archived; admission is denied");
         },
         operation: async (owner) => {
           // A request ID names one message: a repeat must carry the same chat, text, attachments and origin, or it is refused before anything is touched.
+          // A record from before origins were stored has none and takes a repeat from any origin.
           const prior = input.requestId ? jobById(input.id, input.requestId) : undefined;
           if (
             prior &&
-            ((prior.chatId ?? "main") !== (input.chatId ?? "main") ||
+            ((prior.chatId ?? "main") !== chatId ||
               prior.text !== input.text ||
               JSON.stringify(prior.attachments ?? []) !== JSON.stringify(input.attachments ?? []) ||
-              prior.origin !== input.origin)
+              (prior.origin !== undefined && prior.origin !== origin))
           )
-            throw new Error("This request id belongs to a different message; nothing was changed");
+            throw new Refused("This request id belongs to a different message; nothing was changed");
           if (prior?.admitted) return prior;
-          if (prior && (await owner.ledgerSubmissions(input.chatId ?? "main", [prior.id])).length) return markAdmitted(prior);
+          if (prior && (await owner.ledgerSubmissions(chatId, [prior.id])).length) return markAdmitted(prior);
           // A settled record the runtime has no submission for is history, not a message waiting to be sent.
           if (prior && prior.state !== "queued" && prior.state !== "running") return prior;
-          const job = prior ?? prepareJob();
-          // The job keeps what the owner typed; the coordinator receives the expanded skill.
-          // `/skill:<name>` anywhere: skill blocks precede the owner's words. `@issue:/@doc:/@upload:/@file:` and `#123` / `PR #123`: compact untrusted blocks follow them.
-          const text =
-            (skillNames(job.text).length ? await expandSkillCommand(await configuredSkills(input.id), job.text) : job.text) +
-            (await referencedItemsBlock(loadProject(input.id), ownedProjectDir(input.id), job.text)) +
-            (await referencedPrBlock(loadProject(input.id), job.text));
-          if (text.length > 120_000)
-            throw new Error(`Message with its skills and references is too large to send (${text.length} characters; limit 120000)`);
-          const plan = await owner.jobs();
-          if (plan.paused) throw new Error("Project plan is paused; admission is denied");
-          // Validate the chat before recording the job, so an unknown or archived chat leaves no ledger entry.
-          const chat = (await owner.chats()).find((item) => item.id === (input.chatId ?? "main"));
-          if (!chat) throw new Error("Unknown chat for this project");
-          if (chat.archived) throw new Error("Chat is archived; restore it before sending");
+          // Everything that can refuse runs before anything is recorded or granted.
+          const job = await refusing(async () => {
+            const job = prior ?? prepareJob();
+            // The saved content is the message; only a record without it (legacy) or a new message is built from the text.
+            // The job keeps what the owner typed; the coordinator receives the expanded skill.
+            // `/skill:<name>` anywhere: skill blocks precede the owner's words. `@issue:/@doc:/@upload:/@file:` and `#123` / `PR #123`: compact untrusted blocks follow them.
+            const text =
+              job.delivery?.content ??
+              (skillNames(job.text).length ? await expandSkillCommand(await configuredSkills(input.id), job.text) : job.text) +
+                (await referencedItemsBlock(loadProject(input.id), ownedProjectDir(input.id), job.text)) +
+                (await referencedPrBlock(loadProject(input.id), job.text));
+            if (text.length > 120_000)
+              throw new Error(`Message with its skills and references is too large to send (${text.length} characters; limit 120000)`);
+            if ((await owner.jobs()).paused) throw new Error("Project plan is paused; admission is denied");
+            // Validate the chat before recording the job, so an unknown or archived chat leaves no ledger entry.
+            const chat = (await owner.chats()).find((item) => item.id === chatId);
+            if (!chat) throw new Error("Unknown chat for this project");
+            if (chat.archived) throw new Error("Chat is archived; restore it before sending");
+            return {
+              ...job,
+              origin,
+              delivery: { content: job.delivery?.content ?? attachmentText(ownedProjectDir(input.id), text, job, owner.acceptsImages) },
+            };
+          });
           for (const invoked of skillNames(job.text)) recordInvokedSkill(ownedProjectDir(input.id), invoked);
-          if (!prior) saveJob(input.id, job);
-          await owner.admit(attachmentContent(ownedProjectDir(input.id), text, job.attachments, owner.acceptsImages), {
+          saveJob(input.id, job);
+          const dir = ownedProjectDir(input.id),
+            effective = job.delivery!.content,
+            images = attachmentImages(dir, job.attachments, owner.acceptsImages);
+          await owner.admit(images.length ? [{ type: "text", text: effective }, ...images] : effective, {
             requestId: job.id,
-            origin: job.origin,
+            origin: job.origin === "telegram" ? "telegram" : undefined,
             chatId: input.chatId,
             title: job.text,
           });
@@ -2072,7 +2101,9 @@ const server = createServer(async (request, response) => {
     const data = await dispatch(input);
     response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, data }));
   } catch (error) {
-    response.writeHead(400, { "content-type": "application/json" }).end(JSON.stringify({ ok: false, error: errorText(error) }));
+    response
+      .writeHead(400, { "content-type": "application/json" })
+      .end(JSON.stringify({ ok: false, error: errorText(error), ...(error instanceof Refused ? { refused: true } : {}) }));
   }
 });
 server.requestTimeout = 120000;
