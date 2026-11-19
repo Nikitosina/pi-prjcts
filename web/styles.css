@@ -1883,6 +1883,30 @@ a.pr-link:hover .pr-title {
 .plugin-error {
   color: var(--bad);
 }
+/* Settings → Plugins: the bundled plugin catalog above the cards. */
+.plugin-catalog {
+  margin-bottom: 14px;
+}
+.plugin-catalog h2 {
+  margin: 0 0 4px;
+}
+.catalog-row {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 12.5px;
+}
+.catalog-row .plugin-head {
+  flex-wrap: wrap;
+}
+.catalog-row .plugin-head .badge {
+  margin-left: auto;
+}
+.catalog-row p {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+}
 /* Settings → Plugins: one card per plugin; a panel's slot belongs to the plugin. */
 .plugin-card {
   margin-bottom: 12px;

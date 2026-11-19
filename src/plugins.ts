@@ -50,6 +50,8 @@ import { command } from "./workspace-isolation.ts";
 type Loaded = { plugin: string; builtIn?: true; capabilities: PluginCapabilities; web?: { "ui.js"?: WebFile; "ui.css"?: WebFile } };
 const loaded: Loaded[] = [];
 const statuses: PluginStatus[] = [];
+/** The loader's result per resolved plugin directory, as the running host started: what a later change to the configuration does not touch. */
+const attempts = new Map<string, PluginStatus>();
 let loading: Promise<PluginStatus[]> | undefined;
 
 /** Status source of a built-in plugin. */
@@ -172,6 +174,13 @@ export const plugins = {
   vcsExecutables: (): string[] => each((caps) => caps.vcs).flatMap((item) => [...(item.executables ?? [])]),
   workerRules: (): string[] => each((caps) => caps.vcs).flatMap((item) => (item.workerRule ? [item.workerRule] : [])),
   status: (): PluginStatus[] => statuses.map((item) => ({ ...item })),
+  /** The loader's result for the plugin at this directory, if this host tried it at its start. */
+  attempt: (directory: string): PluginStatus | undefined => {
+    const status = attempts.get(resolvePluginPath(directory));
+    return status && { ...status };
+  },
+  /** Resolved directories of the current configuration (`plugins.json` and the environment), loaded or not. */
+  configuredPaths: (): string[] => configured().flatMap((item) => ("path" in item ? [item.path] : [])),
   /** Display labels of providers with PR cards or follow events (for event titles). */
   labels: (): Record<string, string> => ({
     ...Object.fromEntries(each((caps) => caps.prs).map((item) => [item.id, item.label])),
@@ -182,6 +191,7 @@ export const plugins = {
   reset: () => {
     loaded.length = 0;
     statuses.length = 0;
+    attempts.clear();
     loading = undefined;
   },
 };
@@ -191,12 +201,14 @@ const message = (error: unknown) => (error instanceof Error ? error.message : St
 const NAME = /^[a-z][a-z0-9-]{0,39}$/;
 const VERSION = /^\S{1,40}$/;
 
+export const resolvePluginPath = (value: string): string =>
+  resolve(isAbsolute(value) ? value : value.startsWith("~/") ? join(process.env.HOME ?? "", value.slice(2)) : join(home(), value));
+
 /** Configured plugin sources: [{ source, path }] or a recorded problem. */
 function configured(): Array<{ source: string; path: string } | { source: string; problem: string }> {
   const out: Array<{ source: string; path: string } | { source: string; problem: string }> = [];
   const file = join(home(), "plugins.json");
-  const resolvePath = (value: string) =>
-    resolve(isAbsolute(value) ? value : value.startsWith("~/") ? join(process.env.HOME ?? "", value.slice(2)) : join(home(), value));
+  const resolvePath = resolvePluginPath;
   if (existsSync(file)) {
     try {
       const data = JSON.parse(readFileSync(file, "utf8")) as unknown;
@@ -455,7 +467,9 @@ export function loadPlugins(): Promise<PluginStatus[]> {
         });
         continue;
       }
-      statuses.push(await loadOne(item.source, item.path));
+      const status = await loadOne(item.source, item.path);
+      statuses.push(status);
+      attempts.set(item.path, status);
     }
     return plugins.status();
   })());

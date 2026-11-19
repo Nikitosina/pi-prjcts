@@ -8,7 +8,7 @@ import { setUi } from "./ui.js";
 import { STATUS_ITEMS } from "./statusline.js";
 import { promptSection } from "./prompts.js";
 import { connectCursor, limitShown, loadLimits, refreshLimits, setLimitShown } from "./limits.js";
-import { mountPanels, pluginCards } from "./plugins.js";
+import { catalogBlock, mountPanels, pluginCards, wireCatalog } from "./plugins.js";
 
 const dialog = document.querySelector("#settings");
 const PROFILES = [
@@ -537,9 +537,10 @@ async function storage(body, alive) {
 
 /** Every plugin the host loaded, and the panels plugins provide for this project (web/plugins.js). */
 async function pluginsSection(body, alive) {
-  const status = await call("plugins");
+  const [status, catalog] = await Promise.all([call("plugins"), call("plugin-catalog")]);
   if (!alive()) return;
-  body.innerHTML = `${line("Plugins this host loaded at its start, and the panels they provide for this project.", "A panel is the plugin's own code running in this page. A changed plugin shows here after a host restart and a page reload.")}${pluginCards(status) || `<p class="muted">No plugins are loaded. List one in plugins.json and restart the host.</p>`}`;
+  body.innerHTML = `${line("Plugins this host loaded at its start, and the panels they provide for this project.", "A panel is the plugin's own code running in this page. A changed plugin shows here after a host restart and a page reload.")}${catalogBlock(catalog.entries)}${pluginCards(status) || `<p class="muted">No plugins are loaded. List one in plugins.json and restart the host.</p>`}`;
+  wireCatalog(body, catalog.entries, () => showSection("deploy"));
   unmount = mountPanels(body, state.projectId, status.web);
 }
 
