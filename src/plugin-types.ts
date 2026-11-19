@@ -373,6 +373,8 @@ export type FollowPrState = {
   lastReview: number;
   lastComment: number;
   lastLineComment: number;
+  /** Host-owned: the merge's main checkout pull was skipped, so a later poll retries it. Providers neither set nor read it. */
+  pullSkipped?: true;
 };
 export type FollowItem = { id: string; line: string; notice?: Pick<PrNotice, "kind" | "text"> };
 export type FollowFailure = {

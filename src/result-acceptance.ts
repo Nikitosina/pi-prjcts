@@ -274,7 +274,7 @@ export function githubMergeProvider(): MergeProvider {
         const remoteDefault = await git(checkout, signal, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").catch(() => "");
         if (!remoteDefault) return { pulled: false, reason: "the default branch is unknown (origin/HEAD is not set)" };
         if (remoteDefault !== `origin/${base}`) return { pulled: false, reason: `${base} is not the default branch (${remoteDefault})` };
-        await git(checkout, signal, "pull", "--ff-only");
+        await git(checkout, signal, "pull", "--ff-only", "origin", base);
         return { pulled: true };
       } catch (error) {
         return { pulled: false, reason: `git pull failed: ${errorText(error).split("\n")[0]}` };
