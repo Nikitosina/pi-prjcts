@@ -234,7 +234,7 @@ export function catalogBlock(entries, error = "") {
             : "";
       const note =
         entry.state === "configured"
-          ? `<p class="small muted">Listed in plugins.json. It loads at the next host restart: run <code>npm run projects -- deploy</code> or wait for the nightly deploy window (Settings → Deploy).</p>`
+          ? `<p class="small muted">Configured on this host. It loads at the next host restart: run <code>npm run projects -- deploy</code>.</p>`
           : entry.state === "failed"
             ? `<p class="small plugin-error">${esc(clip(entry.error ?? "failed", 300))}</p>`
             : "";

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { BUNDLED_PLUGINS, isBundledPluginId, type BundledPlugin, type BundledPluginId } from "./bundled-plugins.ts";
 import type { PluginStatus } from "./plugin-types.ts";
@@ -27,10 +27,18 @@ export function describeEntry(item: BundledPlugin, facts: { attempt: PluginStatu
 }
 
 const configFile = () => join(home(), "plugins.json");
+const present = () => {
+  try {
+    lstatSync(configFile());
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 /** The raw `plugins.json` (`{ plugins: [...] }` or a bare array) and its list; refuses a file the loader would not read, so it is never overwritten. */
 function readConfig(): { data: unknown; list: string[] } | undefined {
-  if (!existsSync(configFile())) return undefined;
+  if (!present()) return undefined;
   try {
     const data = JSON.parse(readFileSync(configFile(), "utf8")) as unknown;
     const list = Array.isArray(data) ? data : (data as { plugins?: unknown } | null)?.plugins;
@@ -59,7 +67,7 @@ export const pluginCatalog = {
     const data =
       current === undefined ? { plugins: list } : Array.isArray(current.data) ? list : { ...(current.data as object), plugins: list };
     // A symlinked plugins.json stays the owner's file: write its target, not a new file over the link.
-    saveJson(existsSync(configFile()) ? realpathSync(configFile()) : configFile(), data);
+    saveJson(present() ? realpathSync(configFile()) : configFile(), data);
     return pluginCatalog.list();
   },
 };

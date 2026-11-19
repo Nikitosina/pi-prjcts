@@ -65,7 +65,7 @@ await kit.run(async () => {
   check(
     "13 the card names the existing deploy command and says a restart is needed",
     await page.evaluate(
-      `/npm run projects -- deploy/.test(document.querySelector(${js(row("tasks"))}).innerText) && !!document.querySelector(${js(`${row("tasks")} [data-catalog-deploy]`)})`,
+      `/restart/.test(document.querySelector(${js(row("tasks"))}).innerText) && /npm run projects -- deploy/.test(document.querySelector(${js(row("tasks"))}).innerText) && !!document.querySelector(${js(`${row("tasks")} [data-catalog-deploy]`)})`,
     ),
   );
   const afterClick = readFileSync(configFile, "utf8");

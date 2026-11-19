@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as chord from "@earendil-works/chord/context";
 import * as durable from "@earendil-works/pi-durable";
@@ -205,8 +205,14 @@ const resolvePluginPath = (value: string): string =>
   resolve(isAbsolute(value) ? value : value.startsWith("~/") ? join(process.env.HOME ?? "", value.slice(2)) : join(home(), value));
 
 /** Whether a resolved configured path is this plugin directory or the directory's entry file (the loader accepts both). */
-export const isPluginAt = (directory: string, path: string): boolean =>
-  path === directory || (dirname(path) === directory && /^index\.(ts|mjs|js)$/.test(basename(path)));
+export const isPluginAt = (directory: string, path: string): boolean => {
+  if (path === directory) return true;
+  try {
+    return entryOf(directory) === path;
+  } catch {
+    return false;
+  }
+};
 
 /** Configured plugin sources: [{ source, path }] or a recorded problem. */
 function configured(): Array<{ source: string; path: string } | { source: string; problem: string }> {

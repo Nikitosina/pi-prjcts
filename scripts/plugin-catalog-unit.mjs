@@ -82,6 +82,15 @@ try {
   assert.deepEqual(JSON.parse(readFileSync(owned, "utf8")).plugins, ["/ext/one", tasksDir], "6 the target file got the entry");
   rmSync(configFile);
 
+  // 6: a dangling link is refused, not replaced; and an entry file the loader would not pick is another plugin.
+  symlinkSync(join(root, "missing.json"), configFile);
+  assert.throws(() => pluginCatalog.activate("tasks"), /plugins\.json is unreadable/, "6 dangling link refused");
+  assert.ok(lstatSync(configFile).isSymbolicLink(), "6 dangling link kept");
+  rmSync(configFile);
+  writeFileSync(configFile, JSON.stringify({ plugins: [join(tasksDir, "index.js")] }));
+  assert.equal(entry("tasks").state, "available", "19 index.js does not exist in the plugin: not the same entry");
+  rmSync(configFile);
+
   // 6: the array form is kept as an array.
   writeFileSync(configFile, JSON.stringify(["/ext/one"]));
   pluginCatalog.activate("simulator");
