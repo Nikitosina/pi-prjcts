@@ -192,7 +192,7 @@ const gitEnv = () => ({ ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_CONFIG_NOSY
 export function quickWorkspacePreview(project: Project, approvedRoot: string): QuickWorkspacePreview {
   if (project.workspaceAuthorization?.scopes.some((scope) => scope.wholeRepository))
     return { available: false, blocker: "Workers can already edit this repository" };
-  const found = existsSync(project.cwd) ? findVcsRoot(project.cwd) : null;
+  const found = existsSync(project.cwd) ? findVcsRoot(project.cwd, project) : null;
   if (found && found.kind !== "git") {
     const provider = plugins.workspaceProvider(found.kind);
     return provider

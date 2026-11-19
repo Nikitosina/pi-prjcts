@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { plugins } from "./plugins.ts";
+import type { Project } from "./state.ts";
 
 /** Version-control binaries. */
 export const cli = {
@@ -9,8 +10,8 @@ export const cli = {
 };
 
 /** Nearest directory above `cwd` that is a checkout root. A plugin kind wins over `.git` in the same directory; a git repository nested in such a checkout is git. */
-export function findVcsRoot(cwd: string): { kind: string; root: string } | null {
-  const kinds = plugins.vcsProviders();
+export function findVcsRoot(cwd: string, project?: Pick<Project, "disabledPlugins">): { kind: string; root: string } | null {
+  const kinds = plugins.vcsProviders(project);
   for (let at = realpathSync(cwd); ; at = dirname(at)) {
     const provider = kinds.find((item) => item.isRoot(at));
     if (provider) return { kind: provider.kind, root: at };

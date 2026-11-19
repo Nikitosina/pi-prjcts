@@ -16,9 +16,17 @@ const shared = {
   repository: note("repository", "owner/repo"),
   observe: note("observe", {}),
 };
+const checkout = {
+  kind: "shared",
+  isRoot: () => (calls.push("isRoot"), false),
+  changedFiles: async () => [],
+  codeDiff: async () => "",
+  workerState: async () => ({ head: "" }),
+  resolveContinuation: async () => null,
+};
 export default {
   name: "shared",
   register(api) {
-    api.provide({ prs: shared, follow: shared });
+    api.provide({ prs: shared, follow: shared, vcs: checkout });
   },
 };
