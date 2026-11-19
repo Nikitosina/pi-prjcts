@@ -55,7 +55,7 @@ type State = {
   lastPollAt: number | null;
   deliveryErrors?: DeliveryError[];
   /** One progress message per Job, edited in place; `text` is what it shows now. */
-  progress?: Record<string, { messageId: number; text: string }>;
+  progress?: Record<string, { messageId: number; text: string; chatId?: number }>;
 };
 /** A Job's plan as the progress message shows it. `etaMin` is the caller's estimate; without it the remaining estimates are summed. */
 export type JobProgress = {
@@ -878,22 +878,30 @@ export function startTelegram(options: {
       throw new Error(UNCERTAIN_MEDIA);
     }
     if (state.sentPart?.seq !== notice.seq) state.sentPart = { seq: notice.seq, chatId: state.owner.chatId, parts: 0, plan };
-    const parts = state.sentPart.plan ?? plan;
-    state.sentPart.plan = parts;
+    const sentPart = state.sentPart;
+    const chatId = (sentPart.chatId ??= state.owner.chatId);
+    // Every part goes to the chat the notice was bound to; an owner replaced mid-delivery never receives the rest.
+    const bound = () => {
+      if (state.owner?.chatId !== chatId) throw new Error("Telegram recipient changed during delivery");
+    };
+    const parts = sentPart.plan ?? plan;
+    sentPart.plan = parts;
     persist();
-    if (state.sentPart.pendingMedia) throw new Error(UNCERTAIN_MEDIA);
+    bound();
+    if (sentPart.pendingMedia) throw new Error(UNCERTAIN_MEDIA);
     const hasMedia = parts.some((part) => part.kind !== "text");
     const target: Target = {
       projectId: notice.projectId,
       chatId: notice.chatId,
       ...(notice.kind === "question" ? { entryId: notice.entryId } : {}),
     };
-    for (let index = state.sentPart?.seq === notice.seq ? state.sentPart.parts : 0; index < parts.length; index++) {
+    for (let index = sentPart.parts; index < parts.length; index++) {
+      bound();
       const markup = index === parts.length - 1 && buttons.length ? { reply_markup: { inline_keyboard: buttons } } : {};
       // Only spillover or ungrouped items reply to the first media message.
       const reply =
-        hasMedia && state.sentPart.anchorMessageId
-          ? { reply_parameters: { message_id: state.sentPart.anchorMessageId, allow_sending_without_reply: true } }
+        hasMedia && sentPart.anchorMessageId
+          ? { reply_parameters: { message_id: sentPart.anchorMessageId, allow_sending_without_reply: true } }
           : {};
       let sent: { message_id: number }[];
       const part = parts[index];
@@ -921,7 +929,7 @@ export function startTelegram(options: {
             1,
             ...refs.map((ref, item): TelegramPart => ({ kind: "media", ref, caption: item === 0 ? part.caption : "" })),
           );
-          state.sentPart.plan = parts;
+          sentPart.plan = parts;
           persist();
           index--;
           continue;
@@ -929,25 +937,20 @@ export function startTelegram(options: {
         if (!media.length) {
           sent = [
             await call("sendMessage", {
-              chat_id: state.owner.chatId,
+              chat_id: chatId,
               text: `${htmlToPlain(part.caption)}\n[Attachment unavailable, unauthorized, or exceeds upload limits]`,
               ...markup,
               ...reply,
             }),
           ];
         } else {
-          state.sentPart.pendingMedia = true;
+          sentPart.pendingMedia = true;
           persist();
           const upload = async (document = false): Promise<{ message_id: number }[]> => {
             const form =
               part.kind === "album"
-                ? telegramAlbumForm(
-                    media,
-                    state.owner!.chatId,
-                    part.caption,
-                    document || media.some((file) => file.method === "sendDocument"),
-                  )
-                : telegramMediaForm(media[0], state.owner!.chatId, part.caption, document);
+                ? telegramAlbumForm(media, chatId, part.caption, document || media.some((file) => file.method === "sendDocument"))
+                : telegramMediaForm(media[0], chatId, part.caption, document);
             if ("reply_markup" in markup) form.body.set("reply_markup", JSON.stringify(markup.reply_markup));
             if ("reply_parameters" in reply) form.body.set("reply_parameters", JSON.stringify(reply.reply_parameters));
             const result = await call<{ message_id: number } | { message_id: number }[]>(form.method, form.body);
@@ -973,18 +976,18 @@ export function startTelegram(options: {
             }
           } catch (error) {
             if (error instanceof TelegramRequestNotSentError) {
-              delete state.sentPart.pendingMedia;
+              delete sentPart.pendingMedia;
               persist();
               throw error;
             }
             // Only explicit rejection proves Telegram did not create a message or album.
             if (error instanceof TelegramError && error.code >= 400 && error.code < 500) {
-              delete state.sentPart.pendingMedia;
+              delete sentPart.pendingMedia;
               persist();
               if (error.code === 400 || error.code === 413) {
                 sent = [
                   await call("sendMessage", {
-                    chat_id: state.owner.chatId,
+                    chat_id: chatId,
                     text: `${htmlToPlain(part.caption)}\n[Telegram rejected this attachment]`,
                     ...markup,
                     ...reply,
@@ -993,21 +996,22 @@ export function startTelegram(options: {
               } else throw error;
             } else throw error;
           }
-          delete state.sentPart.pendingMedia;
+          delete sentPart.pendingMedia;
         }
       } else {
         try {
-          sent = [await call("sendMessage", { chat_id: state.owner.chatId, text: part.text, parse_mode: "HTML", ...markup, ...reply })];
+          sent = [await call("sendMessage", { chat_id: chatId, text: part.text, parse_mode: "HTML", ...markup, ...reply })];
         } catch (error) {
           if (!(error instanceof TelegramError && error.code === 400 && /can't parse entities/i.test(error.message))) throw error;
-          sent = [await call("sendMessage", { chat_id: state.owner.chatId, text: htmlToPlain(part.text), ...markup, ...reply })];
+          sent = [await call("sendMessage", { chat_id: chatId, text: htmlToPlain(part.text), ...markup, ...reply })];
         }
       }
+      const routed = state.owner?.chatId === chatId;
       for (const message of sent) {
-        state.messages[String(message.message_id)] = target;
-        state.sentPart.anchorMessageId ??= message.message_id;
+        if (routed) state.messages[String(message.message_id)] = target;
+        sentPart.anchorMessageId ??= message.message_id;
       }
-      state.sentPart.parts = index + 1;
+      sentPart.parts = index + 1;
       persist();
     }
   }
@@ -1094,7 +1098,7 @@ export function startTelegram(options: {
       if (state.sentPart) throw new Error("A notice is being delivered; retry shortly");
       if (!notice) throw new Error("Held notice has left the notification feed; verify in Telegram and mark it delivered");
       const { pendingMedia: _, ...resumed } = held.sentPart;
-      state.sentPart = { ...resumed, parts: confirmed };
+      state.sentPart = { ...resumed, chatId: held.ownerChatId, parts: confirmed };
       try {
         await sendNotice(notice);
       } catch (error) {
@@ -1150,11 +1154,13 @@ export function startTelegram(options: {
       if (!state.owner || !view.steps.length) return;
       const text = renderProgress(view),
         chat_id = state.owner.chatId,
-        prior = (state.progress ??= {})[view.jobId];
+        stored = (state.progress ??= {})[view.jobId],
+        prior = stored && (stored.chatId ?? chat_id) === chat_id ? stored : undefined;
       if (prior?.text === text) return;
       if (prior) {
         try {
           await call("editMessageText", { chat_id, message_id: prior.messageId, text, parse_mode: "HTML" });
+          if (state.progress?.[view.jobId] !== prior) return;
           prior.text = text;
           return persist();
         } catch (error) {
@@ -1167,7 +1173,8 @@ export function startTelegram(options: {
         }
       }
       const sent = await call<{ message_id: number }>("sendMessage", { chat_id, text, parse_mode: "HTML" });
-      state.progress![view.jobId] = { messageId: sent.message_id, text };
+      if (state.owner?.chatId !== chat_id) return;
+      state.progress![view.jobId] = { messageId: sent.message_id, text, chatId: chat_id };
       state.messages[String(sent.message_id)] = { projectId: view.projectId, chatId: view.chatId };
       persist();
     };

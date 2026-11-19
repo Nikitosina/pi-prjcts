@@ -95,3 +95,5 @@ Incident on the deployed host: `sentSeq` 1119, `sentPart` for seq 1120 had `part
 57. A recovery that is lost again leaves no record (it must stay held), or one that fails cleanly (429) loses its progress.
 58. A legacy record without a plan is resent by guessing; it must only be markable delivered.
 
+59. The owner is replaced (unpair and pair another chat) while a held notice resends: a later part, caption or follow-up goes to the replacement, or the part that reached the old chat is routed for the new account or not counted as confirmed. Proof: `scripts/telegram-media-unit.mjs` (red before, green after).
+60. A progress message of the old account is edited in the new chat, or a progress or message record is written for the new owner by a send that began for the old one. Proof: `scripts/telegram-jobs-unit.mjs`.

@@ -86,6 +86,8 @@ assert.equal(
   'offset 17; https://api.telegram.org/bot[token]/sendMediaGroup; encoded=[token]; destination [chat]; "chat_id":[chat]',
 );
 let fault = null,
+  gate = null,
+  updates = [],
   sends = [],
   attempts = [],
   id = 0;
@@ -120,7 +122,10 @@ const server = createServer(async (req, res) => {
     res.writeHead(value.ok ? 200 : (value.error_code ?? 500), { "content-type": "application/json" });
     res.end(JSON.stringify(value));
   };
-  if (method === "getUpdates") return reply({ ok: true, result: [] });
+  if (method === "getUpdates") {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    return reply({ ok: true, result: updates.splice(0) });
+  }
   attempts.push({ method, input });
   // TDLib check_message_group_message_contents requires uniform placement even on items without captions.
   if (method === "sendMediaGroup" && new Set(input.media.map((item) => item.show_caption_above_media ?? false)).size > 1)
@@ -135,6 +140,11 @@ const server = createServer(async (req, res) => {
     if (code === 0) return req.socket.destroy();
     if (code === 200) return reply({ ok: true, result: [] });
     return reply({ ok: false, error_code: code, description });
+  }
+  if (gate?.method === method) {
+    const { run } = gate;
+    gate = null;
+    await run();
   }
   const message_ids = Array.from({ length: method === "sendMediaGroup" ? input.media.length : 1 }, () => ++id);
   sends.push({ method, input, message_id: message_ids[0], message_ids });
@@ -166,12 +176,12 @@ const seed = () =>
   );
 let notices = [],
   bridge;
-function start() {
+function start(receiveUpdates = false) {
   const state = JSON.parse(readFileSync(statePath));
   state.token = "fake-test-only";
   writeFileSync(statePath, JSON.stringify(state));
   bridge = startTelegram({
-    receiveUpdates: false,
+    receiveUpdates,
     dispatch: async (input) => {
       assert.equal(input.id, project);
       if (input.threadId !== thread) throw Error("unauthorized");
@@ -199,6 +209,8 @@ const reset = (text) => {
   sends = [];
   attempts = [];
   fault = null;
+  gate = null;
+  updates = [];
   notices = [notice(1, text)];
 };
 const mapped = (expected = { projectId: project, chatId: "main" }) => {
@@ -777,6 +789,50 @@ try {
   start();
   await assert.rejects(bridge.resolveHeld(1, "resend"), /different Telegram account/);
   assert.equal(sends.length, 0);
+
+  // A held notice goes only to the account it was held for, even when the owner is replaced while a part is in flight.
+  reset("unused");
+  const heldPlan = [
+    { kind: "media", ref: ref("demo.png"), caption: "Held caption" },
+    { kind: "text", text: "Held follow-up" },
+  ];
+  const seeded = JSON.parse(readFileSync(statePath));
+  seeded.sentSeq = 1;
+  seeded.held = [
+    { seq: 1, at: 0, ownerChatId: 1, notice: notices[0], sentPart: { seq: 1, chatId: 1, parts: 0, pendingMedia: true, plan: heldPlan } },
+  ];
+  writeFileSync(statePath, JSON.stringify(seeded));
+  start(true);
+  let updateId = 0;
+  gate = {
+    method: "sendPhoto",
+    run: async () => {
+      bridge.unpair();
+      const { code } = (await bridge.pair()).pairing;
+      updates.push({
+        update_id: ++updateId,
+        message: { message_id: 1, chat: { id: 2, type: "private", first_name: "Other" }, from: { id: 2 }, text: `/start ${code}` },
+      });
+      for (let i = 0; i < 100 && (await bridge.snapshot()).owner !== "Other"; i++) await new Promise((resolve) => setTimeout(resolve, 30));
+    },
+  };
+  await assert.rejects(bridge.resolveHeld(1, "resend"), /recipient changed/);
+  const rebound = JSON.parse(readFileSync(statePath));
+  assert.equal(rebound.owner.chatId, 2);
+  assert.deepEqual(
+    sends.filter((s) => s.method !== "sendMessage").map((s) => s.method),
+    ["sendPhoto"],
+  );
+  assert(!attempts.some((a) => JSON.stringify(a.input).includes("Held follow-up")), "the follow-up never reaches the replacement");
+  assert(!attempts.slice(1).some((a) => a.method !== "sendMessage" || !/^Paired/.test(a.input.text)), "only the pairing reply follows");
+  assert.equal(rebound.held.length, 1);
+  assert.equal(rebound.held[0].ownerChatId, 1);
+  assert.equal(rebound.held[0].sentPart.chatId, 1);
+  assert.equal(rebound.held[0].sentPart.parts, 1, "the part that reached the first chat stays confirmed");
+  assert.equal(rebound.held[0].sentPart.pendingMedia, undefined);
+  assert.deepEqual(rebound.messages[sends[0].message_id], undefined, "its message id is not routed for the new account");
+  await assert.rejects(bridge.resolveHeld(1, "resend"), /different Telegram account/);
+  assert(!attempts.some((a) => JSON.stringify(a.input).includes("Held follow-up")));
 
   reset(`Start ![Uncertain](${ref("demo.mp4")}) Stop`);
   fault = { method: "sendVideo", code: 0 };
