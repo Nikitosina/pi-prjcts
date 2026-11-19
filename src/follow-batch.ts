@@ -72,19 +72,29 @@ export function deliverable<G extends Group, N extends { key: string }>(
   };
 }
 
-/** What a delivery that submitted only `submitted` of the batch's groups announced, and whose repository records it may not advance: a skipped legacy group holds every provider. */
+/**
+ * What a delivery announced and which repository records it may not advance. `attempted` are the groups handed to the scheduler (the rest
+ * were held back, a provider being off), `submitted` those it accepted; a held legacy group holds every provider. Notices of a held
+ * or `off` provider are not published.
+ */
 export function afterDelivery<G extends Group, N extends { key: string }>(
   batch: Batch<G, N>,
+  attempted: readonly G[],
   submitted: readonly G[],
-): { groups: G[]; notices: N[]; count: number; heldProviders: string[]; heldAll: boolean } {
-  const skipped = batch.groups.filter((group) => !submitted.includes(group));
-  const heldAll = skipped.some((group) => group.provider === undefined);
-  const heldProviders = [...new Set(skipped.flatMap((group) => groupProviders(batch, group)))];
+  off: readonly string[],
+): { notices: N[]; count: number; heldProviders: string[]; heldAll: boolean } {
+  const held = batch.groups.filter((group) => !attempted.includes(group));
+  const heldAll = held.some((group) => group.provider === undefined);
+  const heldProviders = [...new Set(held.flatMap((group) => groupProviders(batch, group)))];
+  const silent = [...heldProviders, ...off];
   const tagged = batch.groups.every((group) => group.count !== undefined);
   return {
-    groups: [...submitted],
-    notices: heldAll ? [] : batch.notices.filter((notice) => !heldProviders.some((provider) => notice.key.startsWith(`${provider}:`))),
-    count: tagged ? submitted.reduce((sum, group) => sum + group.count!, 0) : skipped.length ? 0 : batch.count,
+    notices: heldAll ? [] : batch.notices.filter((notice) => !silent.some((provider) => notice.key.startsWith(`${provider}:`))),
+    count: tagged
+      ? submitted.reduce((sum, group) => sum + group.count!, 0)
+      : held.length || submitted.length < batch.groups.length
+        ? 0
+        : batch.count,
     heldProviders,
     heldAll,
   };

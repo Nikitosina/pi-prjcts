@@ -66,7 +66,7 @@ const store = (id) => {
 const doc = (root) => root.docs.get("projects.pr-follow");
 
 /** The delivered events by project and chat; `hook(phase, input)` runs inside an admission and may hold or fail it. */
-const sink = { delivered: [], hook: async () => {}, seen: new Map() };
+const sink = { delivered: [], hook: async () => {}, seen: new Map(), status: "submitted" };
 const runtime = (project, root, { jobs = [] } = {}) => {
   const schedules = {
     ingest: async (input, live, _record, options) => {
@@ -78,12 +78,12 @@ const runtime = (project, root, { jobs = [] } = {}) => {
       const prior = sink.seen.get(`${project.id}\0${input.eventId}`);
       if (prior) {
         if (prior.payload !== input.payload) throw new Error("Conflicting event ID");
-        return { duplicate: true };
+        return { status: "submitted", duplicate: true };
       }
       await authorized("submit");
       sink.seen.set(`${project.id}\0${input.eventId}`, input);
       sink.delivered.push({ project: project.id, chat: Number(options.target.id), eventId: input.eventId, payload: input.payload });
-      return {};
+      return { status: sink.status };
     },
   };
   const fixer = {
@@ -102,6 +102,7 @@ const delivered = (project, chat) =>
 const reset = () => {
   sink.delivered.length = 0;
   sink.seen.clear();
+  sink.status = "submitted";
   sink.hook = async () => {};
 };
 const failures = [];
@@ -332,7 +333,7 @@ await scenario("F6", async () => {
 });
 
 // F7 a provider switched off while its group is skipped and back on before the batch is recorded: its event is not counted or claimed, its
-// record (also one an older host stored under the bare id) stays, and the next poll announces the event once.
+// record (one an older host stored under the bare id moved to its own key) stays, and the next poll announces the event once.
 await scenario("F7", async () => {
   reset();
   const project = make(),
@@ -370,7 +371,7 @@ await scenario("F7", async () => {
     "F7 alpha's event was not delivered while it was off",
   );
   assert.equal(doc(root).events, delivered(project).length, "F7 only what was delivered is counted");
-  assert.ok("acme/mari" in doc(root).repos, "F7 alpha's record under the old key survives");
+  assert.ok("alpha::acme/mari" in doc(root).repos && !("acme/mari" in doc(root).repos), "F7 alpha's record survives under its own key");
   sink.hook = async () => {};
   await runtime(project, root).poll(true);
   assert.equal(
@@ -378,7 +379,6 @@ await scenario("F7", async () => {
     1,
     "F7 the next poll announces alpha's event once",
   );
-  assert.ok(!("acme/mari" in doc(root).repos) && "alpha::acme/mari" in doc(root).repos, "F7 now the record is under alpha's key");
   await runtime(project, root).poll(true);
   assert.equal(delivered(project).filter((item) => item.payload.includes("[alpha]")).length, 1, "F7 and not again");
 });
@@ -436,6 +436,20 @@ await scenario("F8", async () => {
   assert.ok(!("acme/mari#7" in doc(secondRoot).fixes), "F8 the bare list is gone");
   await runtime(second, secondRoot, { jobs }).poll(true);
   assert.equal(doc(secondRoot).fixes["alpha:acme/mari#7"].length, 2, "F8 the same head is not fixed twice");
+});
+
+// F9 an event the scheduler did not submit (interrupted or uncertain) is not counted as announced.
+await scenario("F9", async () => {
+  reset();
+  const project = make(),
+    root = store(project.id);
+  set("alpha", { repositoryId: "alpha/repo", prs: [pr(7, "5".repeat(40))], published: [] });
+  const follow = runtime(project, root);
+  await follow.poll(true);
+  set("alpha", { repositoryId: "alpha/repo", prs: [pr(7, "5".repeat(40), "passed")], published: [] });
+  sink.status = "interrupted";
+  await follow.poll(true);
+  assert.equal(doc(root).events, 0, "F9 nothing is counted for an event that was not submitted");
 });
 
 if (failures.length) {

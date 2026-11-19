@@ -37,8 +37,6 @@ type FollowBatch = {
   groups: Array<{ input: Parameters<ReturnType<typeof scheduleRuntime>["ingest"]>[0]; chat: number; provider?: string; count?: number }>;
   /** Providers whose plugin the project had turned off when the poll began: their saved records are not this poll's to prune. Absent in older docs. */
   switchedOff?: string[];
-  /** Older bare repository keys this poll moved to a provider's scoped key; dropped, with their fix attempts moved, once the scoped record is stored. */
-  superseded?: Array<{ key: string; provider: string }>;
 };
 type FollowState = {
   pending?: FollowBatch;
@@ -95,7 +93,7 @@ type Fixer = {
   workStatus(workId: string): Promise<string | null>;
   target(): Promise<Conversation>;
   /** Fast-forwards the project's main checkout of the repository after a merge; never throws. Without `base`, the merge provider reads it from the PR. */
-  pullMain(input: { repositoryId: string; pr: number; base: string | undefined; signal: AbortSignal }): Promise<MainPull>;
+  pullMain(input: { provider: string; repositoryId: string; pr: number; base: string | undefined; signal: AbortSignal }): Promise<MainPull>;
 };
 type Merge = { key: string; repositoryId: string; number: number; base: string | undefined; head: string; title: string };
 /** PRs that became merged in this poll, from the previous state of a baselined repository. */
@@ -332,19 +330,17 @@ export function followRuntime(
   const loadedProviders = () => new Set(plugins.followProviders().map((item) => item.id));
   /**
    * Records this poll did not claim stay when their provider's plugin is not loaded or was off for the project when the poll began, and for
-   * untagged older ones. `superseded` are older bare keys the poll moved to a provider-scoped key.
+   * untagged older ones.
    */
   const foreignRepos = (
     existing: FollowState["repos"],
     claimed: FollowState["repos"],
     switchedOff: readonly string[] | undefined,
-    superseded: readonly string[] = [],
   ): FollowState["repos"] =>
     Object.fromEntries(
       Object.entries(existing).filter(
         ([id, repo]) =>
           !(id in claimed) &&
-          !superseded.includes(id) &&
           (repo.provider === undefined
             ? !/^[^/]+\/[^/]+$/.test(id)
             : repo.provider !== "github" &&
@@ -400,43 +396,35 @@ export function followRuntime(
     let eventId = "";
     const off = () => plugins.followProvidersOff(loadProject(projectId));
     const delivering = (group: FollowBatch["groups"][number]) => deliverable(batch, off()).groups.includes(group);
-    const submitted: FollowBatch["groups"] = [];
+    const attempted: FollowBatch["groups"] = [],
+      submitted: FollowBatch["groups"] = [];
     for (const group of batch.groups) {
       const where = (await fixer.chatConversation(group.chat)) || target;
       if (!delivering(group)) continue;
       eventId = group.input.eventId;
       const live = async () => !isClosed() && loadAutomations(projectId).follow.enabled && delivering(group);
+      attempted.push(group);
       // The delivery is the providers' work until it ends, so a disable is refused meanwhile; checked and counted in one step.
-      await plugins.followWork(projectId, groupProviders(batch, group), () =>
+      const intent = await plugins.followWork(projectId, groupProviders(batch, group), () =>
         schedules.ingest(group.input, live, undefined, { target: where, automation: true }),
       );
-      submitted.push(group);
+      if (intent.status === "submitted") submitted.push(group);
     }
     const stopped = off(),
-      sent = afterDelivery(batch, submitted);
-    // A provider that was off, or whose events were not submitted, keeps the record it had, so they are announced later.
+      sent = afterDelivery(batch, attempted, submitted, stopped);
+    // A provider whose events were held back keeps the record it had, so they are announced once it is on again.
     const held = Object.entries(batch.repos).filter(
-      ([, repo]) => sent.heldAll || (repo.provider && (stopped.includes(repo.provider) || sent.heldProviders.includes(repo.provider))),
+      ([, repo]) => sent.heldAll || (repo.provider && sent.heldProviders.includes(repo.provider)),
     );
     const claimed = Object.fromEntries(Object.entries(batch.repos).filter(([key]) => !held.some(([heldKey]) => heldKey === key)));
-    const moved = (batch.superseded ?? []).filter((item) => repoKey(item.provider, item.key) in claimed);
     await root.commit(async (tx) => {
       const doc = await tx.doc(Follow, root.id);
-      const keep = new Set([
-        ...held.map(([key]) => key),
-        ...(batch.superseded ?? []).filter((item) => !moved.includes(item)).map((item) => item.key),
-      ]);
+      const keep = new Set(held.map(([key]) => key));
       doc.repos = {
-        ...foreignRepos(
-          doc.repos,
-          claimed,
-          batch.switchedOff && [...batch.switchedOff, ...stopped],
-          moved.map((item) => item.key),
-        ),
+        ...foreignRepos(doc.repos, claimed, batch.switchedOff && [...batch.switchedOff, ...stopped]),
         ...Object.fromEntries(Object.entries(doc.repos).filter(([key]) => keep.has(key))),
         ...claimed,
       };
-      for (const item of moved) moveFixes(doc.fixes, item.key, item.provider);
       pushNotices(doc, sent.notices);
       doc.lastPollAtMs = Date.now();
       doc.lastError = null;
@@ -447,7 +435,7 @@ export function followRuntime(
       }
       delete doc.pending;
     }, BACKGROUND_CONTEXT);
-    return sent.groups.length ? { events: sent.count, eventId } : { events: 0 };
+    return submitted.length ? { events: sent.count, eventId } : { events: 0 };
   }
   async function pollOnce(manual: boolean) {
     const config = loadAutomations(projectId);
@@ -479,7 +467,7 @@ export function followRuntime(
         failed: Failure[] = [],
         repoStates: FollowState["repos"] = {},
         priors: FollowState["repos"] = {},
-        superseded: NonNullable<FollowBatch["superseded"]> = [],
+        superseded: Array<{ key: string; provider: string }> = [],
         notices: PrNotice[] = [];
       const prior = (provider: string, repositoryId: string) => {
         const found = priorRepo(state.repos, provider, repositoryId),
@@ -516,6 +504,19 @@ export function followRuntime(
         failed.push(...seen.failed.map((item) => ({ ...item, provider: provider.id })));
       }
       if (isClosed() || controller.signal.aborted) return { skipped: "closed" };
+      // Records and attempts an older host stored under a bare key move to their provider's key before anything new is written under either.
+      if (superseded.length)
+        await root.commit(async (tx) => {
+          const doc = await tx.doc(Follow, root.id);
+          for (const { key, provider } of superseded) {
+            const old = own(doc.repos, key);
+            if (old) {
+              doc.repos[repoKey(provider, key)] ??= { ...old, provider, repositoryId: key };
+              delete doc.repos[key];
+            }
+            moveFixes(doc.fixes, key, provider);
+          }
+        }, BACKGROUND_CONTEXT);
       // A merge fast-forwards the main checkout before the batch is frozen, so the event says how it went; a replayed batch never pulls again.
       const pulls = new Map<string, string>(),
         shared = new Map<string, MainPull>();
@@ -527,7 +528,7 @@ export function followRuntime(
         const outcome =
           (once && shared.get(once)) ||
           (await fixer
-            .pullMain({ repositoryId: merge.repositoryId, pr: merge.number, base: merge.base, signal: controller.signal })
+            .pullMain({ provider, repositoryId: merge.repositoryId, pr: merge.number, base: merge.base, signal: controller.signal })
             .catch((error): MainPull => ({ pulled: false, reason: clip(error instanceof Error ? error.message : String(error), 200) })));
         if (once) shared.set(once, outcome);
         pulls.set(scoped, describeMainPull(outcome));
@@ -549,7 +550,13 @@ export function followRuntime(
           const outcome =
             (once && shared.get(once)) ||
             (await fixer
-              .pullMain({ repositoryId, pr: Number(number), base: pr.base || undefined, signal: controller.signal })
+              .pullMain({
+                provider: repo.provider ?? "github",
+                repositoryId,
+                pr: Number(number),
+                base: pr.base || undefined,
+                signal: controller.signal,
+              })
               .catch((error): MainPull => ({ pulled: false, reason: clip(error instanceof Error ? error.message : String(error), 200) })));
           if (once) shared.set(once, outcome);
           if (!outcome.pulled) {
@@ -619,7 +626,6 @@ export function followRuntime(
         count: delivered,
         groups: [],
         switchedOff: plugins.followProvidersOff(project),
-        superseded,
       };
       for (const { chat, provider, items: group } of groups.values()) {
         const source = connected.find((item) => item.provider.id === provider)?.provider;

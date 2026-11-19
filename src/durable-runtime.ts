@@ -1769,10 +1769,12 @@ export async function openDurableProject(input: {
           return agent ? (agent.working ? "running" : agent.endedAt === null ? "running" : "completed") : null;
         },
         target: eventTarget,
-        pullMain: async ({ repositoryId, pr, base, signal }) => {
+        pullMain: async ({ provider: followed, repositoryId, pr, base, signal }) => {
           const authorization = loadProject(project.id).workspaceAuthorization,
             repository = authorization?.repositories.find((item) => item.repositoryId === repositoryId);
           if (!authorization || !repository) return { pulled: false, reason: `${repositoryId} has no authorized main checkout` };
+          if (authorization.provider !== followed)
+            return { pulled: false, reason: `${repositoryId} is checked out through ${authorization.provider}, not ${followed}` };
           const provider =
             authorization.provider === "github"
               ? plugins.gatedMerge(project.id, "github", githubMergeProvider())
