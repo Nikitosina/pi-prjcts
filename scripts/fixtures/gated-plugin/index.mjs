@@ -78,10 +78,10 @@ export default {
         holdin: async ({ params, withRoot }) =>
           withRoot(params.projectId, () => new Promise((resolve) => waiting.push(resolve)).then(() => ({ held: true }))),
         // The root conversation id of a project, so a test can set what `uncertainWrites` answers for it (the hook receives only the root).
-        rootOf: async ({ params, withRoot }) => withRoot(params.projectId, async (root) => ({ root: String(root.id) })),
-        setUncertain: async ({ params }) => (uncertain.set(params.root, params.mode), { set: params.mode }),
-        releaseCheck: async () => (checking.splice(0).forEach((resolve) => resolve()), { released: true }),
-        checkWaiting: async () => ({ count: checking.length }),
+        "root-of": async ({ params, withRoot }) => withRoot(params.projectId, async (root) => ({ root: String(root.id) })),
+        "set-uncertain": async ({ params }) => (uncertain.set(params.root, params.mode), { set: params.mode }),
+        "release-check": async () => (checking.splice(0).forEach((resolve) => resolve()), { released: true }),
+        "check-waiting": async () => ({ count: checking.length }),
         release: async () => (waiting.splice(0).forEach((resolve) => resolve()), { released: true }),
         waiting: async () => ({ count: waiting.length }),
         counters: async () => ({
@@ -104,10 +104,10 @@ export default {
         return mode === "yes";
       },
       rpcPolicy: {
-        rootOf: "read",
-        setUncertain: "write",
-        releaseCheck: "write",
-        checkWaiting: "read",
+        "root-of": "read",
+        "set-uncertain": "write",
+        "release-check": "write",
+        "check-waiting": "read",
         touch: "write",
         holdin: "write",
         ping: "read",

@@ -285,9 +285,9 @@ await kit.run(async () => {
   // 32: an unresolved or unreadable write of the plugin refuses the disable; once resolved the disable works, and the plugin is never asked
   // about writes of a project that turned it off. The other project keeps its checks.
   const pluginCall = (method, params) => rpc({ action: "plugin", plugin: "gated", method, params });
-  const rootA = (await pluginCall("rootOf", { projectId: alpha })).root,
-    rootB = (await pluginCall("rootOf", { projectId: beta })).root;
-  const mark = (root, mode) => pluginCall("setUncertain", { root, mode });
+  const rootA = (await pluginCall("root-of", { projectId: alpha })).root,
+    rootB = (await pluginCall("root-of", { projectId: beta })).root;
+  const mark = (root, mode) => pluginCall("set-uncertain", { root, mode });
   const blocker = async (id) => (await rpc({ action: "schedule-snapshot", id, includeHistory: false })).automaticAdmissionBlocker;
   const asked = async (root) => (await counters()).asked?.[root] ?? 0;
   await mark(rootA, "yes");
@@ -309,9 +309,9 @@ await kit.run(async () => {
   check("32 the plugin is still on after a failed check", (await entry(alpha, "gated")).enabled === true);
   await mark(rootA, "hold");
   const racing = refused(() => set(alpha, "gated", false));
-  await kit.eventually(async () => (await pluginCall("checkWaiting")).count === 1, "check did not start");
+  await kit.eventually(async () => (await pluginCall("check-waiting")).count === 1, "check did not start");
   await call(alpha, "ping");
-  await pluginCall("releaseCheck");
+  await pluginCall("release-check");
   const raced = await racing;
   check("32 work that began during the check refuses the disable", /began while/.test(raced), raced);
   check("32 the plugin is still on after the race", (await entry(alpha, "gated")).enabled === true);
