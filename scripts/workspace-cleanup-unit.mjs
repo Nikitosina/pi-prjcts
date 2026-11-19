@@ -32,11 +32,7 @@ import {
 import { sweepWorkspaceCaches, workspaceCaches } from "../src/workspace-cache.ts";
 import { cloneUsage, deviceLastUse, idleClones, strayTestClones } from "../plugins/simulator/idle.ts";
 import { verifiedWorkspaceRoots } from "../src/workspace-roots.ts";
-import {
-  pruneTestProducts,
-  pruneEnabledProjects,
-  workspaceKeyForRoot,
-} from "../plugins/simulator/test-products.ts";
+import { pruneTestProducts, pruneEnabledProjects, workspaceKeyForRoot } from "../plugins/simulator/test-products.ts";
 
 const DAY = 86_400_000,
   now = Date.now(),
