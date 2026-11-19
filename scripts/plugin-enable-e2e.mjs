@@ -10,14 +10,17 @@ const gated = join(fixtures, "gated-plugin"),
 const fakeData = join(tmpdir(), `plugin-enable-fake-${process.pid}.json`);
 const writeFake = (extra = {}) => writeFileSync(fakeData, JSON.stringify({ prs: [], ...extra }));
 writeFake();
+let historyKept = false;
 const kit = await createKit("plugin-enable", {
   env: {
     PI_PROJECTS_FOLLOW_TICK_MS: "200",
     PI_PROJECTS_PLUGINS: `${gated}:${fakeVcs}`,
     FAKE_PLUGIN_DATA: fakeData,
   },
-  handler: ({ role, user, results }) =>
-    role === "coordinator" && user.includes("GATED-CALL") && !results.length ? kit.call("gated_ping", {}) : undefined,
+  handler: ({ role, user, results, msgs }) => {
+    if (role === "coordinator" && user.includes("GATED-CALL two") && JSON.stringify(msgs).includes("GATED-CALL one")) historyKept = true;
+    return role === "coordinator" && user.includes("GATED-CALL") && !results.length ? kit.call("gated_ping", {}) : undefined;
+  },
 });
 
 await kit.run(async () => {
@@ -106,6 +109,15 @@ await kit.run(async () => {
   await rpc({ action: "message", id: alpha, text: "GATED-CALL one" });
   await kit.eventually(async () => (await counters()).toolRuns === 1, "tool ran while enabled");
   await kit.eventually(async () => !(await rpc({ action: "show", id: alpha })).chats.find((chat) => chat.id === "main")?.busy, "idle");
+  const offered = (marker) => {
+    const call = kit.lastCall("coordinator", marker);
+    return Boolean(call?.system.includes("GATED-RULE-MARKER")) && Boolean(call?.tools.includes("gated_ping"));
+  };
+  check(
+    "33 the chat's rules and tool are offered while the plugin is on",
+    offered("GATED-CALL one"),
+    kit.lastCall("coordinator", "GATED-CALL one"),
+  );
   const prsOf = async (id) => (await rpc({ action: "prs", id, refresh: true })).providers.filter((item) => item.provider === "gatedprs");
   check(
     "8 the plugin's PR provider serves the project while enabled",
@@ -131,12 +143,29 @@ await kit.run(async () => {
     async () => !(await rpc({ action: "show", id: alpha })).chats.find((chat) => chat.id === "main")?.busy,
     "idle again",
   );
-  check("5 a recorded tool call of an existing chat is refused after the disable", (await counters()).toolRuns === 1, await counters());
+  check("5 a tool call of an existing chat does not run after the disable", (await counters()).toolRuns === 1, await counters());
   check(
-    "5 the refusal is the model's tool result",
-    /disabled in this project/.test(kit.toolResult("coordinator", "GATED-CALL two")),
-    kit.toolResult("coordinator", "GATED-CALL two"),
+    "33 the next turn of the same chat is built without the plugin's rules and tool",
+    !offered("GATED-CALL two") &&
+      !kit.lastCall("coordinator", "GATED-CALL two")?.system.includes("GATED-RULE-MARKER") &&
+      !kit.lastCall("coordinator", "GATED-CALL two")?.tools.includes("gated_ping") &&
+      historyKept,
+    kit.lastCall("coordinator", "GATED-CALL two"),
   );
+  await set(alpha, "gated", true);
+  await rpc({ action: "message", id: alpha, text: "GATED-CALL three" });
+  await kit.eventually(
+    async () =>
+      !(await rpc({ action: "show", id: alpha })).chats.find((chat) => chat.id === "main")?.busy &&
+      kit.lastCall("coordinator", "GATED-CALL three"),
+    "re-enabled turn",
+  );
+  check(
+    "33 enabling again offers the rules and tool to the next turn",
+    offered("GATED-CALL three"),
+    kit.lastCall("coordinator", "GATED-CALL three"),
+  );
+  await set(alpha, "gated", false);
   // 7/8: the PR provider no longer serves the disabled project, and none of its methods runs for it.
   const listed = (await counters()).listCalls;
   check("8 the PR provider is gone from the disabled project's PR list", (await prsOf(alpha)).length === 0);

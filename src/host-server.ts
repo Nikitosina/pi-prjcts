@@ -1274,6 +1274,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           const runtime = await durable(input.id);
           await runtime.withRoot((root) => plugins.disable(() => loadProject(input.id), input.plugin, root, saveProject));
         }
+        await (await durable(input.id)).refreshPrompts();
         feed.publish(input.id, { topic: "settings" });
         return { plugin: input.plugin, enabled: input.enabled };
       });

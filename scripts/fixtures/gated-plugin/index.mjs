@@ -38,6 +38,7 @@ export default {
     api.provide({
       coordinatorTools: {
         applies: () => true,
+        prompt: { name: "Gated rules", text: "GATED-RULE-MARKER", on: () => true },
         create: () => ({ tools: [ping], extension: defineExtension({ name: "projects.gated", tools: [ping] }) }),
       },
       prs: {

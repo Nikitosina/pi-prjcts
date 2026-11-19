@@ -432,6 +432,8 @@ export type DurableProjectRuntime = {
    * History, permissions and every existing worker thread are untouched; nothing changes when the rebuild fails. Refused while the chat is working or compacting.
    */
   reload(chatId?: string): Promise<{ chatId: string; skills: number; changed: boolean }>;
+  /** Marks every chat's prompt and tools stale after a project setting changed them (a plugin toggle): each is rebuilt before its next message. History is untouched. */
+  refreshPrompts(): Promise<void>;
   cleanupWorktrees(): Promise<Awaited<ReturnType<typeof cleanupWorktrees>>>;
   snapshot(chatId?: string, messageText?: MessageText): Promise<DurableProjectSnapshot>;
   /** Context use of each listed worker thread (`null` for an unknown one); the window is the worker model's catalog window or null. */
@@ -2811,6 +2813,10 @@ export async function openDurableProject(input: {
           modelUpdate.commit();
           return { chatId: chat.id, ...result };
         });
+      },
+      refreshPrompts: async () => {
+        assertOpen();
+        for (const chat of await chatList()) staleChats.add(chat.conversationId);
       },
       profileTools: async (profile) => {
         const current = loadProject(project.id);
