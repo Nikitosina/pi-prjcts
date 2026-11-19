@@ -1,6 +1,5 @@
 import type { StorageUsage } from "./storage-usage.ts";
 
-/** How long a measurement is reused before it is measured again in the background. */
 export const STORAGE_SCAN_TTL_MS = 10 * 60_000;
 
 /** What Settings → Storage shows: the last good measurement and whether a newer one is on its way (scripts/storage-usage-failures.md U13-U16). */
@@ -39,7 +38,8 @@ export function createStorageScans(input: {
         return usage;
       },
       (failure) => {
-        error = { message: failure instanceof Error ? failure.message : String(failure), at: now() };
+        // A scan that cleanup already outdated fails silently: the follow-up scan matters, not its error.
+        if (generation === startedGeneration) error = { message: failure instanceof Error ? failure.message : String(failure), at: now() };
         throw failure;
       },
     );
@@ -58,7 +58,7 @@ export function createStorageScans(input: {
   return {
     scan,
     status(refresh = false): StorageScanStatus {
-      if (!running && (refresh || (wantsScan() && !input.busy?.()))) background();
+      if (!running && !input.busy?.() && (refresh || wantsScan())) background();
       return {
         usage: latest?.usage ?? null,
         scanning: running !== null,
@@ -73,8 +73,9 @@ export function createStorageScans(input: {
       error = null;
       if (!running && !input.busy?.()) background();
     },
-    /** The last good measurement if it is within `maxAgeMs`, else a scan (joined when one runs). */
+    /** The last good measurement if it is within `maxAgeMs` (any age while busy), else a scan (joined when one runs). */
     usage(maxAgeMs: number): Promise<StorageUsage> {
+      if (latest && input.busy?.()) return Promise.resolve(latest.usage);
       return latest && latest.generation === generation && now() - latest.usage.measuredAt <= maxAgeMs
         ? Promise.resolve(latest.usage)
         : scan();

@@ -1866,7 +1866,7 @@ export async function openDurableProject(input: {
       }
     }
     // Scans stay off while cleanup deletes, and run again once it ends (scripts/storage-usage-failures.md U16).
-    const scans = createStorageScans({ measure: storageUsage, ttlMs: STORAGE_SCAN_TTL_MS, busy: () => cleanupProgress.size > 0 });
+    const scans = createStorageScans({ measure: storageUsage, ttlMs: STORAGE_SCAN_TTL_MS, busy: () => closed || cleanupProgress.size > 0 });
     async function cleanupSteps(settings: CleanupSettings, progress: CleanupProgress): Promise<string> {
       const at = (step: CleanupStep, done: number, total: number | null) => Object.assign(progress, { step, done, total });
       // Test seam: a run the host dies in.

@@ -124,6 +124,23 @@ try {
   assert.equal(started, 6, "U16 a scan that began before the invalidation is followed by one more");
   release();
   await idle();
+  // U16: a scan outdated by a cleanup that then fails is still followed by one; nothing scans on request while cleanup deletes.
+  const before = started;
+  scans.invalidate();
+  fail = true;
+  scans.invalidate();
+  release();
+  await idle();
+  fail = false;
+  assert.equal(started, before + 2, "U16 the follow-up scan runs although the outdated one failed");
+  cleaning = true;
+  assert.equal(scans.status(true).scanning, true, "U16 the follow-up scan already runs");
+  release();
+  await idle();
+  const quiet = started;
+  assert.equal((await scans.usage(0)).measuredAt, clock, "U16 a breakdown during cleanup gets the last measurement");
+  scans.status(true);
+  assert.equal(started, quiet, "U16 a refresh during cleanup starts no scan");
   console.log("storage-usage unit: all checks passed");
 } finally {
   rmSync(root, { recursive: true, force: true });
