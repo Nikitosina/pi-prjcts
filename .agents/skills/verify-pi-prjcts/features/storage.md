@@ -5,6 +5,7 @@ Settings → Storage lists what the project keeps on disk and what the Workspace
 ## Sub-features
 
 - Rows per kind (worktrees, workspace caches, disposable paths, Job videos, plugin rows) with Count, Size and Cleanup frees.
+- Reopening Settings shows the host's kept measurement at once (the host scans in the background, one scan at a time) and a cleanup run in flight with its progress.
 - Clean up: runs the `workspace-cleanup` routine, waits for that run by its request id with a progress bar and the current step (Step N of 4, done/total, bytes freed), shows its summary, then measures again. A failed poll shows "waiting for the host…" and keeps waiting.
 
 ## How to get to it (user POV)

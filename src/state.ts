@@ -859,6 +859,7 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("artifacts-list"), id: Id, threadId: Type.Optional(Id) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("worktrees-snapshot"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("storage-usage"), id: Id }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("storage-status"), id: Id, refresh: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("storage-summary"), fresh: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("worktrees-cleanup"), id: Id, confirm: Id }, { additionalProperties: false }),
   Type.Object(
@@ -1407,6 +1408,14 @@ export const Request = Type.Union([
   ),
   Type.Object({ action: Type.Literal("telegram-pair") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("telegram-unpair") }, { additionalProperties: false }),
+  Type.Object(
+    {
+      action: Type.Literal("telegram-resolve-held"),
+      seq: Type.Integer({ minimum: 1 }),
+      outcome: Type.Union([Type.Literal("resend"), Type.Literal("delivered")]),
+    },
+    { additionalProperties: false },
+  ),
   Type.Object({ action: Type.Literal("telegram-remove"), confirm: Type.Literal("remove") }, { additionalProperties: false }),
   Type.Object(
     { action: Type.Literal("host-agent-history"), before: Type.Optional(Type.Integer({ minimum: 1 })) },

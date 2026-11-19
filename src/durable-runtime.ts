@@ -113,7 +113,8 @@ import {
   oldJobVideos,
   type CleanupSettings,
 } from "./workspace-cleanup.ts";
-import { diskBytes, measureRows, type StorageUsage } from "./storage-usage.ts";
+import { createStorageScans, STORAGE_SCAN_TTL_MS, type StorageScanStatus } from "./storage-scans.ts";
+import { diskBytes, diskBytesByPath, measureRows, type StorageUsage } from "./storage-usage.ts";
 import type { ProfileToolGroup } from "./profiles.ts";
 import { webSearchTools } from "./web-search.ts";
 import { mcpCatalog } from "./mcp-servers.ts";
@@ -402,6 +403,10 @@ export type DurableProjectRuntime = {
   worktrees(): Promise<WorktreeInventory>;
   /** What the project keeps on disk, per kind, and what the cleanup routine would free now. */
   storageUsage(): Promise<StorageUsage>;
+  /** The last measurement if it is at most `maxAgeMs` old, else a scan; a scan already running is joined. */
+  storageUsageWithin(maxAgeMs: number): Promise<StorageUsage>;
+  /** The last good measurement at once; a missing or stale one is measured in the background (`refresh` forces it). Shows a cleanup run in flight. */
+  storageStatus(refresh: boolean): StorageScanStatus & { cleanup: { requestId: string; progress: CleanupProgress } | null };
   /** Live context/compaction settings (read on every generation; no reopen). */
   applyContext(settings: ContextSettings | undefined): void;
   /** Coordinator, role-model and explicit quota-fallback selection, live. Existing threads change model only through audited quota recovery. */
@@ -1896,8 +1901,11 @@ export async function openDurableProject(input: {
         return await cleanupSteps(settings, progress);
       } finally {
         cleanupProgress.delete(requestId);
+        scans.invalidate();
       }
     }
+    // Scans stay off while cleanup deletes, and run again once it ends (scripts/storage-usage-failures.md U16).
+    const scans = createStorageScans({ measure: storageUsage, ttlMs: STORAGE_SCAN_TTL_MS, busy: () => closed || cleanupProgress.size > 0 });
     async function cleanupSteps(settings: CleanupSettings, progress: CleanupProgress): Promise<string> {
       const at = (step: CleanupStep, done: number, total: number | null) => Object.assign(progress, { step, done, total });
       // Test seam: a run the host dies in.
@@ -2026,11 +2034,11 @@ export async function openDurableProject(input: {
               dir,
               view.map((job) => job.id),
             );
-            return {
-              count: all.length,
-              bytes: await diskBytes(all),
-              reclaimableBytes: await diskBytes(oldJobVideos({ controlRoot: dir, jobs: view, days: settings.videoDays })),
-            };
+            // One du run: the old videos are among all of them.
+            const sizes = await diskBytesByPath(all);
+            const old = oldJobVideos({ controlRoot: dir, jobs: view, days: settings.videoDays });
+            const sum = (paths: readonly string[]) => (sizes ? paths.reduce((bytes, path) => bytes + (sizes.get(path) ?? 0), 0) : null);
+            return { count: all.length, bytes: sum(all), reclaimableBytes: sum(old) };
           },
         },
         ...plugins.usageSources(project.id).map((source) => ({
@@ -2725,8 +2733,13 @@ export async function openDurableProject(input: {
         return schedules.ingest(value, undefined, undefined, { target: await eventTarget(), automation: true });
       },
       worktrees: () => worktreeInventory({ project: loadProject(project.id), root, controlRoot: dir }),
-      storageUsage,
-      cleanupWorktrees: () => cleanup(),
+      storageUsage: () => scans.scan(),
+      storageUsageWithin: (maxAgeMs) => scans.usage(maxAgeMs),
+      storageStatus: (refresh) => {
+        const [running] = cleanupProgress;
+        return { ...scans.status(refresh), cleanup: running ? { requestId: running[0], progress: { ...running[1] } } : null };
+      },
+      cleanupWorktrees: () => cleanup().finally(() => scans.invalidate()),
       applyContext: (value) => {
         contextSettings = value;
       },

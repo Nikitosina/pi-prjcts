@@ -461,82 +461,108 @@ function cleanupLine(progress, lost) {
   const freed = progress.freedBytes ? ` · ${size(progress.freedBytes)} freed` : "";
   return `Step ${steps.indexOf(progress.step) + 1} of ${steps.length}: ${CLEANUP_STEPS[progress.step](progress)}${freed}${lost ? " · waiting for the host…" : ""}`;
 }
+const STORAGE_POLL_MS = 1500;
+// The host keeps the last measurement and scans in the background (src/storage-scans.ts), so opening this section answers at once and
+// leaving it loses nothing: a scan or a cleanup run started here shows again, with its progress, when the section is opened later.
 async function storage(body, alive) {
-  let usage = null,
+  let status = null,
     failure = null,
     outcome = null,
-    cleaning = false,
-    progress = null,
-    lost = false;
-  const measure = async () => {
-    try {
-      usage = await call("storage-usage", { id: state.projectId });
-      failure = null;
-    } catch (error) {
-      failure = error.message;
-    }
-    if (alive()) draw();
-  };
+    cleaning = null,
+    lost = false,
+    polling = false;
   const row = (item) =>
     `<tr data-row="${esc(item.id)}"><td>${esc(item.label)}</td><td class="right">${item.count ?? "–"}</td><td class="right">${item.bytes === null ? `<span class="muted">unknown</span>` : esc(size(item.bytes))}</td><td class="right">${item.reclaimableBytes === null ? "–" : esc(size(item.reclaimableBytes))}</td><td class="muted small">${esc(item.note ?? "")}</td></tr>`;
   const draw = () => {
-    const rows = usage?.rows ?? [];
+    const usage = status?.usage,
+      rows = usage?.rows ?? [];
     const total = (key) => rows.reduce((sum, item) => sum + (item[key] ?? 0), 0);
-    body.innerHTML = `${line("What this project keeps on disk, and what the Workspace cleanup routine would free now.", "Sizes come from du; a worktree on a virtual mount is not measured. Clean up runs the Workspace cleanup routine now; each run is in its History under Automations.")}${
+    const scanning = status?.scanning,
+      progress = cleaning && status?.cleanup?.requestId === cleaning ? status.cleanup.progress : null;
+    const freshness = usage ? `Measured ${ago(usage.measuredAt)}${scanning ? " · updating…" : status.stale ? " · out of date" : ""}` : "";
+    body.innerHTML = `${line("What this project keeps on disk, and what the Workspace cleanup routine would free now.", "Sizes come from du and are kept on the host for 10 minutes; a worktree on a virtual mount is not measured. Clean up runs the Workspace cleanup routine now; each run is in its History under Automations.")}${
       usage
-        ? `<table class="storage"><thead><tr><th>Kind</th><th class="right">Count</th><th class="right">Size</th><th class="right">Cleanup frees</th><th></th></tr></thead><tbody>${rows.map(row).join("")}</tbody><tfoot><tr><td>Total</td><td></td><td class="right">${esc(size(total("bytes")))}</td><td class="right">${esc(size(total("reclaimableBytes")))}</td><td class="muted small">Measured ${esc(ago(usage.measuredAt))}</td></tr></tfoot></table>`
+        ? `<table class="storage"><thead><tr><th>Kind</th><th class="right">Count</th><th class="right">Size</th><th class="right">Cleanup frees</th><th></th></tr></thead><tbody>${rows.map(row).join("")}</tbody><tfoot><tr><td>Total</td><td></td><td class="right">${esc(size(total("bytes")))}</td><td class="right">${esc(size(total("reclaimableBytes")))}</td><td class="muted small">${esc(freshness)}</td></tr></tfoot></table>`
         : failure
           ? `<p class="error-line">${esc(failure)}</p>`
-          : `<p class="loading-line">Measuring…</p>`
-    }<div class="row"><button type="button" class="primary small" data-storage-clean ${cleaning ? "disabled" : ""}>${cleaning ? "Cleaning up…" : "Clean up"}</button><button type="button" class="ghost-btn small" data-storage-measure ${cleaning ? "disabled" : ""}>Measure again</button></div>${
+          : status && !scanning
+            ? ""
+            : `<p class="loading-line">Measuring… this can take a few minutes; you can leave this page.</p>`
+    }${status?.error ? `<p class="error-line">${esc(usage ? "The last measurement failed, showing the one before: " : "")}${esc(status.error)}</p>` : ""}<div class="row"><button type="button" class="primary small" data-storage-clean ${cleaning ? "disabled" : ""}>${cleaning ? "Cleaning up…" : "Clean up"}</button><button type="button" class="ghost-btn small" data-storage-measure ${cleaning || scanning ? "disabled" : ""}>${scanning ? "Measuring…" : "Measure again"}</button></div>${
       cleaning
         ? `<div class="storage-progress" role="status"><div class="storage-bar"><span style="width:${Math.round(100 * (progress ? cleanupShare(progress) : 0))}%"></span></div><p class="muted small">${esc(cleanupLine(progress, lost))}</p></div>`
         : ""
     }${outcome ? `<p class="storage-outcome ${outcome.ok ? "muted" : "error-line"}" role="status">${esc(outcome.text)}</p>` : ""}`;
   };
+  /** Follows the host while it scans or cleans; ends when both are idle. A failed poll is not the run failing: it gives up after two minutes. */
+  const follow = async (refresh = false) => {
+    if (polling) return;
+    polling = true;
+    let misses = 0;
+    try {
+      while (alive()) {
+        const statusRequest = () => call("storage-status", refresh ? { id: state.projectId, refresh: true } : { id: state.projectId });
+        try {
+          status = await statusRequest();
+          if (!cleaning && status.cleanup) {
+            cleaning = status.cleanup.requestId;
+            outcome = null;
+          }
+          if (cleaning) {
+            const [run] = (await call("schedule-history", { id: state.projectId, kind: "intents", requestId: cleaning, limit: 1 })).items;
+            if (run?.outcome != null) {
+              outcome = { ok: run.outcome === "completed", text: run.summary || run.outcome };
+              cleaning = null;
+              // The run's end starts a scan after the status above was read.
+              status = await statusRequest();
+            }
+          }
+          failure = null;
+          lost = false;
+          misses = 0;
+        } catch (error) {
+          failure = error.message;
+          lost = true;
+          if (++misses >= 120 / (STORAGE_POLL_MS / 1000)) {
+            if (cleaning) outcome = { ok: false, text: error.message };
+            cleaning = null;
+            lost = false;
+            if (status) status = { ...status, scanning: false };
+            if (alive()) draw();
+            break;
+          }
+        }
+        refresh = false;
+        if (alive()) draw();
+        if (!status?.scanning && !cleaning && !lost) break;
+        await new Promise((resolve) => setTimeout(resolve, STORAGE_POLL_MS));
+      }
+    } finally {
+      polling = false;
+    }
+  };
   draw();
-  await measure();
   body.addEventListener("click", async (event) => {
     if (event.target.closest("[data-storage-measure]")) {
-      usage = null;
-      draw();
-      return measure();
+      if (cleaning || status?.scanning) return;
+      await follow(true);
+      return;
     }
     if (!event.target.closest("[data-storage-clean]") || cleaning) return;
-    cleaning = true;
     outcome = null;
-    progress = null;
     lost = false;
+    cleaning = "starting";
     draw();
     try {
-      const { requestId } = await call("schedule-run", { id: state.projectId, scheduleId: CLEANUP_ID });
-      let done = null,
-        misses = 0;
-      // A failed poll is not the run failing: keep waiting, and give up only after two minutes without an answer.
-      while (alive() && !done) {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        try {
-          const [run] = (await call("schedule-history", { id: state.projectId, kind: "intents", requestId, limit: 1 })).items;
-          misses = 0;
-          lost = false;
-          if (run?.outcome != null) done = run;
-          else progress = run?.progress ?? progress;
-        } catch (error) {
-          if (++misses >= 120) throw error;
-          lost = true;
-        }
-        if (alive() && !done) draw();
-      }
-      if (done) outcome = { ok: done.outcome === "completed", text: done.summary || done.outcome };
+      cleaning = (await call("schedule-run", { id: state.projectId, scheduleId: CLEANUP_ID })).requestId;
     } catch (error) {
+      cleaning = null;
       outcome = { ok: false, text: error.message };
     }
-    cleaning = false;
-    if (!alive()) return;
-    usage = null;
     draw();
-    await measure();
+    await follow();
   });
+  await follow();
 }
 
 // ---------------------------------------------------------------------------------------------------------------- Plugins

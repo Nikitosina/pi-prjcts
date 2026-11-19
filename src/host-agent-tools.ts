@@ -77,6 +77,7 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
   "artifacts-list": allow("Artifacts saved by a project's agents."),
   "worktrees-snapshot": allow("A project's worktrees."),
   "storage-summary": allow("Disk use per active project (sum of its storage rows), reused for 10 minutes unless fresh."),
+  "storage-status": allow("A project's last storage measurement at once, whether a scan runs, and a cleanup run in flight."),
   "storage-usage": allow(
     "What a project keeps on disk per kind (worktrees, caches, disposable paths, Job videos, plugin rows) and what cleanup would free.",
   ),
@@ -179,6 +180,7 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
   "telegram-token": exclude("Takes the bot token, a secret that must not enter a transcript."),
   "telegram-pair": exclude("Pairing issues a code that makes a Telegram account the owner; the owner pairs in person."),
   "telegram-unpair": dangerous("Unpair the owner's Telegram."),
+  "telegram-resolve-held": dangerous("Resend a held Telegram attachment or mark it delivered."),
   "telegram-remove": dangerous("Remove the Telegram bot."),
   "host-agent-history": exclude("The Host agent's own transcript is already its context."),
   "host-agent-send": exclude("The Host agent would message itself."),
