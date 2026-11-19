@@ -318,7 +318,7 @@ export function followRuntime(
   const foreignRepos = (
     existing: FollowState["repos"],
     claimed: FollowState["repos"],
-    switchedOff: readonly string[] = [],
+    switchedOff?: readonly string[],
   ): FollowState["repos"] =>
     Object.fromEntries(
       Object.entries(existing).filter(
@@ -326,7 +326,8 @@ export function followRuntime(
           !(id in claimed) &&
           (repo.provider === undefined
             ? !/^[^/]+\/[^/]+$/.test(id)
-            : repo.provider !== "github" && (switchedOff.includes(repo.provider) || !loadedProviders().has(repo.provider))),
+            : repo.provider !== "github" &&
+              (switchedOff === undefined || switchedOff.includes(repo.provider) || !loadedProviders().has(repo.provider))),
       ),
     );
   /** PR number -> chat conversation of the Job that opened it (a verified publication receipt, or the Job's own PR link). */
