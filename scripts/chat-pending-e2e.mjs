@@ -927,6 +927,7 @@ await kit.run(async () => {
     );
     check("R33 the draft stays in the composer", (await composer()) === "unstorable MARK-R33", await composer());
     check("R33 no bubble claims it was sent", (await owners("MARK-R33")).length === 0, await owners("MARK-R33"));
+    await page.shot("04-unstorable-draft-kept", { force: true });
     check("R33 the owner is told", await ev(`document.querySelector("#toasts").innerText.includes("recovery")`));
     await ev(`(Storage.prototype.setItem = window.__realSet, true)`);
     await ev(`document.querySelector('#composer').requestSubmit()`);
@@ -1030,6 +1031,7 @@ await kit.run(async () => {
     const changed = await rowOf("decisions/undo-meD.md"),
       undone = await rowOf("decisions/undo-meE.md"),
       current = await rowOf("decisions/undo-meF.md");
+    await page.shot("05-old-undo-proven", { force: true });
     check("R35 an old write changed since is not offered Undo", changed && !changed.undo && /Changed since/.test(changed.text), changed);
     check("R35 an old undone write is not offered Undo", undone && !undone.undo && /Undone/.test(undone.text), undone);
     check("R35 an old write that is still current keeps its Undo", current?.undo === true, current);
