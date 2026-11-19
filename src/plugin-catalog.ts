@@ -1,8 +1,8 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { BUNDLED_PLUGINS, isBundledPluginId, type BundledPlugin, type BundledPluginId } from "./bundled-plugins.ts";
 import type { PluginStatus } from "./plugin-types.ts";
-import { plugins, resolvePluginPath } from "./plugins.ts";
+import { isPluginAt, plugins } from "./plugins.ts";
 import { home, saveJson } from "./state.ts";
 
 /** `available`: not configured. `configured`: in the host's configuration, not part of the running host (a restart loads it). */
@@ -42,7 +42,7 @@ function readConfig(): { data: unknown; list: string[] } | undefined {
   }
 }
 
-const listsDirectory = (item: BundledPlugin) => plugins.configuredPaths().includes(resolvePluginPath(item.directory));
+const listsDirectory = (item: BundledPlugin) => plugins.configuredPaths().some((path) => isPluginAt(item.directory, path));
 
 export const pluginCatalog = {
   list: (): CatalogEntry[] =>
@@ -58,7 +58,8 @@ export const pluginCatalog = {
     const list = [...(current?.list ?? []), item.directory];
     const data =
       current === undefined ? { plugins: list } : Array.isArray(current.data) ? list : { ...(current.data as object), plugins: list };
-    saveJson(configFile(), data);
+    // A symlinked plugins.json stays the owner's file: write its target, not a new file over the link.
+    saveJson(existsSync(configFile()) ? realpathSync(configFile()) : configFile(), data);
     return pluginCatalog.list();
   },
 };

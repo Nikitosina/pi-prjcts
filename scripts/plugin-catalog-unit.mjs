@@ -1,6 +1,6 @@
 // Unit: the bundled plugin catalog without a host (scripts/plugin-catalog-failures.md, numbers in check labels). Temp home only.
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, symlinkSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -64,6 +64,23 @@ try {
   assert.equal(readFileSync(configFile, "utf8"), spelled, "7 a trailing slash is the same directory");
   writeFileSync(configFile, JSON.stringify({ plugins: [join(tasksDir, "..", "tasks")] }));
   assert.equal(entry("tasks").state, "configured", "7 a path with .. is the same directory");
+
+  // 7: the entry file of the directory is the same plugin as the directory.
+  writeFileSync(configFile, JSON.stringify({ plugins: [join(tasksDir, "index.ts")] }));
+  const entryText = readFileSync(configFile, "utf8");
+  assert.equal(entry("tasks").state, "configured", "7 an index file entry counts as configured");
+  pluginCatalog.activate("tasks");
+  assert.equal(readFileSync(configFile, "utf8"), entryText, "7 no second entry for the entry file");
+
+  // 6: a plugins.json that is a symlink keeps being the owner's file: the target is written, the link stays.
+  const owned = join(root, "owned.json");
+  writeFileSync(owned, JSON.stringify({ plugins: ["/ext/one"] }));
+  rmSync(configFile);
+  symlinkSync(owned, configFile);
+  pluginCatalog.activate("tasks");
+  assert.ok(lstatSync(configFile).isSymbolicLink(), "6 the link is kept");
+  assert.deepEqual(JSON.parse(readFileSync(owned, "utf8")).plugins, ["/ext/one", tasksDir], "6 the target file got the entry");
+  rmSync(configFile);
 
   // 6: the array form is kept as an array.
   writeFileSync(configFile, JSON.stringify(["/ext/one"]));

@@ -21,8 +21,12 @@ Configuration
 
 States
 12. The state is guessed from the file only. Four states are told apart: `available` (not configured), `configured` (in the config, not part of the running host: awaiting restart), `loaded`, `failed` (with the loader's error). A running host never reports `loaded` for a plugin it did not load at its start.
-13. Activation hot-loads the plugin or restarts the host. It does neither; the card says that a restart is needed and points at Settings → Deploy. The existing Deploy action is the only restart.
+13. Activation hot-loads the plugin or restarts the host. It does neither; the card says that a restart is needed and names the existing Deploy (`npm run projects -- deploy`, or the nightly window in Settings → Deploy), which is the only restart. A button that claims to restart while Settings has none is a dead end.
 14. Activation changes the owner's live host in a test. Tests use a temp `PI_PROJECTS_HOME` and never a live one.
+
+Found in review (red before the fix)
+19. The owner listed the plugin by its entry file (`plugins/tasks/index.ts`): the catalog says available and activation adds a second entry that fails with a name conflict. The entry file counts as the same plugin as its directory.
+20. `plugins.json` is a symlink to the owner's own file: the write replaces the link, so later manual edits no longer reach the host. The target is written and the link stays.
 
 UI
 15. Names, descriptions and errors are inserted as HTML. They are escaped.

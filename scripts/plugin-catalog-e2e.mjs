@@ -63,9 +63,9 @@ await kit.run(async () => {
   await page.waitFor(`document.querySelector(${js(row("tasks"))})?.dataset.state === "configured"`, "tasks configured");
   check("16 no activate button after", await page.evaluate(`!document.querySelector(${js(`${row("tasks")} [data-catalog-activate]`)})`));
   check(
-    "13 the card points at Deploy and says a restart is needed",
+    "13 the card names the existing deploy command and says a restart is needed",
     await page.evaluate(
-      `/restarts|restart/.test(document.querySelector(${js(row("tasks"))}).innerText) && !!document.querySelector(${js(`${row("tasks")} [data-catalog-deploy]`)})`,
+      `/npm run projects -- deploy/.test(document.querySelector(${js(row("tasks"))}).innerText) && !!document.querySelector(${js(`${row("tasks")} [data-catalog-deploy]`)})`,
     ),
   );
   const afterClick = readFileSync(configFile, "utf8");
@@ -91,7 +91,7 @@ await kit.run(async () => {
     check(`3 refused: ${plugin}`, (await kit.rejects({ action: "plugin-activate", plugin })) !== null);
   check("3 the file did not change", readFileSync(configFile, "utf8") === afterClick);
 
-  // 13: the Deploy pointer opens the existing Deploy section.
+  // 13: the Deploy settings button opens the existing Deploy section.
   await click(`${row("tasks")} [data-catalog-deploy]`);
   await page.waitFor(`document.querySelector("#settings").dataset.section === "deploy"`, "deploy section");
   await shot("03-deploy-pointer");

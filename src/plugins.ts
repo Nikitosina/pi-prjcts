@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as chord from "@earendil-works/chord/context";
 import * as durable from "@earendil-works/pi-durable";
@@ -176,8 +176,8 @@ export const plugins = {
   status: (): PluginStatus[] => statuses.map((item) => ({ ...item })),
   /** The loader's result for the plugin at this directory, if this host tried it at its start. */
   attempt: (directory: string): PluginStatus | undefined => {
-    const status = attempts.get(resolvePluginPath(directory));
-    return status && { ...status };
+    for (const [path, status] of attempts) if (isPluginAt(directory, path)) return { ...status };
+    return undefined;
   },
   /** Resolved directories of the current configuration (`plugins.json` and the environment), loaded or not. */
   configuredPaths: (): string[] => configured().flatMap((item) => ("path" in item ? [item.path] : [])),
@@ -201,8 +201,12 @@ const message = (error: unknown) => (error instanceof Error ? error.message : St
 const NAME = /^[a-z][a-z0-9-]{0,39}$/;
 const VERSION = /^\S{1,40}$/;
 
-export const resolvePluginPath = (value: string): string =>
+const resolvePluginPath = (value: string): string =>
   resolve(isAbsolute(value) ? value : value.startsWith("~/") ? join(process.env.HOME ?? "", value.slice(2)) : join(home(), value));
+
+/** Whether a resolved configured path is this plugin directory or the directory's entry file (the loader accepts both). */
+export const isPluginAt = (directory: string, path: string): boolean =>
+  path === directory || (dirname(path) === directory && /^index\.(ts|mjs|js)$/.test(basename(path)));
 
 /** Configured plugin sources: [{ source, path }] or a recorded problem. */
 function configured(): Array<{ source: string; path: string } | { source: string; problem: string }> {

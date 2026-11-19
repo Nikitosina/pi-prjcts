@@ -230,11 +230,11 @@ export function catalogBlock(entries, error = "") {
         entry.state === "available"
           ? `<button type="button" class="ghost-btn small" data-catalog-activate="${esc(entry.id)}">Add to host config</button>`
           : entry.state === "configured"
-            ? `<button type="button" class="ghost-btn small" data-catalog-deploy>Open Deploy</button>`
+            ? `<button type="button" class="ghost-btn small" data-catalog-deploy>Deploy settings</button>`
             : "";
       const note =
         entry.state === "configured"
-          ? `<p class="small muted">Listed in plugins.json. It loads when the host restarts; the Deploy section restarts it.</p>`
+          ? `<p class="small muted">Listed in plugins.json. It loads at the next host restart: run <code>npm run projects -- deploy</code> or wait for the nightly deploy window (Settings → Deploy).</p>`
           : entry.state === "failed"
             ? `<p class="small plugin-error">${esc(clip(entry.error ?? "failed", 300))}</p>`
             : "";
