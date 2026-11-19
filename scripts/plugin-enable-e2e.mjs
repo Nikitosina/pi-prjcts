@@ -225,6 +225,26 @@ await kit.run(async () => {
     (await entry(alpha, "gated")).enabled === false && (await entry(beta, "gated")).enabled === true,
   );
   await page.shot("02-off", { force: true });
+  await page.evaluate(`document.querySelector("#settings").close()`);
+  await page.evaluate(`import('/state.js').then((m) => m.emit('select-request', { projectId: ${js(beta)}, chatId: 'main' }))`);
+  await page.waitFor(
+    `document.querySelector('#app')?.dataset.project === ${js(beta)} || location.search.includes(${js(beta)})`,
+    "beta selected",
+  );
+  await page.evaluate(`document.querySelector('[data-cmd="settings"]').click()`);
+  await click(`#settings nav [data-section="plugins"]`);
+  await page.waitFor(`!!document.querySelector(${js(toggle("gated"))})`, "beta plugin switches");
+  check(
+    "9 the other project's switch is still on in the same UI",
+    await page.evaluate(`document.querySelector(${js(toggle("gated"))}).checked`),
+  );
+  await page.shot("02b-other-project-on", { force: true });
+  await page.evaluate(`document.querySelector("#settings").close()`);
+  await page.evaluate(`import('/state.js').then((m) => m.emit('select-request', { projectId: ${js(alpha)}, chatId: 'main' }))`);
+  await page.waitFor(`location.search.includes(${js(alpha)})`, "alpha selected");
+  await page.evaluate(`document.querySelector('[data-cmd="settings"]').click()`);
+  await click(`#settings nav [data-section="plugins"]`);
+  await page.waitFor(`!!document.querySelector(${js(toggle("gated"))})`, "alpha plugin switches");
   await click(toggle("gated"));
   await page.waitFor(`document.querySelector(${js(toggle("gated"))}).checked`, "switch on");
   check("10 the switch turns it back on", (await entry(alpha, "gated")).enabled === true);
