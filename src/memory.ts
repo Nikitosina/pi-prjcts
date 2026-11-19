@@ -177,12 +177,7 @@ export async function memoryRecent(dir: string): Promise<{ writes: MemoryWrite[]
   // Newest first: an undo counts for the writes after it in the list, never for a later write that happens to produce the same revision (revisions are content hashes).
   const undone = new Set<string>(),
     listed = new Set<string>(),
-    produced = new Map<string, number>(),
     writes: MemoryWrite[] = [];
-  for (const record of records) {
-    const key = `${record.path}\0${record.revision}`;
-    if (record.author !== "memory-undo") produced.set(key, (produced.get(key) ?? 0) + 1);
-  }
   for (const record of records) {
     const key = `${record.path}\0${record.revision}`;
     if (record.author === "memory-undo") {
@@ -198,10 +193,19 @@ export async function memoryRecent(dir: string): Promise<{ writes: MemoryWrite[]
       updatedAt: record.updatedAt,
       created: record.priorText === null,
       undone: undone.has(key),
-      // Two writes of one revision (identical text written again) cannot be told apart by a chat row, so neither is offered Undo.
-      current: newest.get(record.path) === record.revision && produced.get(key) === 1,
+      current: newest.get(record.path) === record.revision,
     });
   }
+  // Two writes of one revision (identical text written again) cannot be told apart by a chat row, so neither is offered Undo; the window above may
+  // not hold the other one, so each current write's own history decides.
+  await Promise.all(
+    writes
+      .filter((write) => write.current)
+      .map(async (write) => {
+        const history = await historyKnowledge(dir, write.path);
+        if (history.filter((item) => item.revision === write.revision && item.author !== "memory-undo").length > 1) write.current = false;
+      }),
+  );
   return { writes };
 }
 

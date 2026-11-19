@@ -905,7 +905,11 @@ await kit.run(async () => {
         .filter((name) => name && name !== "pend-skill-crash")
         .join("\n") + "\n",
     );
-    check("R32 the grant is missing and the record unadmitted at shutdown", !crashSkills().includes("pend-skill-crash"), invokedSkills());
+    check(
+      "R32 the grant is missing and the record unadmitted at shutdown",
+      !crashSkills().includes("pend-skill-crash") && JSON.parse(ledgerText(second)).admitted !== true,
+      invokedSkills(),
+    );
     await kit.restartHost();
     await kit.eventually(async () => crashSkills().includes("pend-skill-crash"), "R32 grant finished from the receipt alone");
     await kit.eventually(async () => JSON.parse(ledgerText(second)).admitted === true, "R32 second record admitted from the receipt");
@@ -974,6 +978,10 @@ await kit.run(async () => {
       "R37 the earlier attempt may have reached the host, so the bubble stays unconfirmed with its Retry",
       unsure.length === 1 && unsure[0].delivery === "unconfirmed" && (await ev(`!!document.querySelector('#feed [data-pending-retry]')`)),
       unsure,
+    );
+    check(
+      "R37 the toast says the retry was not sent again, not that the message was never sent",
+      await ev(`document.querySelector("#toasts").innerText.includes("not sent again")`),
     );
     await ev(`(Storage.prototype.setItem = window.__realSet, true)`);
     await ev(`document.querySelector('#feed [data-pending-retry]').click()`);

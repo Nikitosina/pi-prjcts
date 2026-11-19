@@ -358,6 +358,8 @@ function failSend(send) {
   }
 }
 const NO_HANDLE = "This browser cannot keep a recovery copy of the message, so it was not sent.";
+const NO_HANDLE_AGAIN =
+  "This browser cannot keep a recovery copy of the message, so it was not sent again. The first attempt may have reached the host.";
 const DELIVERY = { sending: "Sending…", sent: "Sent", failed: "Not sent", unconfirmed: "Delivery not confirmed" };
 function pendingHtml(send) {
   const note =
@@ -380,12 +382,13 @@ function pendingHtml(send) {
 async function deliver(send) {
   if (!rememberSend(send)) {
     // Only a first attempt is known not to have been sent; an earlier one may have reached the host, so its status stays as it was.
-    if (send.state === "sending") {
+    const first = send.state === "sending";
+    if (first) {
       send.state = "failed";
       send.error = NO_HANDLE;
     }
     send.restored = false;
-    toast(NO_HANDLE, { error: true, ms: 8000 });
+    toast(first ? NO_HANDLE : NO_HANDLE_AGAIN, { error: true, ms: 8000 });
     renderFeed();
     return;
   }

@@ -205,6 +205,22 @@ await kit.run(async () => {
     [rewritten, listedAgain],
   );
 
+  // The other write of a revision may lie outside the recent window: the path's own history still decides.
+  const far = { action: "knowledge-write", id, path: "decisions/far.md", text: "# Far\n\nSame text.\n", expectedRevision: null };
+  const farFirst = await rpc(far);
+  await rpc({ action: "memory-undo", projectId: id, path: "decisions/far.md", revision: farFirst.revision });
+  for (let index = 0; index < 210; index++)
+    await rpc({
+      action: "knowledge-write",
+      id,
+      path: `decisions/filler-${index}.md`,
+      text: `# Filler ${index}\n\nbody`,
+      expectedRevision: null,
+    });
+  await rpc(far);
+  const farListed = (await rpc({ action: "memory-recent", projectId: id })).writes.find((item) => item.path === "decisions/far.md");
+  check("M16 a revision written twice with the other write beyond the window is offered no Undo", farListed?.current === false, farListed);
+
   // The prompt carries the preferences brief for every role and no memory index; agents search memory with projects_knowledge_list.
   await kit.ask(id, "MEMORY-TURN hello");
   const coordinator = result.calls.findLast((call) => call.role === "coordinator").system;
