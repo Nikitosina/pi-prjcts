@@ -1267,10 +1267,12 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         if (inactive.deleted || inactive.archived) throw new Error("Inactive project settings cannot be changed");
         // Opening the runtime may save a default workspace grant, so the project is read after it. The disable also reads the plugin's own
         // unresolved writes, holds the plugin's pause meanwhile and saves in one synchronous step with its last work check.
-        const runtime = input.enabled ? undefined : await durable(input.id);
-        const project = loadProject(input.id);
-        if (runtime) await runtime.withRoot((root) => plugins.disable(project, input.plugin, root, saveProject));
-        else plugins.setEnabled(project, input.plugin, input.enabled, saveProject);
+        if (input.enabled || inactive.disabledPlugins?.includes(input.plugin))
+          plugins.setEnabled(inactive, input.plugin, input.enabled, saveProject);
+        else {
+          const runtime = await durable(input.id);
+          await runtime.withRoot((root) => plugins.disable(() => loadProject(input.id), input.plugin, root, saveProject));
+        }
         feed.publish(input.id, { topic: "settings" });
         return { plugin: input.plugin, enabled: input.enabled };
       });

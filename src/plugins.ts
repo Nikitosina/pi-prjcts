@@ -210,8 +210,9 @@ export const plugins = {
    * background work cannot finish a write after the check; work that begins during the check (the gate's started count) refuses
    * the disable. Any refusal releases the pause and leaves the plugin on.
    */
-  disable: async (project: Project, name: string, root: Conversation, save: (next: Project) => void): Promise<Project> => {
+  disable: async (read: () => Project, name: string, root: Conversation, save: (next: Project) => void): Promise<Project> => {
     if (!loadedName(name)) throw new Error(`Plugin "${name}" is not loaded`);
+    const project = read();
     if (project.disabledPlugins?.includes(name)) return project;
     const blocked = plugins.disableBlock(project, name);
     if (blocked) throw new Error(blocked);
@@ -226,7 +227,8 @@ export const plugins = {
       release(paused);
       throw error;
     }
-    return plugins.setEnabled(project, name, false, save, paused);
+    // Read again: the project may have been saved (outside the project lock) while the writes were being checked.
+    return plugins.setEnabled(read(), name, false, save, paused);
   },
   /** `paused` is a lifecycle pause already taken for this disable; setEnabled owns it from here and releases it on every refusal. */
   setEnabled: (project: Project, name: string, enabled: boolean, save: (next: Project) => void, paused?: () => void): Project => {
@@ -440,7 +442,7 @@ export const plugins = {
     }
     for (const item of [...builtins(), ...loaded]) {
       const check = item.capabilities.uncertainWrites;
-      if (check && !disabledIn(project, item.plugin) && (await check(tx, root))) return true;
+      if (check && !disabledIn(project, item.plugin) && (await check(tx, root)) !== false) return true;
     }
     return false;
   },

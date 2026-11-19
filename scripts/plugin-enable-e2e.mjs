@@ -331,6 +331,8 @@ await kit.run(async () => {
   const betaRefused = await refused(() => set(beta, "gated", false));
   check("32 the other project cannot disable with its own unresolved write", /unknown outcome/.test(betaRefused), betaRefused);
   check("32 the other project stays enabled", (await entry(beta, "gated")).enabled === true);
+  await mark(beta, "garbage");
+  check("32 an answer that is not a boolean blocks admission", (await blocker(beta)) === "uncertain-provider-write");
   await mark(beta, "no");
   await set(alpha, "gated", true);
   const afterEnable = await blocker(alpha);
