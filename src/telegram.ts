@@ -1083,6 +1083,7 @@ export function startTelegram(options: {
       const plan = held.sentPart.plan;
       const notice = held.notice ?? options.notifier.feed(seq - 1).items.find((item) => item.seq === seq);
       const sameOwner = state.owner?.chatId === held.ownerChatId;
+      if (outcome === "delivered" && !sameOwner) return remove();
       if (outcome === "delivered" && !held.sentPart.pendingMedia) throw new Error("Nothing is uncertain in this held notice; resend it");
       // Delivered confirms only the part that was in flight; parts after it were never attempted, if they can still be sent.
       const confirmed = held.sentPart.parts + (outcome === "delivered" ? 1 : 0);
