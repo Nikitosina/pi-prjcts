@@ -1263,17 +1263,14 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         if (early) throw new Error(early);
       }
       return withProjectLock(input.id, async () => {
+        const inactive = loadProject(input.id);
+        if (inactive.deleted || inactive.archived) throw new Error("Inactive project settings cannot be changed");
+        // Opening the runtime may save a default workspace grant, so the project is read after it. The disable also reads the plugin's own
+        // unresolved writes, holds the plugin's pause meanwhile and saves in one synchronous step with its last work check.
+        const runtime = input.enabled ? undefined : await durable(input.id);
         const project = loadProject(input.id);
-        if (project.deleted || project.archived) throw new Error("Inactive project settings cannot be changed");
-        // The plugin's own unresolved writes are read first (async); work that begins meanwhile is caught by the gate's started count.
-        let startedBefore: number | undefined;
-        if (!input.enabled && !project.disabledPlugins?.includes(input.plugin)) {
-          startedBefore = plugins.gate.started(input.id, input.plugin);
-          const unresolved = await (await durable(input.id)).withRoot((root) => plugins.unresolvedWrites(input.plugin, root));
-          if (unresolved) throw new Error(unresolved);
-        }
-        // Check and save in one synchronous step: no plugin call can start between the work check and the stored flag.
-        plugins.setEnabled(project, input.plugin, input.enabled, saveProject, startedBefore);
+        if (runtime) await runtime.withRoot((root) => plugins.disable(project, input.plugin, root, saveProject));
+        else plugins.setEnabled(project, input.plugin, input.enabled, saveProject);
         feed.publish(input.id, { topic: "settings" });
         return { plugin: input.plugin, enabled: input.enabled };
       });

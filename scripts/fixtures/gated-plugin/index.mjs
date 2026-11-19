@@ -118,6 +118,7 @@ export default {
         asked.set(project, (asked.get(project) ?? 0) + 1);
         if (mode === "fail") throw new Error("gated record unreadable");
         if (mode === "hold") await new Promise((resolve) => checking.push(resolve));
+        if (mode === "garbage") return undefined;
         return mode === "yes";
       },
       rpcPolicy: {

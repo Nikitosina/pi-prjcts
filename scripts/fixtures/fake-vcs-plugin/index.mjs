@@ -307,6 +307,7 @@ export default {
             : undefined;
         },
         published: async () => {
+          if (data().holdPublished) writeFileSync(dataFile(), JSON.stringify({ ...data(), publishedHeld: true }));
           while (data().holdPublished) await new Promise((resolve) => setTimeout(resolve, 50));
           return (data().published ?? []).map((item) => ({ number: item.number, conversationId: item.conversationId ?? 0 }));
         },

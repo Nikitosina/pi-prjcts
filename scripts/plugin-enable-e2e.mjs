@@ -1,5 +1,5 @@
 // E2E: per-project plugin enable and disable (failure cases: plugin-enable-failures.md, numbers in check labels). Fake model, private HOME.
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createKit } from "./lib/e2e-kit.mjs";
@@ -208,7 +208,7 @@ await kit.run(async () => {
   await set(alpha, "gated", false);
   writeFake({ holdPublished: true });
   const heldPoll = rpc({ action: "follow-poll", id: alpha });
-  await kit.delay(600);
+  await kit.eventually(() => JSON.parse(readFileSync(fakeData, "utf8")).publishedHeld === true, "the poll did not reach the held provider");
   await set(alpha, "gated", true);
   writeFake();
   check(
@@ -305,14 +305,20 @@ await kit.run(async () => {
   const unreadable = await refused(() => set(alpha, "gated", false));
   check("32 a check that fails refuses the disable", /could not be checked/.test(unreadable), unreadable);
   check("32 the plugin is still on after a failed check", (await entry(alpha, "gated")).enabled === true);
+  await mark(alpha, "garbage");
+  const garbage = await refused(() => set(alpha, "gated", false));
+  check("32 a check that answers neither yes nor no refuses the disable", /did not answer yes or no/.test(garbage), garbage);
+  check("32 the plugin is still on after an invalid answer", (await entry(alpha, "gated")).enabled === true);
   await mark(alpha, "hold");
   const racing = refused(() => set(alpha, "gated", false));
   await kit.eventually(async () => (await pluginCall("check-waiting")).count === 1, "check did not start");
+  check("32 the plugin's pause is held while its writes are checked", (await counters()).paused.includes(alpha), await counters());
   await call(alpha, "ping");
   await pluginCall("release-check");
   const raced = await racing;
   check("32 work that began during the check refuses the disable", /began while/.test(raced), raced);
   check("32 the plugin is still on after the race", (await entry(alpha, "gated")).enabled === true);
+  check("32 the refused disable released the pause", !(await counters()).paused.includes(alpha), await counters());
   await mark(alpha, "no");
   check("32 once the write is resolved the disable succeeds", (await set(alpha, "gated", false)).enabled === false);
   check("32 and holds the pause", (await counters()).paused.includes(alpha), await counters());

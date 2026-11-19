@@ -110,14 +110,6 @@ const gate = createPluginGate((projectId, plugin) => {
     return true;
   }
 });
-/** A project whose state cannot be read is asked: unlike the gate, a safety check never fails open. */
-const turnedOff = (projectId: string, plugin: string): boolean => {
-  try {
-    return disabledIn(loadProject(projectId), plugin);
-  } catch {
-    return false;
-  }
-};
 const loadedName = (name: string) => loaded.some((item) => item.plugin === name) || builtins().some((item) => item.plugin === name);
 
 /** What the project's folder really is (no grant needed), or null when it is not a checkout. */
@@ -142,6 +134,16 @@ function requiredBy(project: Project, name: string): string | null {
     return `required by this project's checkout (its folder is a ${kind} checkout this plugin serves)`;
   if (name === "github" && project.githubAuthorization?.length) return "required by this project's GitHub authorizations";
   return null;
+}
+
+/** Takes the plugin's lifecycle pause for a disable; a plugin whose pause refuses blocks the disable. */
+function pauseOf(project: Project, name: string): (() => void) | undefined {
+  const lifecycle = [...builtins(), ...loaded].find((entry) => entry.plugin === name)?.capabilities.lifecycle;
+  try {
+    return lifecycle?.pause?.(project.id);
+  } catch (error) {
+    throw new Error(`Cannot disable "${name}": it has active work in this project (${message(error)})`);
+  }
 }
 
 /** A copy of `provider` whose listed methods run through the project gate; everything else (and `this`) stays the provider's own. */
@@ -180,46 +182,70 @@ export const plugins = {
   },
   /**
    * Why the plugin cannot be turned off while it reports a write with an unknown outcome, or null when it reports none. Fails closed:
-   * a check that throws or does not answer in time refuses the disable. The caller passes the gate's `started` count taken before
-   * this runs to `setEnabled`, which refuses when work began in between.
+   * a check that throws, does not answer in time or answers anything but a boolean refuses the disable.
    */
   unresolvedWrites: async (name: string, root: Conversation): Promise<string | null> => {
     const check = [...builtins(), ...loaded].find((entry) => entry.plugin === name)?.capabilities.uncertainWrites;
     if (!check) return null;
     let timer: NodeJS.Timeout | undefined;
     try {
-      const unknown = await Promise.race([
+      const unknown: unknown = await Promise.race([
         root.commit((tx) => check(tx, root.id), chord.BACKGROUND_CONTEXT),
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => reject(new Error("the check timed out")), timeoutMs());
         }),
       ]);
-      return unknown
-        ? `Cannot disable "${name}": it has a write with an unknown outcome in this project. Resolve it first, then turn the plugin off.`
-        : null;
+      if (unknown === false) return null;
+      if (unknown === true)
+        return `Cannot disable "${name}": it has a write with an unknown outcome in this project. Resolve it first, then turn the plugin off.`;
+      throw new Error("the check did not answer yes or no");
     } catch (error) {
       return `Cannot disable "${name}": its unresolved writes could not be checked (${message(error)}). Try again.`;
     } finally {
       clearTimeout(timer);
     }
   },
-  setEnabled: (project: Project, name: string, enabled: boolean, save: (next: Project) => void, startedBefore?: number): Project => {
+  /**
+   * Turns the plugin off once its unresolved writes are known to be none. The lifecycle pause is taken first, so the plugin's own
+   * background work cannot finish a write after the check; work that begins during the check (the gate's started count) refuses
+   * the disable. Any refusal releases the pause and leaves the plugin on.
+   */
+  disable: async (project: Project, name: string, root: Conversation, save: (next: Project) => void): Promise<Project> => {
+    if (!loadedName(name)) throw new Error(`Plugin "${name}" is not loaded`);
+    if (project.disabledPlugins?.includes(name)) return project;
+    const blocked = plugins.disableBlock(project, name);
+    if (blocked) throw new Error(blocked);
+    const before = gate.started(project.id, name);
+    const paused = pauseOf(project, name);
+    try {
+      const unresolved = await plugins.unresolvedWrites(name, root);
+      if (unresolved) throw new Error(unresolved);
+      if (gate.started(project.id, name) !== before)
+        throw new Error(`Cannot disable "${name}": work began while its writes were being checked. Try again.`);
+    } catch (error) {
+      release(paused);
+      throw error;
+    }
+    return plugins.setEnabled(project, name, false, save, paused);
+  },
+  /** `paused` is a lifecycle pause already taken for this disable; setEnabled owns it from here and releases it on every refusal. */
+  setEnabled: (project: Project, name: string, enabled: boolean, save: (next: Project) => void, paused?: () => void): Project => {
     if (!loadedName(name)) throw new Error(`Plugin "${name}" is not loaded`);
     const off = new Set(project.disabledPlugins ?? []);
-    if (enabled === !off.has(name)) return project;
+    if (enabled === !off.has(name)) {
+      release(paused);
+      return project;
+    }
     const held = `${project.id}\0${name}`;
-    let paused: (() => void) | undefined;
     if (enabled) off.delete(name);
     else {
-      const blocked = plugins.disableBlock(project, name);
-      if (blocked) throw new Error(blocked);
-      if (startedBefore !== undefined && gate.started(project.id, name) !== startedBefore)
-        throw new Error(`Cannot disable "${name}": work began while its writes were being checked. Try again.`);
-      const lifecycle = [...builtins(), ...loaded].find((entry) => entry.plugin === name)?.capabilities.lifecycle;
       try {
-        paused = lifecycle?.pause?.(project.id);
+        const blocked = plugins.disableBlock(project, name);
+        if (blocked) throw new Error(blocked);
+        paused ??= pauseOf(project, name);
       } catch (error) {
-        throw new Error(`Cannot disable "${name}": it has active work in this project (${message(error)})`);
+        release(paused);
+        throw error;
       }
       off.add(name);
     }
@@ -404,10 +430,17 @@ export const plugins = {
     }
   },
   /** True when any plugin reports a write whose outcome is unknown (blocks automatic admission). */
+  /** A project whose state cannot be read blocks admission rather than skipping a plugin's check. */
   anyUncertainWrites: async (tx: Tx, root: Conversation["id"], projectId: string): Promise<boolean> => {
+    let project: Project;
+    try {
+      project = loadProject(projectId);
+    } catch {
+      return true;
+    }
     for (const item of [...builtins(), ...loaded]) {
       const check = item.capabilities.uncertainWrites;
-      if (check && !(await turnedOff(projectId, item.plugin)) && (await check(tx, root))) return true;
+      if (check && !disabledIn(project, item.plugin) && (await check(tx, root))) return true;
     }
     return false;
   },
