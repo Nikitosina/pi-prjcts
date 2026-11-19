@@ -48,7 +48,7 @@ Do not edit `telegram.json` by hand. The Settings snapshot (`telegram-snapshot`)
 
 1. `npm run projects -- telegram held` lists the held notices.
 2. If the attachment did not arrive: `npm run projects -- telegram <seq> resend`. It sends only the parts after `confirmedParts` of that one notice, replying to the saved first message, with the saved buttons and reply routing. It waits for any running flush, never touches `sentSeq` and never replays the backlog. If this resend is lost again the notice stays held; if Telegram rejects it cleanly, progress is kept and it can be run again.
-3. If it did arrive: `npm run projects -- telegram <seq> delivered` confirms the part that was in flight. A notice whose plan has later parts still sends them (once); otherwise the record is dropped. The message IDs of the confirmed upload are unknown, so replies to it and spillover linkage are not routed.
+3. If it did arrive: `npm run projects -- telegram <seq> delivered` confirms the part that was in flight. A notice whose plan has later parts still sends them (once); otherwise the record is dropped. `delivered` is refused once a resend failed cleanly, because nothing is uncertain then: resend again. If the account changed or the notice is gone, `delivered` just drops the record. The message IDs of the confirmed upload are unknown, so replies to it and spillover linkage are not routed.
 
 A record without `plan` (a pre-media text cursor) is not `resendable`: only `delivered` is accepted, because what was sent is unknown. A resend is also refused if the paired account changed since the hold, or its notice is gone (the held record keeps a copy of the notice, so only a record without a copy that also left the 200-item feed); verify and mark it delivered. A held record is cleared when a different bot is set or the bot is removed. The Host agent action `telegram-resolve-held` needs the owner's approval.
 
@@ -65,3 +65,5 @@ The caption-first live album attempt returned HTTP 400. Its receipt did not save
 The first live demos proved native photo/video visibility only. The later live wrapper/reply experiment was rejected by the owner as excessive splitting. Neither is evidence for this corrected caption-first UX. No more live sends are authorized unless the owner requests them. No deployment or owner-host restart is part of this PR.
 
 `startTelegram({ receiveUpdates: false, ... })` remains available for bounded isolated outbound verification without competing with the running host's poller. It does not change host settings. Its reply mappings are local to that invocation, not installed in the unchanged production host.
+
+Known limits: re-pairing during an in-flight send can still address that one send to the new chat (existing `sendNotice` behavior); a record whose notice left the feed before the hold has no notice copy and can only be marked delivered.

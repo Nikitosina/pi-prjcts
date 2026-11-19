@@ -1081,15 +1081,16 @@ export function startTelegram(options: {
         persist();
       };
       const plan = held.sentPart.plan;
-      // Delivered confirms only the part that was in flight; parts after it were never attempted.
-      const confirmed = outcome === "delivered" && plan ? held.sentPart.parts + 1 : held.sentPart.parts;
-      if (outcome === "delivered" && (!plan || confirmed >= plan.length)) return remove();
+      const notice = held.notice ?? options.notifier.feed(seq - 1).items.find((item) => item.seq === seq);
+      const sameOwner = state.owner?.chatId === held.ownerChatId;
+      if (outcome === "delivered" && !held.sentPart.pendingMedia) throw new Error("Nothing is uncertain in this held notice; resend it");
+      // Delivered confirms only the part that was in flight; parts after it were never attempted, if they can still be sent.
+      const confirmed = held.sentPart.parts + (outcome === "delivered" ? 1 : 0);
+      if (outcome === "delivered" && (!plan || confirmed >= plan.length || !sameOwner || !notice)) return remove();
       if (!state.owner) throw new Error("Telegram is not paired");
-      if (held.ownerChatId !== state.owner.chatId)
-        throw new Error("Held notice was for a different Telegram account; mark it delivered to drop it");
+      if (!sameOwner) throw new Error("Held notice was for a different Telegram account; mark it delivered to drop it");
       if (!plan) throw new Error("Held notice has no saved plan, so what was sent is unknown; verify in Telegram and mark it delivered");
       if (state.sentPart) throw new Error("A notice is being delivered; retry shortly");
-      const notice = held.notice ?? options.notifier.feed(seq - 1).items.find((item) => item.seq === seq);
       if (!notice) throw new Error("Held notice has left the notification feed; verify in Telegram and mark it delivered");
       const { pendingMedia: _, ...resumed } = held.sentPart;
       state.sentPart = { ...resumed, parts: confirmed };

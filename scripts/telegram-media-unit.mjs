@@ -688,6 +688,30 @@ try {
   );
   assert.deepEqual(JSON.parse(readFileSync(statePath)).held, []);
 
+  // After a clean rejection nothing is uncertain, so delivered must not skip the unsent part.
+  reset(`![Photo](${ref("demo.png")}) ![Video](${ref("demo.mp4")})`);
+  partial = JSON.parse(readFileSync(statePath));
+  partial.sentPart = {
+    seq: 1,
+    parts: 0,
+    pendingMedia: true,
+    plan: [
+      { kind: "media", ref: ref("demo.png"), caption: "<b>Test · Main</b>" },
+      { kind: "media", ref: ref("demo.mp4"), caption: "" },
+    ],
+  };
+  writeFileSync(statePath, JSON.stringify(partial));
+  start();
+  await bridge.flush();
+  fault = { method: "sendPhoto", code: 429 };
+  await assert.rejects(bridge.resolveHeld(1, "resend"));
+  await assert.rejects(bridge.resolveHeld(1, "delivered"), /Nothing is uncertain/);
+  await bridge.resolveHeld(1, "resend");
+  assert.deepEqual(
+    sends.map((s) => s.method),
+    ["sendPhoto", "sendVideo"],
+  );
+
   // A restart in the middle of a recovery keeps its progress in the held record, not in the outbox cursor.
   reset(`![Photo](${ref("demo.png")}) ![Video](${ref("demo.mp4")})`);
   notices.push(notice(2, "Next"));
