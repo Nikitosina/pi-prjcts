@@ -38,17 +38,25 @@ The [HTTP 400 investigation](telegram-media-investigation.md) includes pinned so
 
 The existing outbox cursor saves the selected plan, successful part count, and first message ID for spillover linkage. An album checkpoints every returned message ID together. An explicit 429 rejection can retry without duplicating successful parts or headers.
 
-Telegram has no client idempotency key for uploads. A pending-media flag is saved before each media or album request. A network/server failure, incomplete success response or crash before the success checkpoint blocks automatic resend and later notices, rather than risk duplicate media. Settings reports uncertain delivery.
+Telegram has no client idempotency key for uploads. A pending-media flag is saved before each media or album request. A network/server failure, incomplete success response or crash before the success checkpoint means the upload may or may not exist in Telegram. The notice is then **held**: its cursor record (`sentPart`: seq, plan, count of confirmed parts, first message ID) moves to `held` in `telegram.json`, `sentSeq` advances past it, and later notices keep flowing, in the same run and after a restart. Nothing is resent automatically and nothing is declared delivered. State saved by the old release with `pendingMedia` is moved to `held` the same way on the first flush after upgrade.
 
 A trusted transport guard that blocks a request **before forwarding it** uses `TelegramRequestNotSentError`, not a generic network exception. That clears the current pending flag and stops automatic retry; it must never be used for a timeout or a request that may have reached Telegram. An explicit API 400 is a confirmed rejection. A locally blocked fallback after that rejection is not evidence that the rejected original upload might have succeeded.
 
-An operator must inspect the actual linked conversation before resolving the cursor in `telegram.json`, with the host stopped under separate authorization. Do not clear the flag or resend blindly. A partially delivered artifact notice from the pre-media production release has only a text-chunk cursor, not a caption plan. It is also held for inspection rather than guessing which content to replay after upgrade. Existing text-only cursors resume unchanged.
+### Operator recovery of a held notice
+
+Do not edit `telegram.json` by hand. The Settings snapshot (`telegram-snapshot`) lists `held`: `seq`, `at`, `uncertain`, `resendable`, `confirmedParts`, `remainingParts`. Look at the real conversation first, then run from the checkout the host runs from:
+
+1. `npm run projects -- telegram held` lists the held notices.
+2. If the attachment did not arrive: `npm run projects -- telegram <seq> resend`. It sends only the parts after `confirmedParts` of that one notice, replying to the saved first message, with the saved buttons and reply routing. It waits for any running flush, never touches `sentSeq` and never replays the backlog. If this resend is lost again the notice stays held; if Telegram rejects it cleanly, progress is kept and it can be run again.
+3. If it did arrive: `npm run projects -- telegram <seq> delivered` drops the record.
+
+A record without `plan` (a pre-media text cursor) is not `resendable`: only `delivered` is accepted, because what was sent is unknown. A resend is also refused if the paired account changed since the hold, or the notice left the 200-item notification feed; in both cases verify and mark it delivered. A held record is cleared when a different bot is set or the bot is removed. The Host agent action `telegram-resolve-held` needs the owner's approval.
 
 The transport also saves the latest 20 redacted `deliveryErrors` before fallback and exposes them in its snapshot. API entries preserve the provided description, HTTP status and API code. Later errors do not erase earlier entries. Network, incomplete-response and not-sent entries remain distinct. The history excludes request bodies and response message/file/chat objects; tests verify token/chat-ID redaction and persistence across restart.
 
 ## Verification and live-demo scope
 
-`telegram-media-unit` uses the actual bridge against a mocked multipart endpoint. It covers one-call formatted captions/envelopes/actions/routing, album bytes/MIME/shared caption/per-item mappings, album limits/fallbacks, long-text preservation, Unicode/entities, security, ordering, rejection retries and ambiguous media/album blocking across restart.
+`telegram-media-unit` uses the actual bridge against a mocked multipart endpoint. It covers one-call formatted captions/envelopes/actions/routing, album bytes/MIME/shared caption/per-item mappings, album limits/fallbacks, long-text preservation, Unicode/entities, security, ordering, rejection retries and ambiguous media/album holding, later notices continuing, legacy persisted state and targeted recovery across restart.
 
 `telegram-media-e2e` runs an isolated real host from an incoming Telegram update through coordinator/worker execution, artifact storage, notifier and outbox. Only the model and Bot API are fake. It verifies one-message photo/video results, a one-call mixed album, full long responses surviving the notifier, replies to a photo and a second album item reaching their original chat after the selected route changes, and no replay after restart. Both scripts run in deterministic CI without a browser.
 

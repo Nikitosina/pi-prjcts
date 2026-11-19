@@ -70,6 +70,21 @@ if (command === "plugin") {
   }
   process.exit(process.exitCode ?? 0);
 }
+if (command === "telegram") {
+  try {
+    if (!startHost) throw new Error("--no-start is not supported for telegram");
+    let result: unknown;
+    if (first === "held" && !second) result = ((await request({ action: "telegram-snapshot" })) as { held: unknown }).held;
+    else if ((second === "resend" || second === "delivered") && first && /^[1-9]\d*$/.test(first) && rest.length === 0)
+      result = ((await request({ action: "telegram-resolve-held", seq: Number(first), outcome: second })) as { held: unknown }).held;
+    else throw new Error("Usage: telegram held | telegram <seq> <resend|delivered>");
+    process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+  } catch (error) {
+    process.stderr.write(errorText(error) + "\n");
+    process.exitCode = 1;
+  }
+  process.exit(process.exitCode ?? 0);
+}
 if (command === "deploy") {
   try {
     if (!startHost) throw new Error("--no-start is not supported for deploy");
@@ -355,7 +370,7 @@ switch (command) {
     break;
   default:
     process.stderr.write(
-      "Usage: projects [--no-start] <ui|ui-url|plugin|list|create|create-once|show|send|submit-scoped|thread-send|thread-steer|thread-stop|thread-history|schedules|schedule-history|schedule-once|schedule-interval|schedule-daily|schedule-weekly|schedule-enable|event-opt-in|owner-setup|owner-workspaces|owner-command-profiles|owner-workspace-grant|owner-workspace-revoke|owner-github-inspect|owner-github-authorize|owner-github-revoke|owner-profile-read|owner-profile-set|notes|jobs|pause|resume|archive|restore|delete|host-stop> ...\n",
+      "Usage: projects [--no-start] <ui|ui-url|plugin|list|create|create-once|show|send|submit-scoped|thread-send|thread-steer|thread-stop|thread-history|schedules|schedule-history|schedule-once|schedule-interval|schedule-daily|telegram|schedule-weekly|schedule-enable|event-opt-in|owner-setup|owner-workspaces|owner-command-profiles|owner-workspace-grant|owner-workspace-revoke|owner-github-inspect|owner-github-authorize|owner-github-revoke|owner-profile-read|owner-profile-set|notes|jobs|pause|resume|archive|restore|delete|host-stop> ...\n",
     );
     process.exit(1);
 }

@@ -574,19 +574,136 @@ try {
 
   for (const code of [0, 200]) {
     reset(`![Photo](${ref("demo.png")}) ![Video](${ref("demo.mp4")})`);
-    notices.push(notice(2, "Must wait"));
+    notices.push(notice(2, "Must not wait"));
     fault = { method: "sendMediaGroup", code };
     start();
     await bridge.flush();
+    assert.deepEqual(
+      sends.map((s) => s.method),
+      ["sendMessage"],
+    );
+    assert.match(sends[0].input.text, /Must not wait/);
     const before = attempts.length;
+    let state = JSON.parse(readFileSync(statePath));
+    assert.equal(state.sentSeq, 2);
+    assert.equal(state.sentPart, undefined);
+    assert.equal(state.held.length, 1);
+    assert.equal(state.held[0].seq, 1);
+    assert.equal(state.held[0].sentPart.parts, 0);
+    assert.equal(state.held[0].sentPart.plan[0].kind, "album");
+    assert.equal(state.deliveryErrors.at(-1).kind, code === 0 ? "network" : "incomplete-response");
+    assert.deepEqual(
+      (await bridge.snapshot()).held.map((item) => ({ seq: item.seq, remainingParts: item.remainingParts })),
+      [{ seq: 1, remainingParts: 1 }],
+    );
     await bridge.flush();
     bridge.close();
     start();
     await bridge.flush();
     assert.equal(attempts.length, before);
-    assert(JSON.parse(readFileSync(statePath)).sentPart.pendingMedia);
-    assert.equal(JSON.parse(readFileSync(statePath)).deliveryErrors.at(-1).kind, code === 0 ? "network" : "incomplete-response");
+    assert.equal(JSON.parse(readFileSync(statePath)).held.length, 1);
+    notices.push(notice(3, "Later notice"));
+    await bridge.flush();
+    assert.deepEqual(
+      sends.map((s) => s.method),
+      ["sendMessage", "sendMessage"],
+    );
+    assert.match(sends[1].input.text, /Later notice/);
+    await assert.rejects(bridge.resolveHeld(9, "resend"), /No held/);
+    await bridge.resolveHeld(1, "resend");
+    assert.deepEqual(
+      sends.map((s) => s.method),
+      ["sendMessage", "sendMessage", "sendMediaGroup"],
+    );
+    state = JSON.parse(readFileSync(statePath));
+    assert.deepEqual(state.held, []);
+    assert.equal(state.sentSeq, 3);
+    assert.equal(state.sentPart, undefined);
+    mapped();
+    await bridge.flush();
+    assert.equal(sends.length, 3);
   }
+
+  reset(`![Photo](${ref("demo.png")}) ![Video](${ref("demo.mp4")})`);
+  fault = { method: "sendMediaGroup", code: 0 };
+  start();
+  await bridge.flush();
+  await bridge.resolveHeld(1, "delivered");
+  assert.deepEqual(JSON.parse(readFileSync(statePath)).held, []);
+  assert.equal(sends.length, 0);
+
+  // The confirmed first part is never resent; a resend lost again stays held.
+  reset(`![Photo](${ref("demo.png")}) ![Video](${ref("demo.mp4")})`);
+  let partial = JSON.parse(readFileSync(statePath));
+  partial.sentPart = {
+    seq: 1,
+    parts: 1,
+    pendingMedia: true,
+    anchorMessageId: 77,
+    plan: [
+      { kind: "media", ref: ref("demo.png"), caption: "<b>Test · Main</b>" },
+      { kind: "media", ref: ref("demo.mp4"), caption: "" },
+    ],
+  };
+  writeFileSync(statePath, JSON.stringify(partial));
+  start();
+  await bridge.flush();
+  assert.equal(attempts.length, 0);
+  assert.equal(JSON.parse(readFileSync(statePath)).held[0].sentPart.parts, 1);
+  fault = { method: "sendVideo", code: 0 };
+  await assert.rejects(bridge.resolveHeld(1, "resend"));
+  assert.equal(JSON.parse(readFileSync(statePath)).held.length, 1);
+  await bridge.resolveHeld(1, "resend");
+  assert.deepEqual(
+    sends.map((s) => s.method),
+    ["sendVideo"],
+  );
+  assert.equal(JSON.parse(sends[0].input.reply_parameters).message_id, 77);
+  assert.deepEqual(JSON.parse(readFileSync(statePath)).held, []);
+
+  // Incident shape: state persisted by the old release.
+  reset(`![Photo](${ref("demo.png")}) ![Video](${ref("demo.mp4")})`);
+  notices.push(notice(2, "After legacy"));
+  let old = JSON.parse(readFileSync(statePath));
+  old.sentPart = {
+    seq: 1,
+    parts: 0,
+    pendingMedia: true,
+    plan: [{ kind: "album", refs: [ref("demo.png"), ref("demo.mp4")], caption: "<b>Test · Main</b>" }],
+  };
+  writeFileSync(statePath, JSON.stringify(old));
+  start();
+  await bridge.flush();
+  assert.deepEqual(
+    sends.map((s) => s.method),
+    ["sendMessage"],
+  );
+  assert.match(sends[0].input.text, /After legacy/);
+  old = JSON.parse(readFileSync(statePath));
+  assert.equal(old.sentSeq, 2);
+  assert.equal(old.held[0].seq, 1);
+  assert.equal(attempts.length, 1);
+  await bridge.resolveHeld(1, "resend");
+  assert.deepEqual(
+    sends.map((s) => s.method),
+    ["sendMessage", "sendMediaGroup"],
+  );
+  assert.equal(sends[1].input.media.length, 2);
+  mapped();
+
+  // Another owner never receives a held attachment.
+  reset(`![Photo](${ref("demo.png")}) ![Video](${ref("demo.mp4")})`);
+  fault = { method: "sendMediaGroup", code: 0 };
+  start();
+  await bridge.flush();
+  old = JSON.parse(readFileSync(statePath));
+  old.owner = { chatId: 2, name: "Other" };
+  bridge.close();
+  writeFileSync(statePath, JSON.stringify(old));
+  start();
+  await assert.rejects(bridge.resolveHeld(1, "resend"), /different Telegram account/);
+  assert.equal(sends.length, 0);
+
   reset(`Start ![Uncertain](${ref("demo.mp4")}) Stop`);
   fault = { method: "sendVideo", code: 0 };
   start();
@@ -596,7 +713,7 @@ try {
   start();
   await bridge.flush();
   assert.equal(attempts.length, before);
-  assert(JSON.parse(readFileSync(statePath)).sentPart.pendingMedia);
+  assert.equal(JSON.parse(readFileSync(statePath)).held.length, 1);
   reset(`Legacy partial ![Image](${ref("demo.png")})`);
   let legacy = JSON.parse(readFileSync(statePath));
   legacy.sentPart = { seq: 1, parts: 1 };
@@ -604,7 +721,9 @@ try {
   start();
   await bridge.flush();
   assert.equal(sends.length, 0);
-  assert(JSON.parse(readFileSync(statePath)).sentPart.pendingMedia);
+  assert.equal(JSON.parse(readFileSync(statePath)).held[0].sentPart.pendingMedia, true);
+  await assert.rejects(bridge.resolveHeld(1, "resend"), /no saved plan/);
+  assert.equal(sends.length, 0);
   reset("text-only ".repeat(700));
   legacy = JSON.parse(readFileSync(statePath));
   legacy.sentPart = { seq: 1, parts: 1 };

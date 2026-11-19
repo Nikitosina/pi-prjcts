@@ -172,6 +172,7 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
   "telegram-token": exclude("Takes the bot token, a secret that must not enter a transcript."),
   "telegram-pair": exclude("Pairing issues a code that makes a Telegram account the owner; the owner pairs in person."),
   "telegram-unpair": dangerous("Unpair the owner's Telegram."),
+  "telegram-resolve-held": dangerous("Resend a held Telegram attachment or mark it delivered."),
   "telegram-remove": dangerous("Remove the Telegram bot."),
   "host-agent-history": exclude("The Host agent's own transcript is already its context."),
   "host-agent-send": exclude("The Host agent would message itself."),
