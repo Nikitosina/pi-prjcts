@@ -106,8 +106,7 @@ on("select", ({ projectId }) => {
   if (recent.projectId !== projectId) {
     recent = { projectId, writes: new Map(), ready: false };
     dropProven();
-  }
-  else if (recent.ready || recentLoad?.projectId === projectId) return;
+  } else if (recent.ready || recentLoad?.projectId === projectId) return;
   void refreshRecentMemory();
 });
 /** The write's Undo state as the host proved it; undefined when it is not proven (yet). `ready` is false until the project's first read arrived. */

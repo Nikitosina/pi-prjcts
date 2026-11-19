@@ -110,15 +110,7 @@ import {
 } from "./github-authorization.ts";
 import { settingsApplication } from "./settings-application.ts";
 import { libraryImport, libraryList, libraryRead } from "./project-library.ts";
-import {
-  attachmentImageCopies,
-  attachmentMessage,
-  deleteUpload,
-  listUploads,
-  saveUpload,
-  uploadRecord,
-  uploadText,
-} from "./uploads.ts";
+import { attachmentImageCopies, attachmentMessage, deleteUpload, listUploads, saveUpload, uploadRecord, uploadText } from "./uploads.ts";
 import { createModelRuntime, loadProviderExtensions } from "./provider-extensions.ts";
 import { openToolSummaries } from "./tool-summaries.ts";
 import { projectModelCatalog, projectModelPicker } from "./project-models.ts";

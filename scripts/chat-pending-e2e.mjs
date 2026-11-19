@@ -855,7 +855,12 @@ await kit.run(async () => {
     delete record.admitted;
     delete record.entry;
     writeFileSync(ledgerPath(id), JSON.stringify({ ...record, state: "queued", delivery: { content: "expanded MARK-R32" } }));
-    writeFileSync(join(kit.home, A, "invoked-skills.txt"), crashSkills().filter((name) => name && name !== "pend-skill-crash").join("\n") + "\n");
+    writeFileSync(
+      join(kit.home, A, "invoked-skills.txt"),
+      crashSkills()
+        .filter((name) => name && name !== "pend-skill-crash")
+        .join("\n") + "\n",
+    );
     check("R32 the grant is missing before the restart", !crashSkills().includes("pend-skill-crash"), invokedSkills());
     await kit.restartHost();
     await kit.eventually(async () => crashSkills().includes("pend-skill-crash"), "R32 grant finished after the restart");
@@ -882,7 +887,11 @@ await kit.run(async () => {
     );
     await typeAndSend("unstorable MARK-R33");
     await kit.delay(900);
-    check("R33 nothing was sent", (await countCalls("message")) === 0 && (await hostCount(A, undefined, "MARK-R33")) === 0, await calls("message"));
+    check(
+      "R33 nothing was sent",
+      (await countCalls("message")) === 0 && (await hostCount(A, undefined, "MARK-R33")) === 0,
+      await calls("message"),
+    );
     check("R33 the draft stays in the composer", (await composer()) === "unstorable MARK-R33", await composer());
     check("R33 no bubble claims it was sent", (await owners("MARK-R33")).length === 0, await owners("MARK-R33"));
     check("R33 the owner is told", await ev(`document.querySelector("#toasts").innerText.includes("recovery")`));
@@ -900,7 +909,11 @@ await kit.run(async () => {
     await page.waitFor(`[...document.querySelectorAll('#feed .msg.owner')].some((n) => n.dataset.delivery === "failed")`, "R34 failed");
     check("R34 a real refusal restores the draft", (await composer()) === "untouched MARK-R34", await composer());
     await ev(`document.querySelector('#feed [data-pending-dismiss]').click()`);
-    check("R34 dismissing the unedited restore clears it", (await composer()) === "" && (await owners("MARK-R34")).length === 0, await composer());
+    check(
+      "R34 dismissing the unedited restore clears it",
+      (await composer()) === "" && (await owners("MARK-R34")).length === 0,
+      await composer(),
+    );
   });
   // R35: only a write the host proves is offered Undo; an old, still current write keeps its Undo.
   await section("R35", async () => {
@@ -912,14 +925,32 @@ await kit.run(async () => {
     await ev(`document.querySelector('[data-memory-undo="decisions/undo-meE.md"]').click()`);
     await page.waitFor(`!document.querySelector('[data-memory-undo="decisions/undo-meE.md"]')`, "R35 E undone");
     const changedDoc = await rpc({ action: "knowledge-read", id: A, path: "decisions/undo-meD.md" });
-    await rpc({ action: "knowledge-write", id: A, path: "decisions/undo-meD.md", text: "# Undo me\n\nchanged", expectedRevision: changedDoc.revision });
+    await rpc({
+      action: "knowledge-write",
+      id: A,
+      path: "decisions/undo-meD.md",
+      text: "# Undo me\n\nchanged",
+      expectedRevision: changedDoc.revision,
+    });
     for (let index = 0; index < 55; index++)
-      await rpc({ action: "knowledge-write", id: A, path: `decisions/fill-${index}.md`, text: `# Fill ${index}\n\nbody`, expectedRevision: null });
+      await rpc({
+        action: "knowledge-write",
+        id: A,
+        path: `decisions/fill-${index}.md`,
+        text: `# Fill ${index}\n\nbody`,
+        expectedRevision: null,
+      });
     await ev(`delete window.__calls`);
     await page.reload();
-    await page.waitFor(`!window.__calls && document.body.dataset.ready === "1" && !!document.querySelector('#composer-input')`, "R35 reloaded");
+    await page.waitFor(
+      `!window.__calls && document.body.dataset.ready === "1" && !!document.querySelector('#composer-input')`,
+      "R35 reloaded",
+    );
     await ev(wrapFetch);
-    await page.waitFor(`document.querySelector('#feed').innerText.includes("ACK MARK-REMEMBERF")  || document.querySelector('[data-memory="decisions/undo-meF.md"]')`, "R35 transcript");
+    await page.waitFor(
+      `document.querySelector('#feed').innerText.includes("ACK MARK-REMEMBERF")  || document.querySelector('[data-memory="decisions/undo-meF.md"]')`,
+      "R35 transcript",
+    );
     await kit.delay(1500);
     const rowOf = (path) =>
       ev(
