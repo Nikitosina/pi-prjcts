@@ -46,7 +46,7 @@ function clipped<Result extends { content: { type: string; text?: string }[] }>(
 export function readOnlyCodeTools(
   cwd: string,
   resolveRoot?: (api: ToolExecutionApi, context: Context) => Promise<string | undefined>,
-  project?: () => Pick<Project, "disabledPlugins">,
+  project?: () => Pick<Project, "id" | "disabledPlugins">,
 ): { tools: ToolRegistration[]; extension: ReturnType<typeof defineExtension> } {
   const fallback = realpathSync(cwd);
   const byRoot = new Map<string, Built>();

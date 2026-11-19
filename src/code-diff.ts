@@ -31,7 +31,7 @@ export type DiffPage = {
   /** Bytes already spent on text placed before this page. */
   reserve?: number;
   /** The project reading: a checkout kind of a plugin it turned off is not looked for. */
-  project?: Pick<Project, "disabledPlugins">;
+  project?: Pick<Project, "id" | "disabledPlugins">;
 };
 /** One changed file of a diff; paths are relative to the checkout root until a page shows them. */
 export type FileStat =
@@ -121,7 +121,7 @@ async function collect(root: string, base: string | undefined, path: string | un
     return out.stdout;
   };
   if (vcs.kind !== "git") {
-    const provider = plugins.vcsProvider(vcs.kind);
+    const provider = plugins.vcsProvider(vcs.kind, project);
     if (!provider) throw new Error(`No plugin for ${vcs.kind} checkouts is loaded; no diff is available`);
     const narrows = provider.codeDiffPath === true;
     if (only !== undefined && !narrows)
@@ -304,7 +304,7 @@ export async function workerChanges(root: string, base?: string, page: DiffPage 
       await git("status", "--porcelain=v1", "--untracked-files=all"),
     ];
   } else {
-    const provider = plugins.vcsProvider(vcs.kind);
+    const provider = plugins.vcsProvider(vcs.kind, page.project);
     if (!provider) throw new Error(`No plugin for ${vcs.kind} checkouts is loaded; no diff is available`);
     ({ branch, head, status } = await provider.workerState(vcs.root));
   }

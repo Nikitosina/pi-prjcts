@@ -138,22 +138,6 @@ function requiredBy(project: Project, name: string, checkout: () => string | nul
   return null;
 }
 
-/** Takes the held pauses of a project's disabled plugins again after a lifecycle transition resumed the plugins' hooks. */
-function keepHeld(projectId: string) {
-  for (const [held, resume] of [...heldPauses]) {
-    const [id, name] = held.split("\0");
-    if (id !== projectId) continue;
-    release(resume);
-    heldPauses.delete(held);
-    try {
-      const paused = [...builtins(), ...loaded].find((entry) => entry.plugin === name)?.capabilities.lifecycle?.pause?.(projectId);
-      if (paused) heldPauses.set(held, paused);
-    } catch {
-      /* the stored flag already refuses every entry of the plugin */
-    }
-  }
-}
-
 /** Takes the plugin's lifecycle pause for a disable; a plugin whose pause refuses blocks the disable. */
 function pauseOf(project: Project, name: string): (() => void) | undefined {
   const lifecycle = [...builtins(), ...loaded].find((entry) => entry.plugin === name)?.capabilities.lifecycle;
@@ -310,7 +294,13 @@ export const plugins = {
     [...builtins(), ...loaded].flatMap((item) =>
       item.capabilities.vcs && !(project && disabledIn(project, item.plugin)) ? [item.capabilities.vcs] : [],
     ),
-  vcsProvider: (kind: string): VcsProvider | undefined => each((caps) => caps.vcs).find((item) => item.kind === kind),
+  /** With a project, the provider's methods run through the project gate: counted while they run, refused once the project turned the plugin off. */
+  vcsProvider: (kind: string, project?: Pick<Project, "id">): VcsProvider | undefined => {
+    const item = [...builtins(), ...loaded].find((entry) => entry.capabilities.vcs?.kind === kind);
+    const provider = item?.capabilities.vcs;
+    if (!item || !provider || !project) return provider;
+    return gate.methods(project.id, item.plugin, provider, ["changedFiles", "codeDiff", "workerState", "resolveContinuation"]);
+  },
   workspaceProviders: (): WorkspaceProvider[] => plugins.workspaceSources(),
   workspaceProvider: (id: string): WorkspaceProvider | undefined => plugins.workspaceSources().find((item) => item.id === id),
   /** Workspace providers: a project that turned the plugin off is offered no setup of it (a grant that uses it locks the plugin on). */
@@ -362,6 +352,16 @@ export const plugins = {
         }),
       ];
     }),
+  /**
+   * Runs a Follow event delivery as work of the plugins behind `providerIds` in the project: a disable is refused until it ends, and a
+   * provider that is already off refuses it. Providers without a plugin of their own (GitHub) are not counted.
+   */
+  followWork: <T>(projectId: string, providerIds: readonly string[], work: () => Promise<T>): Promise<T> => {
+    const names = [...builtins(), ...loaded].flatMap((item) =>
+      item.capabilities.follow && providerIds.includes(item.capabilities.follow.id) ? [item.plugin] : [],
+    );
+    return names.reduceRight<() => Promise<T>>((inner, name) => () => gate.run(projectId, name, inner), work)();
+  },
   /** Follow providers whose plugin this project has turned off. */
   followProvidersOff: (project: Pick<Project, "disabledPlugins">): string[] =>
     [...builtins(), ...loaded].flatMap((item) =>
@@ -405,17 +405,19 @@ export const plugins = {
     }),
   /**
    * Runs every plugin's lifecycle pause; one refusal resumes the others and refuses the change. Returns the combined resume.
-   * A pause held by a plugin disable is the host's to keep: a plugin whose hook is one flag per project loses it when the transition
-   * resumes, so each held pause of this project is released and taken again after the resumes.
+   * A plugin whose pause a disable holds is skipped: the host keeps that pause unbroken, so the plugin is never resumed (not even
+   * briefly) by a transition of the project.
    */
   pauseLifecycle: (projectId: string): (() => void) => {
     const resumes: Array<() => void> = [];
     const resumeAll = () => {
       for (const resume of resumes.splice(0).reverse()) release(resume);
-      keepHeld(projectId);
     };
     try {
-      for (const hooks of each((caps) => caps.lifecycle)) if (hooks.pause) resumes.push(hooks.pause(projectId));
+      for (const item of [...builtins(), ...loaded]) {
+        const hooks = item.capabilities.lifecycle;
+        if (hooks?.pause && !heldPauses.has(`${projectId}\0${item.plugin}`)) resumes.push(hooks.pause(projectId));
+      }
     } catch (error) {
       resumeAll();
       throw error;

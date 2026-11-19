@@ -5,7 +5,7 @@ import { plugins } from "./plugins.ts";
 import type { Project } from "./state.ts";
 
 /** What a project-scoped lookup needs of the project: the plugins it turned off are not asked about a folder. */
-type ProjectScope = Pick<Project, "disabledPlugins">;
+type ProjectScope = Pick<Project, "id" | "disabledPlugins">;
 
 /** Version-control binaries. */
 export const cli = {
@@ -43,7 +43,7 @@ export async function readHead(cwd: string, project?: ProjectScope): Promise<Hea
   const unreadable = (reason: string): HeadRead => ({ kind: "unreadable", reason });
   try {
     const found = findVcsRoot(cwd, project);
-    const provider = found && found.kind !== "git" ? plugins.vcsProvider(found.kind) : undefined;
+    const provider = found && found.kind !== "git" ? plugins.vcsProvider(found.kind, project) : undefined;
     if (found && provider) {
       const head = (await provider.workerState(found.root)).head.trim();
       return head ? { kind: "commit", sha: head } : unreadable(`the ${found.kind} checkout reported no HEAD commit`);
@@ -60,7 +60,7 @@ export async function readHead(cwd: string, project?: ProjectScope): Promise<Hea
 /** Uncommitted paths of a worktree (git or a plugin kind, by what is found above it); null when the status cannot be read. */
 export async function changedFiles(cwd: string, project?: ProjectScope): Promise<string[] | null> {
   const found = findVcsRoot(cwd, project);
-  const provider = found && found.kind !== "git" ? plugins.vcsProvider(found.kind) : undefined;
+  const provider = found && found.kind !== "git" ? plugins.vcsProvider(found.kind, project) : undefined;
   if (provider) return provider.changedFiles(cwd);
   const result = await runCli(cli.git(), ["-C", cwd, "status", "--porcelain", "--untracked-files=normal"]);
   return result.code === 0 ? result.stdout.split("\n").filter(Boolean) : null;

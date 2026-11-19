@@ -36,8 +36,8 @@
       "plugin-dev-unit"
     ],
     "src/plugin-types.ts": ["vcs-plugins-e2e", "provider-extensions-e2e", "host-agent-e2e", "plugin-dev-unit"],
-    "src/follow-batch.ts": ["follow-batch-unit", "follow-prs-e2e", "plugin-enable-e2e"],
-    "src/durable-follow.ts": ["follow-batch-unit", "follow-prs-e2e", "plugin-enable-e2e"],
+    "src/follow-batch.ts": ["follow-batch-unit", "follow-delivery-unit", "follow-delivery-e2e", "follow-prs-e2e", "plugin-enable-e2e"],
+    "src/durable-follow.ts": ["follow-batch-unit", "follow-delivery-unit", "follow-delivery-e2e", "follow-prs-e2e", "plugin-enable-e2e"],
     "src/plugin-catalog.ts": ["plugin-catalog-unit", "plugin-catalog-e2e"],
     "src/bundled-plugins.ts": ["plugin-catalog-unit", "plugin-catalog-e2e"],
     "src/plugin-dev.ts": ["plugin-dev-unit", "vcs-plugins-e2e"],
@@ -62,6 +62,7 @@
     "plugins/simulator/index.ts": ["simulator-panel-e2e"],
     "scripts/fixtures/shared-provider/**": ["plugin-wrappers-unit"],
     "scripts/fixtures/simple-pause/**": ["plugin-pause-unit"],
+    "scripts/fixtures/follow-twins/**": ["follow-delivery-unit", "follow-delivery-e2e"],
     "scripts/fixtures/simulator/**": ["simulator-panel-e2e"],
     "docs/plugins/examples/**": ["plugin-dev-unit", "plugin-panels-e2e", "plugin-sidebar-e2e"],
     "web/plugins.js": ["plugin-catalog-e2e", "plugin-panels-e2e", "plugin-sidebar-e2e", "vcs-plugins-e2e", "plugin-enable-e2e"],

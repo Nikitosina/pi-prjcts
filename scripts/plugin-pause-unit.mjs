@@ -64,6 +64,13 @@ assert.ok(paused.has(alpha.id), "P1 a lifecycle transition on the project keeps 
 plugins.pauseLifecycle(beta.id)();
 assert.ok(paused.has(alpha.id), "P1 a transition on another project keeps it too");
 assert.ok(!paused.has(beta.id), "P1 the other project is not paused after its transition");
+// P4 the pause is continuous: from the disable to the enable the plugin was never resumed, not even for an instant.
+const mark = globalThis.simpleLog.length;
+plugins.pauseLifecycle(alpha.id)();
+assert.ok(
+  !globalThis.simpleLog.slice(mark - 1).some((entry) => entry === `resume:${alpha.id}`),
+  `P4 a transition never resumes the disabled plugin: ${globalThis.simpleLog.slice(mark - 1)}`,
+);
 const again = plugins.pauseLifecycle(alpha.id);
 again();
 again();
