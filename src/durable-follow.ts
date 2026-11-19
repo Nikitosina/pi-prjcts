@@ -13,7 +13,7 @@ import { plugins } from "./plugins.ts";
 import type { FollowFailure, FollowItem, FollowPrState } from "./plugin-types.ts";
 import { catalog } from "./workspace-authorization.ts";
 import { prNoticeText, pushNotices, type PrNotice } from "./pr-notices.ts";
-import { deliverable, groupProviders, ownerKey, prLabel, prRef, priorRepo, repoKey } from "./follow-batch.ts";
+import { afterDelivery, deliverable, groupProviders, ownerKey, prLabel, prRef, priorRepo, repoKey } from "./follow-batch.ts";
 import { describeMainPull, type MainPull } from "./main-pull.ts";
 import type { scheduleRuntime } from "./durable-schedule.ts";
 
@@ -37,8 +37,8 @@ type FollowBatch = {
   groups: Array<{ input: Parameters<ReturnType<typeof scheduleRuntime>["ingest"]>[0]; chat: number; provider?: string; count?: number }>;
   /** Providers whose plugin the project had turned off when the poll began: their saved records are not this poll's to prune. Absent in older docs. */
   switchedOff?: string[];
-  /** Older bare repository keys this poll moved to a provider-scoped key; dropped when the batch is recorded. Absent in older docs. */
-  superseded?: string[];
+  /** Older bare repository keys this poll moved to a provider's scoped key; dropped, with their fix attempts moved, once the scoped record is stored. */
+  superseded?: Array<{ key: string; provider: string }>;
 };
 type FollowState = {
   pending?: FollowBatch;
@@ -62,6 +62,16 @@ const Follow = defineDoc<FollowState>({
 });
 const own = <T>(record: Record<string, T>, key: string): T | undefined =>
   Object.prototype.hasOwnProperty.call(record, key) ? record[key] : undefined;
+/** Auto-fix attempts an older host stored under a bare `<repository>#<number>` belong to the provider that took the repository over; a scoped list already holding them wins. */
+const moveFixes = (fixes: Record<string, FixAttempt[]>, repositoryId: string, provider: string) => {
+  for (const key of Object.keys(fixes)) {
+    const found = /^(.+)#(\d+)$/.exec(key);
+    if (found?.[1] !== repositoryId) continue;
+    const scoped = prLabel(provider, repositoryId, found[2]);
+    if (!own(fixes, scoped)) fixes[scoped] = fixes[key];
+    delete fixes[key];
+  }
+};
 const clip = (text: unknown, max = 240) => {
   const value = String(text ?? "")
     .replace(/\s+/g, " ")
@@ -264,9 +274,7 @@ export function followRuntime(
   async function fix(failure: Failure, state: FollowState, cap: number, chat: number): Promise<string> {
     const provider = failure.provider ?? "github",
       key = prLabel(provider, failure.repo.repositoryId, failure.number),
-      // A plugin's attempts an older host stored under the bare name still count against the same head.
-      attempts =
-        own(state.fixes, key) ?? (provider === "github" ? [] : (own(state.fixes, `${failure.repo.repositoryId}#${failure.number}`) ?? []));
+      attempts = own(state.fixes, key) ?? [];
     if (attempts.some((item) => item.sha === failure.head)) return "auto-fix already dispatched for this head";
     const running = attempts.findLast((item) => item.workId !== null);
     if (running?.workId && ["queued", "running"].includes((await fixer.workStatus(running.workId)) ?? ""))
@@ -291,7 +299,7 @@ export function followRuntime(
     // Recorded before dispatch: a crash in between never dispatches twice for this head.
     await root.commit(async (tx) => {
       const doc = await tx.doc(Follow, root.id);
-      doc.fixes[key] = [...(own(doc.fixes, key) ?? []), attempt];
+      doc.fixes[key] = [...attempts, attempt];
     }, BACKGROUND_CONTEXT);
     state.fixes[key] = [...attempts, attempt];
     if (attempt.mode === "none") return `no workspace scope for ${failure.repo.repositoryId}; grant one in Owner setup to enable auto-fix`;
@@ -392,6 +400,7 @@ export function followRuntime(
     let eventId = "";
     const off = () => plugins.followProvidersOff(loadProject(projectId));
     const delivering = (group: FollowBatch["groups"][number]) => deliverable(batch, off()).groups.includes(group);
+    const submitted: FollowBatch["groups"] = [];
     for (const group of batch.groups) {
       const where = (await fixer.chatConversation(group.chat)) || target;
       if (!delivering(group)) continue;
@@ -401,19 +410,33 @@ export function followRuntime(
       await plugins.followWork(projectId, groupProviders(batch, group), () =>
         schedules.ingest(group.input, live, undefined, { target: where, automation: true }),
       );
+      submitted.push(group);
     }
     const stopped = off(),
-      sent = deliverable(batch, stopped);
+      sent = afterDelivery(batch, submitted);
+    // A provider that was off, or whose events were not submitted, keeps the record it had, so they are announced later.
+    const held = Object.entries(batch.repos).filter(
+      ([, repo]) => sent.heldAll || (repo.provider && (stopped.includes(repo.provider) || sent.heldProviders.includes(repo.provider))),
+    );
+    const claimed = Object.fromEntries(Object.entries(batch.repos).filter(([key]) => !held.some(([heldKey]) => heldKey === key)));
+    const moved = (batch.superseded ?? []).filter((item) => repoKey(item.provider, item.key) in claimed);
     await root.commit(async (tx) => {
       const doc = await tx.doc(Follow, root.id);
-      // A provider switched off before its events were delivered keeps the record it had, so they are announced after the enable.
-      const claimed = Object.fromEntries(
-        Object.entries(batch.repos).filter(([, repo]) => !(repo.provider && stopped.includes(repo.provider))),
-      );
+      const keep = new Set([
+        ...held.map(([key]) => key),
+        ...(batch.superseded ?? []).filter((item) => !moved.includes(item)).map((item) => item.key),
+      ]);
       doc.repos = {
-        ...foreignRepos(doc.repos, claimed, batch.switchedOff && [...batch.switchedOff, ...stopped], batch.superseded),
+        ...foreignRepos(
+          doc.repos,
+          claimed,
+          batch.switchedOff && [...batch.switchedOff, ...stopped],
+          moved.map((item) => item.key),
+        ),
+        ...Object.fromEntries(Object.entries(doc.repos).filter(([key]) => keep.has(key))),
         ...claimed,
       };
+      for (const item of moved) moveFixes(doc.fixes, item.key, item.provider);
       pushNotices(doc, sent.notices);
       doc.lastPollAtMs = Date.now();
       doc.lastError = null;
@@ -456,13 +479,16 @@ export function followRuntime(
         failed: Failure[] = [],
         repoStates: FollowState["repos"] = {},
         priors: FollowState["repos"] = {},
-        superseded: string[] = [],
+        superseded: NonNullable<FollowBatch["superseded"]> = [],
         notices: PrNotice[] = [];
       const prior = (provider: string, repositoryId: string) => {
         const found = priorRepo(state.repos, provider, repositoryId),
           key = repoKey(provider, repositoryId);
         if (found.record) priors[key] = found.record;
-        if (found.superseded) superseded.push(found.superseded);
+        if (found.superseded) {
+          superseded.push({ key: found.superseded, provider });
+          moveFixes(state.fixes, found.superseded, provider);
+        }
         return found.record;
       };
       for (const repo of repos) {
@@ -497,7 +523,7 @@ export function followRuntime(
         const provider = repoStates[merge.key].provider ?? "github",
           key = `${merge.repositoryId}#${merge.number}`,
           scoped = prLabel(provider, merge.repositoryId, merge.number),
-          once = merge.base === undefined ? null : `${merge.repositoryId}\n${merge.base}`;
+          once = merge.base === undefined ? null : `${provider}\n${merge.repositoryId}\n${merge.base}`;
         const outcome =
           (once && shared.get(once)) ||
           (await fixer
@@ -519,7 +545,7 @@ export function followRuntime(
           const was = own(own(priors, repoKeyed)?.prs ?? {}, number);
           if (!was?.pullSkipped || pr.state !== "merged") continue;
           const key = `${repositoryId}#${number}`,
-            once = pr.base ? `${repositoryId}\n${pr.base}` : null;
+            once = pr.base ? `${repo.provider ?? "github"}\n${repositoryId}\n${pr.base}` : null;
           const outcome =
             (once && shared.get(once)) ||
             (await fixer

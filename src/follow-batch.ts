@@ -71,3 +71,21 @@ export function deliverable<G extends Group, N extends { key: string }>(
     count: tagged ? groups.reduce((sum, group) => sum + group.count!, 0) : dropped.length ? 0 : batch.count,
   };
 }
+
+/** What a delivery that submitted only `submitted` of the batch's groups announced, and whose repository records it may not advance: a skipped legacy group holds every provider. */
+export function afterDelivery<G extends Group, N extends { key: string }>(
+  batch: Batch<G, N>,
+  submitted: readonly G[],
+): { groups: G[]; notices: N[]; count: number; heldProviders: string[]; heldAll: boolean } {
+  const skipped = batch.groups.filter((group) => !submitted.includes(group));
+  const heldAll = skipped.some((group) => group.provider === undefined);
+  const heldProviders = [...new Set(skipped.flatMap((group) => groupProviders(batch, group)))];
+  const tagged = batch.groups.every((group) => group.count !== undefined);
+  return {
+    groups: [...submitted],
+    notices: heldAll ? [] : batch.notices.filter((notice) => !heldProviders.some((provider) => notice.key.startsWith(`${provider}:`))),
+    count: tagged ? submitted.reduce((sum, group) => sum + group.count!, 0) : skipped.length ? 0 : batch.count,
+    heldProviders,
+    heldAll,
+  };
+}

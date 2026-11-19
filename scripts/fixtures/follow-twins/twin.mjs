@@ -37,7 +37,23 @@ export const twin = (name, envName) => ({
             }
             prs[key] = next;
           }
-          return { state: { baselined: true, prs }, items, failed: [] };
+          const failed = baselined
+            ? data()
+                .prs.filter(
+                  (pr) =>
+                    pr.ci === "failed" &&
+                    !(prior?.prs?.[String(pr.number)]?.ci?.result === "failed" && prior.prs[String(pr.number)].ci.sha === pr.head),
+                )
+                .map((pr) => ({
+                  repo: { repositoryId },
+                  number: pr.number,
+                  title: pr.title,
+                  head: pr.head,
+                  ref: `${name}/${pr.number}`,
+                  checks: ["lint"],
+                }))
+            : [];
+          return { state: { baselined: true, prs }, items, failed };
         },
       },
     });

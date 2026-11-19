@@ -331,6 +331,113 @@ await scenario("F6", async () => {
   assert.equal(delivered(first).length, 2, "F6 the other project saw nothing new");
 });
 
+// F7 a provider switched off while its group is skipped and back on before the batch is recorded: its event is not counted or claimed, its
+// record (also one an older host stored under the bare id) stays, and the next poll announces the event once.
+await scenario("F7", async () => {
+  reset();
+  const project = make(),
+    root = store(project.id);
+  const head = "e".repeat(40);
+  const old = {
+    baselined: true,
+    prs: {
+      7: { state: "open", head, ref: "alpha/7", title: "PR 7", updatedAt: "", ci: null, lastReview: 0, lastComment: 0, lastLineComment: 0 },
+    },
+    provider: "alpha",
+  };
+  root.docs.set("projects.pr-follow", {
+    repos: { "acme/mari": old, [`beta::beta/repo`]: { baselined: true, prs: {}, provider: "beta", repositoryId: "beta/repo" } },
+    fixes: {},
+    lastPollAtMs: null,
+    lastError: null,
+    polls: 0,
+    events: 0,
+    lastEventAtMs: null,
+  });
+  set("alpha", { repositoryId: "acme/mari", prs: [pr(7, head, "passed")], published: [] });
+  set("beta", { repositoryId: "beta/repo", prs: [pr(8, "f".repeat(40), "passed")], published: [] });
+  sink.hook = async (phase, input) => {
+    if (phase === "chat" && input.chat === 100 && !off.done) {
+      off.done = true;
+      await disable(project, "alpha", root);
+    }
+    if (phase === "admit" && input.kind === "beta.follow") on(project.id);
+  };
+  await runtime(project, root).poll(true);
+  assert.equal(
+    delivered(project).filter((item) => item.payload.includes("[alpha]")).length,
+    0,
+    "F7 alpha's event was not delivered while it was off",
+  );
+  assert.equal(doc(root).events, delivered(project).length, "F7 only what was delivered is counted");
+  assert.ok("acme/mari" in doc(root).repos, "F7 alpha's record under the old key survives");
+  sink.hook = async () => {};
+  await runtime(project, root).poll(true);
+  assert.equal(
+    delivered(project).filter((item) => item.payload.includes("[alpha]")).length,
+    1,
+    "F7 the next poll announces alpha's event once",
+  );
+  assert.ok(!("acme/mari" in doc(root).repos) && "alpha::acme/mari" in doc(root).repos, "F7 now the record is under alpha's key");
+  await runtime(project, root).poll(true);
+  assert.equal(delivered(project).filter((item) => item.payload.includes("[alpha]")).length, 1, "F7 and not again");
+});
+
+// F8 auto-fix attempts: a plugin never inherits another provider's attempts stored under the same bare name; attempts an older host stored
+// for the plugin move with its repository record, so the cap and the same-head rule still see them.
+await scenario("F8", async () => {
+  reset();
+  const project = make(),
+    root = store(project.id);
+  updateAutomations(project.id, { follow: { enabled: true, autoFix: true, fixCap: 3 } });
+  const head = "9".repeat(40),
+    other = "8".repeat(40);
+  const record = (provider) => ({ baselined: true, prs: {}, provider, repositoryId: "acme/mari" });
+  const attemptOf = (sha) => ({ sha, at: 1, mode: "follow-up", workId: "w0", threadId: "t5", error: null });
+  const jobs = [{ threadId: "t5", conversationId: 5, chat: 11, pr: null }];
+  root.docs.set("projects.pr-follow", {
+    repos: { [`alpha::acme/mari`]: record("alpha") },
+    fixes: { "acme/mari#7": [attemptOf(head)] },
+    lastPollAtMs: null,
+    lastError: null,
+    polls: 0,
+    events: 0,
+    lastEventAtMs: null,
+  });
+  set("alpha", { repositoryId: "acme/mari", prs: [pr(7, head, "failed")], published: [{ number: 7, conversationId: 5 }] });
+  await runtime(project, root, { jobs }).poll(true);
+  assert.equal(
+    doc(root).fixes["alpha:acme/mari#7"]?.length,
+    1,
+    "F8 GitHub's attempt for the same head does not suppress the plugin's first fix",
+  );
+  assert.equal(doc(root).fixes["acme/mari#7"]?.length, 1, "F8 and GitHub's own attempts stay where they are");
+
+  reset();
+  const second = make(),
+    secondRoot = store(second.id);
+  updateAutomations(second.id, { follow: { enabled: true, autoFix: true, fixCap: 3 } });
+  secondRoot.docs.set("projects.pr-follow", {
+    repos: { "acme/mari": { baselined: true, prs: {}, provider: "alpha" } },
+    fixes: { "acme/mari#7": [attemptOf(other)] },
+    lastPollAtMs: null,
+    lastError: null,
+    polls: 0,
+    events: 0,
+    lastEventAtMs: null,
+  });
+  await runtime(second, secondRoot, { jobs }).poll(true);
+  const moved = doc(secondRoot).fixes["alpha:acme/mari#7"];
+  assert.deepEqual(
+    moved?.map((item) => item.sha),
+    [other, head],
+    "F8 the plugin's older attempts moved with its record and the new one follows",
+  );
+  assert.ok(!("acme/mari#7" in doc(secondRoot).fixes), "F8 the bare list is gone");
+  await runtime(second, secondRoot, { jobs }).poll(true);
+  assert.equal(doc(secondRoot).fixes["alpha:acme/mari#7"].length, 2, "F8 the same head is not fixed twice");
+});
+
 if (failures.length) {
   console.error(`follow-delivery-unit: FAILED ${failures.map((item) => item.name).join(", ")}`);
   process.exit(1);
