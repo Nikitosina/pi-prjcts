@@ -1,6 +1,6 @@
 // Unit: a frozen Follow batch delivers nothing of a plugin the project has turned off since the batch was frozen, and keeps the rest.
 import assert from "node:assert/strict";
-import { deliverable } from "../src/follow-batch.ts";
+import { deliverable, ownerKey, prRef } from "../src/follow-batch.ts";
 
 const group = (provider, chat, count) => ({
   input: { eventId: `e-${provider}-${chat}`, kind: `${provider}.follow`, payload: provider },
@@ -37,6 +37,22 @@ assert.deepEqual(
 );
 assert.deepEqual(Object.keys(batch.repos), ["a/b", "x/y"], "B1 the saved repository records are untouched");
 
+// B2 a batch frozen before provider tags mixes providers per chat: whole while nothing it recorded is off, held back once a recorded provider is off.
 const old = { ...batch, groups: [{ input: batch.groups[0].input, chat: 1 }], count: 4 };
-assert.equal(deliverable(old, ["gated"]).count, 4, "B2 a batch frozen before provider tags still delivers whole");
+assert.equal(deliverable(old, []).count, 4, "B2 a legacy batch with nothing off delivers whole");
+assert.equal(deliverable(old, ["other"]).count, 4, "B2 a provider the batch never recorded does not hold it");
+const held = deliverable(old, ["gated"]);
+assert.deepEqual([held.groups.length, held.count], [0, 0], "B2 a legacy batch that recorded a now-disabled provider is held back");
+assert.deepEqual(
+  held.notices.map((item) => item.key),
+  ["gh:a/b#1:merged"],
+  "B2 the other provider's notice stays",
+);
+
+// B3 a PR is told apart by provider, repository and number.
+assert.notEqual(ownerKey("github", "a/b", 7), ownerKey("gated", "a/b", 7), "B3 same repository and number, other provider");
+assert.notEqual(ownerKey("github", "a/b", 7), ownerKey("github", "a/c", 7), "B3 same provider and number, other repository");
+assert.deepEqual(prRef("a/b#7:ci:abc:failed"), { repositoryId: "a/b", number: 7 }, "B3 item id");
+assert.deepEqual(prRef("fake-repo#12"), { repositoryId: "fake-repo", number: 12 }, "B3 id without a suffix");
+assert.equal(prRef("no number here"), null);
 console.log("follow-batch-unit: ok");

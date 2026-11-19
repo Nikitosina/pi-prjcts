@@ -671,11 +671,16 @@ export function scheduleRuntime(
           kind: result.intent.kind,
           submissionId: null,
         });
-      const submitted: ScheduleIntent & { duplicate?: true } = await submitIntent(result.intent, options.target);
+      const submitted: ScheduleIntent & { duplicate?: true } = await submitIntent(result.intent, options.target, guard);
       if (!result.newlyRecorded) submitted.duplicate = true;
       return submitted;
     });
-  async function submitIntent(intent: ScheduleIntent, target: Conversation = root): Promise<ScheduleIntent> {
+  /** `guard` is the admission check of the ingest, asked again here: it can turn false between recording the intent and submitting it. */
+  async function submitIntent(
+    intent: ScheduleIntent,
+    target: Conversation = root,
+    guard?: (tx: Tx) => Promise<boolean>,
+  ): Promise<ScheduleIntent> {
     if (intent.status !== "recorded") return intent;
     if (isClosed()) return mark(intent.requestId, "interrupted", "Project closed");
     const allowed = await root.commit(async (tx) => {
@@ -683,13 +688,18 @@ export function scheduleRuntime(
       const state = await tx.doc(DurableSchedule, root.id);
       const current = own(state.intents, intent.requestId);
       if (!current || current.status !== "recorded" || planning.paused) return "paused";
+      if (guard && !(await guard(tx))) return "unauthorized";
       return (await uncertainEffects(tx)) ? "uncertain" : "allowed";
     }, BACKGROUND_CONTEXT);
     if (allowed !== "allowed")
       return mark(
         intent.requestId,
         "interrupted",
-        allowed === "uncertain" ? "Automatic admission blocked by an uncertain effect" : "Project paused",
+        allowed === "uncertain"
+          ? "Automatic admission blocked by an uncertain effect"
+          : allowed === "unauthorized"
+            ? "Event admission no longer authorized"
+            : "Project paused",
       );
     try {
       const submission = await (intent.conversationId === undefined ? root : target).submit(

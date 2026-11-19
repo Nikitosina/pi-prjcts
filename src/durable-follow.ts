@@ -13,7 +13,7 @@ import { plugins } from "./plugins.ts";
 import type { FollowFailure, FollowItem, FollowPrState } from "./plugin-types.ts";
 import { catalog } from "./workspace-authorization.ts";
 import { prNoticeText, pushNotices, type PrNotice } from "./pr-notices.ts";
-import { deliverable } from "./follow-batch.ts";
+import { deliverable, ownerKey, prRef } from "./follow-batch.ts";
 import { describeMainPull, type MainPull } from "./main-pull.ts";
 import type { scheduleRuntime } from "./durable-schedule.ts";
 
@@ -334,22 +334,38 @@ export function followRuntime(
     );
   /** PR number -> chat conversation of the Job that opened it (a verified publication receipt, or the Job's own PR link). */
   async function prOwners(
-    repos: Array<{ numericId: number }>,
-    providers: Array<{ published(root: Conversation, project: Project): Promise<Array<{ number: number; conversationId: number }>> }>,
-  ): Promise<Map<number, number>> {
+    repos: Array<{ numericId: number; repositoryId: string }>,
+    providers: Array<{
+      id: string;
+      repositoryId: string;
+      published(root: Conversation, project: Project): Promise<Array<{ number: number; conversationId: number }>>;
+    }>,
+  ): Promise<Map<string, number>> {
     const jobs = await fixer.threads(),
-      owners = new Map<number, number>();
+      owners = new Map<string, number>();
+    // A Job's own PR link names its repository only as a GitHub URL; a bare number does not say which provider it belongs to.
     for (const job of jobs) {
-      const linked = /(\d+)\/?$/.exec(job.pr ?? "")?.[1];
-      if (linked) owners.set(Number(linked), job.chat);
+      const linked = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)\/?$/.exec(job.pr ?? "");
+      if (linked) owners.set(ownerKey("github", linked[1], Number(linked[2])), job.chat);
     }
     const receipts = await Promise.all([
-      ...repos.map((repo) => githubPublishedPullRequests(root, repo.numericId).catch(() => [])),
-      ...providers.map((provider) => provider.published(root, loadProject(projectId)).catch(() => [])),
+      ...repos.map((repo) =>
+        githubPublishedPullRequests(root, repo.numericId)
+          .catch(() => [])
+          .then((list) => list.map((receipt) => ({ ...receipt, key: (number: number) => ownerKey("github", repo.repositoryId, number) }))),
+      ),
+      ...providers.map((provider) =>
+        provider
+          .published(root, loadProject(projectId))
+          .catch(() => [])
+          .then((list) =>
+            list.map((receipt) => ({ ...receipt, key: (number: number) => ownerKey(provider.id, provider.repositoryId, number) })),
+          ),
+      ),
     ]);
     for (const receipt of receipts.flat()) {
       const job = jobs.find((item) => item.conversationId === receipt.conversationId);
-      if (job) owners.set(receipt.number, job.chat);
+      if (job) owners.set(receipt.key(receipt.number), job.chat);
     }
     return owners;
   }
@@ -496,7 +512,11 @@ export function followRuntime(
       const target = await fixer.target(),
         owners = await prOwners(
           repos,
-          connected.map((item) => item.provider),
+          connected.map((item) => ({
+            id: item.provider.id,
+            repositoryId: item.repositoryId,
+            published: (rootConversation: Conversation, owner: Project) => item.provider.published(rootConversation, owner),
+          })),
         ),
         notes = new Map<string, string>();
       for (const failure of failed) {
@@ -508,21 +528,31 @@ export function followRuntime(
             ? "not published by this project; no auto-fix"
             : !config.follow.autoFix
               ? "auto-fix is off"
-              : await fix(failure, state, config.follow.fixCap, owners.get(failure.number) ?? Number(target.id)),
+              : await fix(
+                  failure,
+                  state,
+                  config.follow.fixCap,
+                  owners.get(ownerKey(failure.provider ?? "github", failure.repo.repositoryId, failure.number)) ?? Number(target.id),
+                ),
         );
       }
       // A PR a Job opened reports to the chat that started that Job; its own opened/new-head lines wake nobody. The rest goes to the event chat.
-      const numberOf = (item: Item) => Number(/#(\d+)(?::|$)/.exec(item.id)?.[1]);
+      const ownerOf = (provider: string, id: string) => {
+        const ref = prRef(id);
+        return ref ? owners.get(ownerKey(provider, ref.repositoryId, ref.number)) : undefined;
+      };
       const groups = new Map<string, { chat: number | null; provider: string; items: Item[] }>();
       for (const item of items) {
-        const chat = owners.get(numberOf(item)) ?? null;
+        const provider = origin.get(item) ?? "github";
+        const chat = ownerOf(provider, item.id) ?? null;
         if (chat !== null && /#\d+:(opened|head:)/.test(item.id)) continue;
-        const provider = origin.get(item) ?? "github",
-          key = `${chat}\0${provider}`;
+        const key = `${chat}\0${provider}`;
         groups.set(key, { chat, provider, items: [...(groups.get(key)?.items ?? []), item] });
       }
       for (const notice of notices) {
-        const chat = owners.get(Number(/#(\d+)(?::|$)/.exec(notice.key)?.[1]));
+        const colon = notice.key.indexOf(":"),
+          provider = notice.key.slice(0, colon);
+        const chat = ownerOf(provider === "gh" ? "github" : provider, notice.key.slice(colon + 1));
         if (chat !== undefined) notice.chat = chat;
       }
       const delivered = [...groups.values()].reduce((sum, group) => sum + group.items.length, 0);
