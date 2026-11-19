@@ -1723,14 +1723,8 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
             throw new Refused("This request id belongs to a different message; nothing was changed");
           if (prior?.admitted) return prior;
           if (prior && (await owner.ledgerSubmissions(chatId, [prior.id])).length) return markAdmitted(prior);
-          // A record from before origins and saved content proves neither where it came from nor what it said: only the owner's own retry may deliver it.
-          if (
-            prior &&
-            !prior.delivery &&
-            prior.origin === undefined &&
-            origin !== "owner" &&
-            (prior.state === "queued" || prior.state === "running")
-          )
+          // A record without saved content proves neither where it came from nor what it said: only the owner's own retry may deliver it.
+          if (prior && !prior.delivery && origin !== "owner" && (prior.state === "queued" || prior.state === "running"))
             throw new Refused("This saved message does not prove where it came from; send it again as a new message");
           // A settled record the runtime has no submission for is history, not a message waiting to be sent.
           if (prior && prior.state !== "queued" && prior.state !== "running") return prior;
@@ -1767,7 +1761,6 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
             if (chat.archived) throw new Error("Chat is archived; restore it before sending");
             return { ...job, origin, delivery: { content, images } };
           });
-          for (const invoked of skillNames(job.text)) recordInvokedSkill(ownedProjectDir(input.id), invoked);
           saveJob(input.id, job);
           const dir = ownedProjectDir(input.id),
             effective = job.delivery!.content,
@@ -1778,6 +1771,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
             chatId: input.chatId,
             title: job.text,
           });
+          for (const invoked of skillNames(job.text)) recordInvokedSkill(ownedProjectDir(input.id), invoked);
           return markAdmitted(job);
         },
       });

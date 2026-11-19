@@ -63,3 +63,5 @@ Written before the code. The saved request is the intent: a restart continues it
 - R25 A saved message that does not say which images went with it is admitted as text only, or one over the runtime limit is recovered after granting its skill.
 - R26 The first version's single handle list is lost on upgrade; more handles than the display cap are deleted as settled.
 - R27 A turn-card Retry in a second tab, or after a reload, gets a new request id; an edited draft in one chat is replaced by another chat's draft.
+- R28 Turn-card Retry reads the recipient after an await, so a chat switch sends it to the new chat; two projects with one failed job id share a retry id and handle.
+- R29 A Telegram replay rebuilds a record that has an origin but no saved content; skill access is granted before the request is saved or admitted.

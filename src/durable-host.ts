@@ -70,13 +70,13 @@ async function recoverUnadmitted(owner: DurableProjectRuntime, project: Project)
         if (job.delivery!.images === undefined && job.attachments?.length) continue;
         const images = attachmentImages(dir, job.delivery!.images, true);
         if (images.length !== (job.delivery!.images?.length ?? 0)) continue;
-        for (const invoked of skillNames(job.text)) recordInvokedSkill(dir, invoked);
         await owner.admit(images.length ? [{ type: "text", text: job.delivery!.content }, ...images] : job.delivery!.content, {
           requestId: job.id,
           origin: job.origin === "telegram" ? "telegram" : undefined,
           chatId: job.chatId,
           title: job.text,
         });
+        for (const invoked of skillNames(job.text)) recordInvokedSkill(dir, invoked);
       }
       const { delivery: _saved, ...held } = jobs(project.id).find((item) => item.id === job.id) ?? job;
       saveJob(project.id, { ...held, admitted: true });

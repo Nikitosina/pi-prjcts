@@ -565,14 +565,18 @@ await kit.run(async () => {
   );
   const lostOrigin = await kit.rejects({ action: "message", id: A, text: "/skill:pend-skill crash MARK-CRASH", requestId: crashed });
   check("H4 a retry without the original origin is refused", /different message/.test(lostOrigin ?? ""), lostOrigin);
-  const retriedCrash = await send({ text: "/skill:pend-skill crash MARK-CRASH", requestId: crashed, origin: "telegram" });
-  check("H4 the deliberate retry admits the record", retriedCrash.admitted === true, retriedCrash);
-  const duo = await Promise.all([
-    send({ text: "/skill:pend-skill crash MARK-CRASH", requestId: crashed, origin: "telegram" }),
-    send({ text: "/skill:pend-skill crash MARK-CRASH", requestId: crashed, origin: "telegram" }),
-  ]);
-  await kit.eventually(async () => (await hostCount(A, undefined, "MARK-CRASH")) >= 1, "crash message delivered");
-  check("H4 repeated retries deliver once", (await hostCount(A, undefined, "MARK-CRASH")) === 1 && duo.every((job) => job.id === crashed));
+  const replayCrash = await kit.rejects({
+    action: "message",
+    id: A,
+    text: "/skill:pend-skill crash MARK-CRASH",
+    requestId: crashed,
+    origin: "telegram",
+  });
+  check("H4 a legacy record without saved content is not rebuilt for a replay", /does not prove/.test(replayCrash ?? ""), replayCrash);
+  check(
+    "H4 it stays undelivered and unadmitted",
+    (await hostCount(A, undefined, "MARK-CRASH")) === 0 && !JSON.parse(ledgerText(crashed)).admitted,
+  );
 
   // H5: two concurrent first sends under one id deliver once.
   const racing = randomUUID();

@@ -29,13 +29,15 @@ const HANDLE_PREFIX = "pi-pending-send:",
 const savedHandles = new Map(); // attempt id → the stored text of its handle
 function loadHandles() {
   const found = [];
+  // The first version kept one list under one key; its handles move to their own keys before the list goes.
   try {
-    // The first version kept one list under one key; its handles move to their own keys before the list goes.
     const old = JSON.parse(localStorage.getItem(LEGACY_HANDLES) ?? "[]");
     for (const item of Array.isArray(old) ? old : [])
       if (typeof item?.id === "string" && /^[0-9a-f-]{36}$/.test(item.id) && !localStorage.getItem(HANDLE_PREFIX + item.id))
         localStorage.setItem(HANDLE_PREFIX + item.id, JSON.stringify(item));
     localStorage.removeItem(LEGACY_HANDLES);
+  } catch {}
+  try {
     for (let index = 0; index < localStorage.length; index++) {
       const key = localStorage.key(index);
       if (!key?.startsWith(HANDLE_PREFIX)) continue;
@@ -119,9 +121,11 @@ async function knownWorker(id) {
   }
 }
 /** The request id of a failed turn's Retry comes from the turn, so another tab's click, or this one after a reload, names the same delivery. */
-async function retryId(failedId) {
+async function retryId(projectId, chatId, failedId) {
   if (!crypto.subtle) return uuid();
-  const hex = [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`retry:${failedId}`)))]
+  const hex = [
+    ...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`retry:${projectId}:${chatId}:${failedId}`))),
+  ]
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
@@ -1032,14 +1036,15 @@ feed.addEventListener("click", async (event) => {
     const failed = (state.view?.jobs ?? []).find((item) => item.id === retry.dataset.retryJob);
     if (!failed || retry.disabled) return;
     retry.disabled = true; // a second click must not resend
+    const { projectId, chatId } = state; // the recipient is the chat the failed turn is in, whatever the owner opens meanwhile
     // One failed turn is one delivery: a click after a lost ack reuses the pending send, and its request id, instead of starting another.
-    let send = pendingSends.find((item) => item.retryOf === failed.id && inCurrentChat(item));
+    let send = pendingSends.find((item) => item.retryOf === failed.id && item.projectId === projectId && item.chatId === chatId);
     if (!send) {
       send = {
-        id: await retryId(failed.id),
+        id: await retryId(projectId, chatId, failed.id),
         retryOf: failed.id,
-        projectId: state.projectId,
-        chatId: state.chatId,
+        projectId,
+        chatId,
         text: failed.text,
         ...(failed.attachments ? { attachments: failed.attachments } : {}),
         state: "sending",
