@@ -90,11 +90,22 @@ export function forgetReveals(scope, root) {
   for (const key of [...revealed]) if (key.startsWith(scope)) revealed.delete(key);
   for (const hint of root?.querySelectorAll('.msg-more[aria-expanded="true"]') ?? []) hint.setAttribute("aria-expanded", "false");
 }
-function knownWorker(id) {
+function inJobs(snapshot, id) {
   const [jobId, childId] = id.split("/"),
-    jobs = state.jobs?.jobs ?? [];
+    jobs = snapshot?.jobs ?? [];
   if (childId) return jobs.find((job) => job.id === jobId)?.children?.some((child) => String(child.id) === childId) ?? false;
-  return jobs.some((job) => job.id === id) || (state.jobs?.agents ?? []).some((agent) => agent.id === id);
+  return jobs.some((job) => job.id === id) || (snapshot?.agents ?? []).some((agent) => agent.id === id);
+}
+/** The page's snapshot may not have caught up with a worker that just started, so the host is asked before a link is refused. */
+async function knownWorker(id) {
+  if (inJobs(state.jobs, id)) return true;
+  const gen = state.generation;
+  try {
+    const snapshot = await call("jobs-snapshot", { id: state.projectId });
+    return !stale(gen) && inJobs(snapshot, id);
+  } catch {
+    return false;
+  }
 }
 const reportPattern = /^\[(worker|scout|reviewer) ([0-9a-f-]{36}) ([\w-]+(?: to start)?): ([^\]\n]*)\]([\s\S]*)$/;
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/;
@@ -914,7 +925,7 @@ export async function transcriptClick(event, root, rerender, follow) {
   const worker = event.target.closest("[data-open-worker]");
   if (worker) {
     // The id may come from message text, which anyone can write: only this project's own jobs and agents open.
-    if (knownWorker(worker.dataset.openWorker)) emit("open", { kind: "worker", id: worker.dataset.openWorker });
+    if (await knownWorker(worker.dataset.openWorker)) emit("open", { kind: "worker", id: worker.dataset.openWorker });
     else toast("That worker is not one of this project's jobs.", { error: true });
     return true;
   }
