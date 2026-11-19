@@ -274,7 +274,9 @@ export const plugins = {
   },
   /** With a project, only providers of plugins it has on: a plugin it turned off is never asked about its folder. */
   vcsProviders: (project?: Pick<Project, "disabledPlugins">): VcsProvider[] =>
-    [...builtins(), ...loaded].flatMap((item) => (item.capabilities.vcs && !(project && disabledIn(project, item.plugin)) ? [item.capabilities.vcs] : [])),
+    [...builtins(), ...loaded].flatMap((item) =>
+      item.capabilities.vcs && !(project && disabledIn(project, item.plugin)) ? [item.capabilities.vcs] : [],
+    ),
   vcsProvider: (kind: string): VcsProvider | undefined => each((caps) => caps.vcs).find((item) => item.kind === kind),
   workspaceProviders: (): WorkspaceProvider[] => plugins.workspaceSources(),
   workspaceProvider: (id: string): WorkspaceProvider | undefined => plugins.workspaceSources().find((item) => item.id === id),

@@ -35,6 +35,8 @@
       "plugin-dev-unit"
     ],
     "src/plugin-types.ts": ["vcs-plugins-e2e", "provider-extensions-e2e", "host-agent-e2e", "plugin-dev-unit"],
+    "src/follow-batch.ts": ["follow-batch-unit", "follow-prs-e2e", "plugin-enable-e2e"],
+    "src/durable-follow.ts": ["follow-batch-unit", "follow-prs-e2e", "plugin-enable-e2e"],
     "src/plugin-catalog.ts": ["plugin-catalog-unit", "plugin-catalog-e2e"],
     "src/bundled-plugins.ts": ["plugin-catalog-unit", "plugin-catalog-e2e"],
     "src/plugin-dev.ts": ["plugin-dev-unit", "vcs-plugins-e2e"],

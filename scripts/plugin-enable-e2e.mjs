@@ -278,6 +278,7 @@ await kit.run(async () => {
   );
   await click(toggle("gated"));
   await page.waitFor(`!document.querySelector(${js(toggle("gated"))}).checked`, "switch off");
+  await kit.eventually(async () => (await entry(alpha, "gated")).enabled === false, "the switch did not turn the plugin off");
   check(
     "5 the switch turns the plugin off for this project",
     (await entry(alpha, "gated")).enabled === false && (await entry(beta, "gated")).enabled === true,
@@ -305,6 +306,7 @@ await kit.run(async () => {
   await page.waitFor(`!!document.querySelector(${js(toggle("gated"))})`, "alpha plugin switches");
   await click(toggle("gated"));
   await page.waitFor(`document.querySelector(${js(toggle("gated"))}).checked`, "switch on");
+  await kit.eventually(async () => (await entry(alpha, "gated")).enabled === true, "the switch did not turn the plugin on");
   check("10 the switch turns it back on", (await entry(alpha, "gated")).enabled === true);
   // 31: a switch changed elsewhere (another tab) shows in the open Plugins list without reopening it.
   await set(alpha, "gated", false);
