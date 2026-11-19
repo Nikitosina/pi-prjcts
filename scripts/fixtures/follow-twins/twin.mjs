@@ -20,9 +20,10 @@ export const twin = (name, envName) => ({
             const key = String(pr.number),
               was = prs[key];
             const next = {
-              state: "open",
+              state: pr.state ?? "open",
               head: pr.head,
               ref: `${name}/${key}`,
+              ...(pr.base ? { base: pr.base } : {}),
               title: pr.title,
               updatedAt: "",
               ci: was?.ci ?? null,
