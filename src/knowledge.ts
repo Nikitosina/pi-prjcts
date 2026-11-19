@@ -64,7 +64,10 @@ export async function readKnowledge(dir: string, path: string): Promise<Document
   return parse(KnowledgeDocument, { ...metadata(root, valid), text: readDocument(root, valid) });
 }
 
-export async function writeKnowledge(input: Write): Promise<Document> {
+/** Runs under the knowledge lock with the path's history, after the revision check: throwing refuses the change. */
+export type HistoryGuard = (history: Revision[]) => void;
+
+export async function writeKnowledge(input: Write, guard?: HistoryGuard): Promise<Document> {
   const request = parse(KnowledgeWrite, input);
   await ensureKnowledge(request.dir);
   const root = knowledgeRoot(request.dir);
@@ -76,6 +79,7 @@ export async function writeKnowledge(input: Write): Promise<Document> {
     const current = present ? metadata(root, request.path) : null;
     if (request.expectedRevision === null ? present : current?.revision !== request.expectedRevision)
       throw new Error(`Knowledge revision conflict for ${request.path}`);
+    guard?.(readHistory(root, request.path));
     const revision = digest(request.text);
     const priorTime = current ? Date.parse(current.updatedAt) : 0;
     const now = new Date(Math.max(Date.now(), Number.isFinite(priorTime) ? priorTime + 1 : 0)).toISOString();
@@ -104,7 +108,13 @@ export async function writeKnowledge(input: Write): Promise<Document> {
 }
 
 /** Removes a document whose current revision is `expectedRevision`; the removal is kept in history as an empty revision. */
-export async function deleteKnowledge(dir: string, path: string, expectedRevision: string, author: string): Promise<void> {
+export async function deleteKnowledge(
+  dir: string,
+  path: string,
+  expectedRevision: string,
+  author: string,
+  guard?: HistoryGuard,
+): Promise<void> {
   await ensureKnowledge(dir);
   const root = knowledgeRoot(dir);
   const valid = parse(KnowledgePath, path);
@@ -113,6 +123,7 @@ export async function deleteKnowledge(dir: string, path: string, expectedRevisio
     recover(root);
     const current = metadata(root, valid);
     if (current.revision !== expectedRevision) throw new Error(`Knowledge revision conflict for ${valid}`);
+    guard?.(readHistory(root, valid));
     const priorText = readDocument(root, valid);
     saveRevision(
       root,
@@ -137,6 +148,10 @@ export async function historyKnowledge(dir: string, path: string): Promise<Revis
   await ensureKnowledge(dir);
   const root = knowledgeRoot(dir);
   const valid = parse(KnowledgePath, path);
+  return readHistory(root, valid);
+}
+
+function readHistory(root: string, valid: string): Revision[] {
   const folder = controlPath(root, `history/${digest(valid)}`);
   if (!existsSync(folder)) return [];
   return readdirSync(folder)

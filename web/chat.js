@@ -1,12 +1,12 @@
 // Center: the Coordinator chat. Transcript from `show`, older pages from `chat-history`, live frames from `/live`.
 // Tool calls are compact rows; a finished turn folds runs of two or more rows into one group; reports link to the worker.
-import { call, stream, uuid } from "./api.js";
+import { HostError, call, stream, uuid } from "./api.js";
 import { clip, clock, dur, esc, imagesHtml, markdown, oneLine } from "./format.js";
 import { hydrateMedia } from "./media.js";
 import { FILE_ONLY_NOTE, PathSource, insertText, pathsFromTransfer } from "./path-drop.js";
 import { slashCommand, slashKey } from "./slash.js";
 import { chatArgs, emit, fail, on, stale, state, toast } from "./state.js";
-import { loadRecentMemory, markMemoryUndone, memoryEntry, memoryKind, memoryTitle, memoryWrite } from "./memory.js";
+import { markMemoryUndone, memoryEntry, memoryKind, memoryReady, memoryTitle, memoryWrite, wantMemoryWrite } from "./memory.js";
 import { follower } from "./follow.js";
 
 const feed = document.querySelector("#feed"),
@@ -19,7 +19,83 @@ let live = null,
   olderGroups = null,
   olderBefore = null,
   loading = null,
+  reads = 0, // transcript reads started so far; a pending send's refusal is only proven by a read that starts after it
   held = null; // live text and thinking of a step the host just committed, shown until a transcript read that includes it renders
+const pendingSends = []; // owner messages sent from this page that the transcript does not show yet, oldest first
+// The recovery handle of an unsettled send survives a reload: its id, project, chat and exact text, so Retry sends the same message under the same id.
+// One storage key per attempt, so tabs never overwrite each other's handles.
+const HANDLE_PREFIX = "pi-pending-send:",
+  LEGACY_HANDLES = "pi-pending-sends";
+const savedHandles = new Map(); // attempt id → the stored text of its handle
+function loadHandles() {
+  const found = [];
+  // The first version kept one list under one key; its handles move to their own keys before the list goes.
+  try {
+    const old = JSON.parse(localStorage.getItem(LEGACY_HANDLES) ?? "[]");
+    for (const item of Array.isArray(old) ? old : [])
+      if (typeof item?.id === "string" && /^[0-9a-f-]{36}$/.test(item.id) && !localStorage.getItem(HANDLE_PREFIX + item.id))
+        localStorage.setItem(HANDLE_PREFIX + item.id, JSON.stringify(item));
+    localStorage.removeItem(LEGACY_HANDLES);
+  } catch {}
+  try {
+    for (let index = 0; index < localStorage.length; index++) {
+      const key = localStorage.key(index);
+      if (!key?.startsWith(HANDLE_PREFIX)) continue;
+      const item = JSON.parse(localStorage.getItem(key) ?? "null");
+      if (
+        typeof item?.id === "string" &&
+        key === HANDLE_PREFIX + item.id &&
+        /^[0-9a-f-]{36}$/.test(item.id) &&
+        typeof item.projectId === "string" &&
+        typeof item.chatId === "string" &&
+        typeof item.text === "string" &&
+        item.text &&
+        (item.retryOf === undefined || typeof item.retryOf === "string") &&
+        (item.attachments === undefined || (Array.isArray(item.attachments) && item.attachments.every((id) => typeof id === "string")))
+      ) {
+        savedHandles.set(item.id, localStorage.getItem(key));
+        found.push({
+          id: item.id,
+          projectId: item.projectId,
+          chatId: item.chatId,
+          text: item.text,
+          ...(item.retryOf ? { retryOf: item.retryOf } : {}),
+          ...(item.attachments ? { attachments: item.attachments } : {}),
+          state: "unconfirmed",
+          error: "This page was reloaded before the host confirmed the message.",
+          restored: false,
+          refused: false,
+          failedRead: 0,
+        });
+      }
+    }
+  } catch {}
+  return found;
+}
+/** Stores the handle before anything is sent; false when the browser cannot keep it, and then nothing may be sent: a reload would lose the message without a trace. */
+function rememberSend({ id, projectId, chatId, text, attachments, retryOf }) {
+  const stored = JSON.stringify({ id, projectId, chatId, text, ...(retryOf ? { retryOf } : {}), ...(attachments ? { attachments } : {}) });
+  try {
+    localStorage.setItem(HANDLE_PREFIX + id, stored);
+    if (localStorage.getItem(HANDLE_PREFIX + id) !== stored) return false;
+  } catch {
+    return false;
+  }
+  savedHandles.set(id, stored);
+  return true;
+}
+// A handle goes once its message is settled: delivered and shown, dismissed, or refused with the text back in the composer.
+function saveHandles() {
+  const open = new Set(pendingSends.filter((send) => !(send.state === "failed" && send.restored)).map((send) => send.id));
+  for (const id of [...savedHandles.keys()])
+    if (!open.has(id)) {
+      try {
+        localStorage.removeItem(HANDLE_PREFIX + id);
+      } catch {}
+      savedHandles.delete(id);
+    }
+}
+pendingSends.push(...loadHandles());
 const expanded = new Set(); // tool callIds and group keys the owner opened
 const revealed = new Set(); // long owner messages opened during this chat visit, keyed by transcript scope; they stay open until the owner navigates away
 const CHAT_SCOPE = "msg:"; // the coordinator chat's keys have no scope prefix
@@ -29,6 +105,33 @@ let renderScope = ""; // the transcript `transcriptHtml` is drawing: "" for the 
 export function forgetReveals(scope, root) {
   for (const key of [...revealed]) if (key.startsWith(scope)) revealed.delete(key);
   for (const hint of root?.querySelectorAll('.msg-more[aria-expanded="true"]') ?? []) hint.setAttribute("aria-expanded", "false");
+}
+function inJobs(snapshot, id) {
+  const [jobId, childId] = id.split("/"),
+    jobs = snapshot?.jobs ?? [];
+  if (childId) return jobs.find((job) => job.id === jobId)?.children?.some((child) => String(child.id) === childId) ?? false;
+  return jobs.some((job) => job.id === id) || (snapshot?.agents ?? []).some((agent) => agent.id === id);
+}
+/** The page's snapshot may not have caught up with a worker that just started, so the host is asked before a link is refused. */
+async function knownWorker(id) {
+  if (inJobs(state.jobs, id)) return true;
+  const gen = state.generation;
+  try {
+    const snapshot = await call("jobs-snapshot", { id: state.projectId });
+    return !stale(gen) && inJobs(snapshot, id);
+  } catch {
+    return false;
+  }
+}
+/** The request id of a failed turn's Retry comes from the turn, so another tab's click, or this one after a reload, names the same delivery. */
+async function retryId(projectId, chatId, failedId) {
+  if (!crypto.subtle) return uuid();
+  const hex = [
+    ...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`retry:${projectId}:${chatId}:${failedId}`))),
+  ]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 const reportPattern = /^\[(worker|scout|reviewer) ([0-9a-f-]{36}) ([\w-]+(?: to start)?): ([^\]\n]*)\]([\s\S]*)$/;
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/;
@@ -46,28 +149,70 @@ export async function loadChat() {
       do {
         run.again = false;
         const gen = state.generation,
+          read = ++reads,
           id = state.projectId,
           entries = state.live?.entries ?? 0;
         if (!id) return;
-        const [view] = await Promise.all([call("show", { id, ...chatArgs(), messageText: "full" }), loadRecentMemory().catch(fail)]);
-        // Another chat or project was selected meanwhile: drop this read, but still run the one that selection queued.
-        if (stale(gen)) continue;
-        state.view = view;
-        if (held && (entries >= held.entries || committed(view, held))) held = state.liveHeld = null;
-        emit("view", view);
-        renderFeed();
-        renderQuestions();
-        ensureLive();
+        try {
+          const view = await call("show", { id, ...chatArgs(), messageText: "full" });
+          // Another chat or project was selected meanwhile: drop this read, but still run the one that selection queued.
+          if (stale(gen)) continue;
+          state.view = view;
+          reconcilePending(view, read);
+          if (held && (entries >= held.entries || committed(view, held))) held = state.liveHeld = null;
+          emit("view", view);
+          renderFeed();
+          renderQuestions();
+          ensureLive();
+        } catch (error) {
+          fail(error);
+        }
       } while (run.again);
-    } catch (error) {
-      fail(error);
     } finally {
       loading = null;
     }
   })();
   return run.promise;
 }
+// A draft restored after a refusal, and whatever the owner makes of it, belongs to the chat it was sent from: the composer gives it up when another
+// chat opens and takes it back when its chat returns. An edit makes it a different message than the failed bubble's, so that bubble gets its own Retry.
+const drafts = new Map(); // "project/chat" → { text, original, sendId }: restored drafts, and what the owner made of them
+const draftKey = (projectId = state.projectId, chatId = state.chatId) => `${projectId}/${chatId}`;
+let composerKey = null; // the chat whose draft the composer shows
+const forgetRestored = (sendId) => {
+  const send = pendingSends.find((item) => item.id === sendId);
+  if (send?.restored) send.restored = false;
+};
+input.addEventListener("input", () => {
+  const held = drafts.get(draftKey());
+  if (!held) return;
+  held.text = input.value;
+  if (input.value !== held.original) {
+    forgetRestored(held.sendId);
+    renderFeed();
+  }
+});
 on("select", () => {
+  const now = draftKey(),
+    left = composerKey;
+  composerKey = now;
+  const away = left && left !== now ? drafts.get(left) : undefined;
+  if (away) {
+    if (input.value === away.text) {
+      input.value = "";
+      grow();
+    }
+    // An unedited restored draft goes back to the bubble's own Retry; an edited one waits for its chat.
+    if (away.text === away.original) {
+      forgetRestored(away.sendId);
+      drafts.delete(left);
+    }
+  }
+  const here = drafts.get(now);
+  if (here && !input.value) {
+    input.value = here.text;
+    grow();
+  }
   older = [];
   olderGroups = null;
   follow.follow();
@@ -81,6 +226,8 @@ on("select", () => {
   live = null;
   liveKey = "";
 });
+
+on("memory-recent", () => renderFeed());
 
 on("chat-display", (ui) => {
   if (!state.view) return;
@@ -156,22 +303,135 @@ const STARTERS = [
   "Plan the next small change, then hand it to a worker.",
 ];
 export function renderFeed() {
-  if (!state.view) return;
+  saveHandles();
+  if (!state.view) {
+    // A message sent before the first read of a chat still shows at once.
+    follow.render(() => morph(feed, pendingSends.filter(inCurrentChat).map(pendingHtml).join("")));
+    return;
+  }
   const all = turns(messages()),
     busy = !!state.live?.running || !!currentChat()?.busy;
   const html = [];
   if (older.length ? olderBefore : state.view.before) html.push(`<button type="button" class="earlier" data-earlier>Show earlier</button>`);
-  if (!all.length)
+  const sends = pendingSends.filter(inCurrentChat);
+  if (!all.length && !sends.length)
     html.push(
       `<div class="empty-chat" data-key="empty"><p class="empty-title">${esc(state.view.project?.name ?? "")}</p><p class="muted">Ask the coordinator for something. It plans, delegates to workers and reports back here.</p><div class="starters" role="list" aria-label="Starter prompts">${STARTERS.map((text, index) => `<button type="button" role="listitem" class="starter" data-starter="${index}"><span class="starter-glyph" aria-hidden="true">❯</span>${esc(text)}</button>`).join("")}</div><p class="muted small">A starter fills the composer; <kbd>Enter</kbd> sends it.</p></div>`,
     );
   html.push(transcriptHtml(all, busy, "Coordinator", { groups: mergeGroups(olderGroups, state.view.toolGroups) }));
+  html.push(...sends.map(pendingHtml));
   html.push(failureHtml());
   html.push(`<div id="live-turn"></div>`);
   follow.render(() => {
     morph(feed, html.join(""));
     renderLive();
   });
+}
+const inCurrentChat = (send) => send.projectId === state.projectId && send.chatId === state.chatId;
+/** Settles the pending sends of the open chat against transcript read number `read`. Only the host's own records count: a job it admitted is
+ * delivered, and the transcript entry the runtime linked to that job is the message. A record the host never admitted, or a text that merely
+ * looks alike, proves nothing, and only a read after a refusal without any record proves the refusal. */
+function reconcilePending(view, read) {
+  const ledger = view.jobs ?? [];
+  for (const send of pendingSends.filter(inCurrentChat)) {
+    const job = ledger.find((item) => item.id === send.id);
+    if (!job) {
+      if (send.state === "unconfirmed" && send.refused && read > send.failedRead) failSend(send);
+      continue;
+    }
+    if (!job.admitted) continue;
+    send.state = "sent";
+    const placed = job.entry !== undefined && (view.messages ?? []).some((item) => item.kind === "message" && item.entryId === job.entry);
+    // A settled job whose message never reached the transcript leaves its outcome in the turn card; the bubble must not outlive it.
+    if (placed || ["done", "failed", "interrupted"].includes(job.state)) pendingSends.splice(pendingSends.indexOf(send), 1);
+  }
+}
+/** A refusal the host reported and recorded no job for: the message was not sent, and its text goes back to an empty composer of the same chat. */
+function failSend(send) {
+  send.state = "failed";
+  if (inCurrentChat(send) && !input.value) {
+    input.value = send.text;
+    send.restored = true;
+    composerKey = draftKey(send.projectId, send.chatId);
+    drafts.set(composerKey, { text: send.text, original: send.text, sendId: send.id });
+    grow();
+  }
+}
+const NO_HANDLE = "This browser cannot keep a recovery copy of the message, so it was not sent.";
+const NO_HANDLE_AGAIN =
+  "This browser cannot keep a recovery copy of the message, so it was not sent again. The first attempt may have reached the host.";
+const DELIVERY = { sending: "Sending…", sent: "Sent", failed: "Not sent", unconfirmed: "Delivery not confirmed" };
+function pendingHtml(send) {
+  const note =
+    send.state === "failed"
+      ? `${esc(clip(oneLine(send.error), 300))}${send.restored ? " The text is back in the composer." : ""}`
+      : send.state === "unconfirmed"
+        ? `${esc(clip(oneLine(send.error), 200))} The message may or may not have arrived; it is not sent again on its own.`
+        : "";
+  const retry = send.state === "unconfirmed" || (send.state === "failed" && !send.restored);
+  const actions =
+    send.state !== "sending"
+      ? `<div class="pending-note" role="status">${note}${retry ? ` <button type="button" class="link-btn" data-pending-retry="${esc(send.id)}">Retry</button>` : ""} <button type="button" class="link-btn" data-pending-dismiss="${esc(send.id)}">Dismiss</button></div>`
+      : "";
+  const key = `${renderScope}pending:${send.id}`,
+    hint = `<button type="button" class="msg-more" data-reveal="${esc(key)}" aria-expanded="${revealed.has(key)}">Show more ▾ · ${send.text.length.toLocaleString("en-US")} chars</button>`;
+  const sig = hash(`${send.state}|${send.error}|${send.restored}`);
+  return `<section class="turn" data-key="p${esc(send.id)}" data-sig="${sig}"><article class="msg owner pending" data-delivery="${send.state}"><div class="msg-meta"><span class="who">You</span><span class="delivery">${DELIVERY[send.state]}</span></div><div class="bubble"><div class="msg-body" tabindex="-1">${markdown(send.text)}</div></div>${hint}${actions}</article></section>`;
+}
+/** Sends one pending message under its own request id (the host returns the job it already holds for a repeated id). A failure never sends again on its own. */
+async function deliver(send) {
+  if (!rememberSend(send)) {
+    // Only a first attempt is known not to have been sent; an earlier one may have reached the host, so its status stays as it was.
+    const first = send.state === "sending";
+    if (first) {
+      send.state = "failed";
+      send.error = NO_HANDLE;
+    }
+    send.restored = false;
+    toast(first ? NO_HANDLE : NO_HANDLE_AGAIN, { error: true, ms: 8000 });
+    renderFeed();
+    return;
+  }
+  send.state = "sending";
+  send.error = "";
+  renderFeed();
+  let job;
+  try {
+    job = await call("message", {
+      id: send.projectId,
+      text: send.text,
+      requestId: send.id,
+      ...(send.attachments ? { attachments: send.attachments } : {}),
+      ...(send.chatId === "main" ? {} : { chatId: send.chatId }),
+    });
+  } catch (error) {
+    if (!pendingSends.includes(send)) return; // the transcript already shows it
+    send.state = "unconfirmed";
+    send.refused = error instanceof HostError && error.refused;
+    send.error = error.message;
+    send.failedRead = reads;
+    const where = inCurrentChat(send) ? "" : "In another chat: ";
+    toast(`${where}${send.refused ? error.message : `Delivery not confirmed: ${error.message}`}`, { error: true, ms: 8000 });
+    // The next read decides: a recorded job means the host may have the message, none after a refusal means it was not sent.
+    if (inCurrentChat(send)) {
+      renderFeed();
+      await loadChat();
+    }
+    return;
+  }
+  // Only an ack that says the host admitted the message is delivery; any other answer waits for the ledger.
+  if (pendingSends.includes(send) && send.state === "sending") {
+    if (job?.admitted && job.id === send.id) send.state = "sent";
+    else {
+      send.state = "unconfirmed";
+      send.refused = false;
+      send.error = "The host did not confirm it took the message.";
+      send.failedRead = reads;
+    }
+  }
+  if (!inCurrentChat(send)) return;
+  renderFeed();
+  await loadChat();
 }
 /** The chat's newest turn when it failed or was interrupted: the provider error and Retry (coordinator-stability-failures.md S4-S6). */
 function failureHtml() {
@@ -458,13 +718,17 @@ function memoryRowHtml(item, result, args, status) {
     title = path ? (memoryEntry(path)?.title ?? memoryTitle(path)) : "memory index";
   const revision = /"revision":\s*"([^"]+)"/.exec(result?.preview ?? "")?.[1] ?? "";
   if (item.name === "projects_knowledge_write") {
-    const write = revision ? memoryWrite(path, revision) : null;
+    const write = revision ? memoryWrite(path, revision) : undefined;
+    if (status === "ok" && revision && !write) wantMemoryWrite(path, revision);
+    // Undo is offered only for a write the host proved current and not undone; an unproven one shows nothing.
     const action = write?.undone
       ? `<span class="muted small">Undone</span>`
       : write && !write.current
         ? `<span class="muted small">Changed since</span>`
-        : `<button type="button" class="link-btn" data-memory-undo="${esc(path)}" data-revision="${esc(revision)}">Undo</button>`;
-    return `<div class="memory-row" data-tool="${esc(item.name)}" data-status="${status}"><span class="mem-icon" aria-hidden="true">◆</span><span class="mem-text">${status === "error" ? "Could not remember" : "Remembered"}: <button type="button" class="link-btn" data-memory="${esc(path)}">${esc(title)}</button></span>${status === "ok" && revision ? action : ""}<button type="button" class="link-btn" data-memory="${esc(path)}" data-edit="1">Edit</button></div>`;
+        : write
+          ? `<button type="button" class="link-btn" data-memory-undo="${esc(path)}" data-revision="${esc(revision)}">Undo</button>`
+          : "";
+    return `<div class="memory-row" data-tool="${esc(item.name)}" data-status="${status}"><span class="mem-icon" aria-hidden="true">◆</span><span class="mem-text">${status === "error" ? "Could not remember" : "Remembered"}: <button type="button" class="link-btn" data-memory="${esc(path)}">${esc(title)}</button></span>${status === "ok" && revision && memoryReady() ? action : ""}<button type="button" class="link-btn" data-memory="${esc(path)}" data-edit="1">Edit</button></div>`;
   }
   const kind = path ? memoryKindLabel(path) : "";
   return `<div class="memory-row used" data-tool="${esc(item.name)}" data-status="${status}"><span class="mem-icon" aria-hidden="true">◇</span><span class="mem-text">Used memory: ${kind ? `${esc(kind)} · ` : ""}${path ? `<button type="button" class="link-btn" data-memory="${esc(path)}">${esc(title)}</button>` : esc(item.name === "projects_knowledge_list" ? "index" : title)}</span></div>`;
@@ -604,7 +868,9 @@ form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const text = input.value.trim();
   if (!text || !state.projectId) return;
-  const gen = state.generation;
+  const gen = state.generation,
+    ownedDraft = drafts.get(draftKey());
+  drafts.delete(draftKey());
   input.value = "";
   grow();
   follow.follow();
@@ -619,14 +885,31 @@ form.addEventListener("submit", async (event) => {
     }
     return;
   }
-  try {
-    await call("message", { id: state.projectId, text, requestId: uuid(), ...chatArgs() });
-    if (stale(gen)) return;
-    await loadChat();
-  } catch (error) {
-    if (!stale(gen) && !input.value) input.value = text;
-    fail(error);
+  const send = {
+    id: uuid(),
+    projectId: state.projectId,
+    chatId: state.chatId,
+    text,
+    state: "sending",
+    error: "",
+    restored: false,
+    refused: false,
+    failedRead: 0,
+  };
+  if (!rememberSend(send)) {
+    // Nothing is sent without a handle that survives a reload: the text stays where the owner typed it.
+    if (!input.value) input.value = text;
+    if (ownedDraft) drafts.set(draftKey(), ownedDraft);
+    grow();
+    toast(NO_HANDLE, { error: true, ms: 8000 });
+    return;
   }
+  // Sending the restored text again supersedes the bubble it came from.
+  for (const old of pendingSends.filter((item) => item.restored && item.state === "failed" && item.text === text && inCurrentChat(item)))
+    pendingSends.splice(pendingSends.indexOf(old), 1);
+  pendingSends.push(send);
+  renderFeed();
+  await deliver(send);
 });
 export async function stopTurn() {
   if (!state.live?.running) return;
@@ -704,7 +987,9 @@ export async function transcriptClick(event, root, rerender, follow) {
   }
   const worker = event.target.closest("[data-open-worker]");
   if (worker) {
-    emit("open", { kind: "worker", id: worker.dataset.openWorker });
+    // The id may come from message text, which anyone can write: only this project's own jobs and agents open.
+    if (await knownWorker(worker.dataset.openWorker)) emit("open", { kind: "worker", id: worker.dataset.openWorker });
+    else toast("That worker is not one of this project's jobs.", { error: true });
     return true;
   }
   const review = event.target.closest("[data-review-approval]");
@@ -751,17 +1036,61 @@ feed.addEventListener("click", async (event) => {
     return;
   }
   if (await transcriptClick(event, feed, renderFeed, follow)) return;
+  const pendingRetry = event.target.closest("[data-pending-retry]"),
+    pendingDismiss = event.target.closest("[data-pending-dismiss]");
+  if (pendingRetry || pendingDismiss) {
+    const send = pendingSends.find(
+      (item) => item.id === (pendingRetry ?? pendingDismiss).dataset[pendingRetry ? "pendingRetry" : "pendingDismiss"],
+    );
+    if (!send) return;
+    if (pendingDismiss) {
+      pendingSends.splice(pendingSends.indexOf(send), 1);
+      const held = drafts.get(draftKey(send.projectId, send.chatId));
+      // Only a draft the owner has not touched goes with its bubble; an edited one is a new, unsent message.
+      if (held?.sendId === send.id && held.text === held.original) {
+        if (input.value === held.text) {
+          input.value = "";
+          grow();
+        }
+        drafts.delete(draftKey(send.projectId, send.chatId));
+      }
+    }
+    follow.follow();
+    if (pendingRetry) send.restored = false;
+    renderFeed();
+    if (pendingRetry) await deliver(send);
+    return;
+  }
   const retry = event.target.closest("[data-retry-job]");
   if (retry) {
-    const job = (state.view?.jobs ?? []).find((item) => item.id === retry.dataset.retryJob);
-    if (!job || retry.disabled) return;
+    const failed = (state.view?.jobs ?? []).find((item) => item.id === retry.dataset.retryJob);
+    if (!failed || retry.disabled) return;
     retry.disabled = true; // a second click must not resend
+    const { projectId, chatId } = state; // the recipient is the chat the failed turn is in, whatever the owner opens meanwhile
+    // One failed turn is one delivery: a click after a lost ack reuses the pending send, and its request id, instead of starting another.
+    let send = pendingSends.find((item) => item.retryOf === failed.id && item.projectId === projectId && item.chatId === chatId);
+    if (!send) {
+      send = {
+        id: await retryId(projectId, chatId, failed.id),
+        retryOf: failed.id,
+        projectId,
+        chatId,
+        text: failed.text,
+        ...(failed.attachments ? { attachments: failed.attachments } : {}),
+        state: "sending",
+        error: "",
+        restored: false,
+        refused: false,
+        failedRead: 0,
+      };
+      pendingSends.push(send);
+    }
+    follow.follow();
+    renderFeed();
     try {
-      await call("message", { id: state.projectId, text: job.text, requestId: uuid(), ...chatArgs() });
-      follow.follow();
-    } catch (error) {
+      await deliver(send);
+    } finally {
       retry.disabled = false;
-      fail(error);
     }
     return;
   }

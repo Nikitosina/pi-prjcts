@@ -22,7 +22,7 @@ import {
 import { currentChat, loadChat, stopTurn, toggleSteer } from "./chat.js";
 import "./sidebar.js";
 import { closeMergeDialog, loadJobs, loadSide, mergeDialogOpen, renderWorker } from "./workers.js";
-import { renderMemoryEntry, renderMemoryList } from "./memory.js";
+import { refreshRecentMemory, renderMemoryEntry, renderMemoryList } from "./memory.js";
 import { closeSettings, openSettings, SECTIONS, settingsBack, settingsOpen, showSection } from "./settings.js";
 import {
   isOpen as drawerOpen,
@@ -71,6 +71,7 @@ async function select(projectId, chatId = "main", { keepFocus = false } = {}) {
   if (!sameProject) {
     changes?.stop();
     const gen = state.generation;
+    let connected = false; // the first sync of a stream is the opening read; a later one is a reconnect, after which missed changes are possible
     changes = stream(
       `/changes?project=${encodeURIComponent(projectId)}`,
       (change) => {
@@ -78,6 +79,8 @@ async function select(projectId, chatId = "main", { keepFocus = false } = {}) {
         if (change.t === "sync") {
           emit("plugins-changed");
           void refreshAll();
+          void refreshRecentMemory(connected ? { invalidate: true } : { again: true });
+          connected = true;
         } else if (change.t === "topic") onTopic(change, gen);
       },
       (up) => {
@@ -106,7 +109,10 @@ function onTopic(change) {
     void loadChat();
     void loadUsage();
   }
-  if (change.topic === "knowledge" && state.focus.kind === "memory" && !state.focus.path) renderFocus();
+  if (change.topic === "knowledge") {
+    void refreshRecentMemory({ again: true });
+    if (state.focus.kind === "memory" && !state.focus.path) renderFocus();
+  }
   clearTimeout(listTimer);
   listTimer = setTimeout(() => void loadProjects(), 400);
 }

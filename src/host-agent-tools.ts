@@ -214,6 +214,7 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
   ),
   "memory-index": allow("A project's memory entries (preferences, decisions, procedures) and broken links."),
   "memory-undo": allow("Undo one memory write (revision of the write to undo)."),
+  "memory-writes": allow("The undo state of the listed memory writes (path and revision), including writes older than the recent list."),
   "memory-recent": allow("A project's recent memory writes, each with whether it was undone and whether it is current."),
   "chat-stop": allow("Stop the running Coordinator turn of one chat of a project."),
 };

@@ -7,7 +7,7 @@ import { UPLOAD_MAX_BYTES, uploadBytes, validUploadName } from "./uploads.ts";
 import { readEvidence } from "./evidence.ts";
 import { openArtifact } from "./artifacts.ts";
 import { closeSync, createReadStream } from "node:fs";
-import { errorText, home, loadProject, parse, projectDir, Request, saveJson, type Request as RequestData } from "./state.ts";
+import { errorText, home, loadProject, parse, projectDir, Refused, Request, saveJson, type Request as RequestData } from "./state.ts";
 import { join } from "node:path";
 import { plugins } from "./plugins.ts";
 import { webFile, type WebFile } from "./web-file.ts";
@@ -344,7 +344,7 @@ export async function startWeb(
     } catch (error) {
       response
         .writeHead(status, { ...headers, "content-type": "application/json", ...(status === 413 ? { connection: "close" } : {}) })
-        .end(JSON.stringify({ ok: false, error: errorText(error) }));
+        .end(JSON.stringify({ ok: false, error: errorText(error), ...(error instanceof Refused ? { refused: true } : {}) }));
     }
   });
   server.requestTimeout = 120000;

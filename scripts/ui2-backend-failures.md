@@ -120,6 +120,11 @@ Scripts: `chat-stop-e2e` (S), `automations-e2e` (A), `memory-e2e` (M11–M13), `
 - M12 A write that a later write replaced reports `current: false`, so the client does not offer an undo that `memory-undo` would refuse.
 - M13 The list is bounded and newest first; undo records themselves are not listed as writes.
 
+- M17 Create A, replace with B, undo B: the entry reads A again through an undo record that also produced A. Undo on the original A row removes the creation; it never writes B back because the last record with A's revision was the undo.
+- M18 A valid Undo button is rendered for write A; later writes B and then A again give A's revision a second write. The stale click is refused and neither the document nor the history changes.
+- M19 Undo racing a write of the same text: either the undo wins and the later write conflicts, or the write wins and the undo is refused; the undo never applies to the later write. The check runs under the knowledge lock, not before it.
+- M20 A revision written twice with the other write beyond the recent window is refused by `memory-undo` without a change, and an identical path in another project is untouched.
+
 ### Locks and Host agent
 
 - L5 `owner_approval_request` is locked for the coordinator: a profile cannot disable it by name or with `group:core`, and `profile-tools` shows it locked.
