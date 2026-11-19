@@ -3,6 +3,7 @@
 import { call, stream, uuid } from "./api.js";
 import { clip, clock, dur, esc, imagesHtml, markdown, oneLine } from "./format.js";
 import { hydrateMedia } from "./media.js";
+import { FILE_ONLY_NOTE, PathSource, insertText, pathsFromTransfer } from "./path-drop.js";
 import { slashCommand, slashKey } from "./slash.js";
 import { chatArgs, emit, fail, on, stale, state, toast } from "./state.js";
 import { loadRecentMemory, markMemoryUndone, memoryEntry, memoryKind, memoryTitle, memoryWrite } from "./memory.js";
@@ -579,6 +580,19 @@ function grow() {
   input.style.height = `${Math.min(input.scrollHeight, 240)}px`;
 }
 input.addEventListener("input", grow);
+form.addEventListener("dragover", (event) => {
+  if (event.dataTransfer?.types.some((type) => type === "Files" || type === "text/uri-list")) event.preventDefault();
+});
+form.addEventListener("drop", (event) => takePaths(event, event.dataTransfer, false));
+input.addEventListener("paste", (event) => takePaths(event, event.clipboardData, true));
+/** A dropped or pasted file URL becomes its plain path in the draft; a bare File gets the Copy as Pathname hint; other content takes the browser's way. */
+function takePaths(event, transfer, replaceSelection) {
+  const { source, paths } = pathsFromTransfer(transfer);
+  if (source === PathSource.None) return;
+  event.preventDefault();
+  if (source === PathSource.FileOnly) return toast(FILE_ONLY_NOTE, { error: true, ms: 12000 });
+  if (!insertText(input, paths.join("\n"), { replaceSelection })) toast("That path would make the message too long.", { error: true });
+}
 input.addEventListener("keydown", (event) => {
   if (slashKey(event)) return;
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
