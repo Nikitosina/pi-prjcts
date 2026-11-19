@@ -1,6 +1,6 @@
 // E2E: knowledge as Memory (docs/ui2-contract.md "Memory"): memory-index, memory-undo, the prompt brief and the knowledge list query.
 // Private host, fake provider, owner-written fixture files. Failure cases M1-M10 in scripts/ui2-backend-failures.md.
-import { mkdirSync, readdirSync, statSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { createKit, call, say, randomUUID } from "./lib/e2e-kit.mjs";
 
@@ -220,6 +220,101 @@ await kit.run(async () => {
   await rpc(far);
   const farListed = (await rpc({ action: "memory-recent", projectId: id })).writes.find((item) => item.path === "decisions/far.md");
   check("M16 a revision written twice with the other write beyond the window is offered no Undo", farListed?.current === false, farListed);
+
+  // M20: the far path has two writes of one revision; Undo is refused and nothing changes. The same path in another project is not touched.
+  const farBefore = JSON.stringify(await rpc({ action: "knowledge-history", id, path: "decisions/far.md" }));
+  const farText = readFileSync(join(root, "decisions/far.md"), "utf8");
+  const farRefused = await rejects({ action: "memory-undo", projectId: id, path: "decisions/far.md", revision: farFirst.revision });
+  check(
+    "M20 undoing a revision written twice beyond the window is refused without a change",
+    farRefused !== null &&
+      readFileSync(join(root, "decisions/far.md"), "utf8") === farText &&
+      JSON.stringify(await rpc({ action: "knowledge-history", id, path: "decisions/far.md" })) === farBefore,
+  );
+  const otherId = await kit.createProject("Memory other");
+  const otherCreated = await rpc({
+    action: "knowledge-write",
+    id: otherId,
+    path: "decisions/far.md",
+    text: "# Far\n\nSame text.\n",
+    expectedRevision: null,
+  });
+  const otherRefused = await rejects({ action: "memory-undo", projectId: id, path: "decisions/far.md", revision: otherCreated.revision });
+  check(
+    "M20 another project's identical write is never undone from this project",
+    otherRefused !== null &&
+      (await rpc({ action: "knowledge-read", id: otherId, path: "decisions/far.md" })).revision === otherCreated.revision,
+  );
+
+  // M17: the original creation row undoes the creation, not the later write the undo of which produced the same text.
+  const textA = "# Round\n\nA.\n";
+  const roundA = await rpc({ action: "knowledge-write", id, path: "decisions/round.md", text: textA, expectedRevision: null });
+  const roundB = await rpc({
+    action: "knowledge-write",
+    id,
+    path: "decisions/round.md",
+    text: "# Round\n\nB.\n",
+    expectedRevision: roundA.revision,
+  });
+  await rpc({ action: "memory-undo", projectId: id, path: "decisions/round.md", revision: roundB.revision });
+  const roundRow = (await rpc({ action: "memory-recent", projectId: id })).writes.find(
+    (item) => item.path === "decisions/round.md" && item.revision === roundA.revision,
+  );
+  check(
+    "M17 the original creation row is offered Undo after B was undone",
+    roundRow?.current === true && roundRow?.undone === false,
+    roundRow,
+  );
+  const roundUndo = await rpc({ action: "memory-undo", projectId: id, path: "decisions/round.md", revision: roundA.revision });
+  const roundHistory = await rpc({ action: "knowledge-history", id, path: "decisions/round.md" });
+  check(
+    "M17 undoing the original creation removes the entry and never resurrects B",
+    roundUndo.entry === null &&
+      !existsSync(join(root, "decisions/round.md")) &&
+      roundHistory.at(-1).author === "memory-undo" &&
+      roundHistory.at(-1).priorText === textA &&
+      roundHistory.filter((item) => item.author === "memory-undo").length === 2,
+    roundHistory.map((item) => [item.author, item.priorText]),
+  );
+
+  // M18: a button rendered for a valid write goes stale when a later write produces the same revision.
+  const stale = { action: "knowledge-write", id, path: "decisions/stale.md", text: "# Stale\n\nA.\n" };
+  const staleA = await rpc({ ...stale, expectedRevision: null });
+  const staleRow = (await rpc({ action: "memory-recent", projectId: id })).writes.find((item) => item.path === "decisions/stale.md");
+  const staleB = await rpc({ ...stale, text: "# Stale\n\nB.\n", expectedRevision: staleA.revision });
+  await rpc({ ...stale, expectedRevision: staleB.revision });
+  const staleBefore = JSON.stringify(await rpc({ action: "knowledge-history", id, path: "decisions/stale.md" }));
+  const staleRefused = await rejects({ action: "memory-undo", projectId: id, path: "decisions/stale.md", revision: staleRow.revision });
+  check(
+    "M18 a stale Undo click is refused and changes neither document nor history",
+    staleRow?.current === true &&
+      staleRefused !== null &&
+      readFileSync(join(root, "decisions/stale.md"), "utf8") === stale.text &&
+      JSON.stringify(await rpc({ action: "knowledge-history", id, path: "decisions/stale.md" })) === staleBefore,
+  );
+
+  // M19: Undo racing a write of the same text; whichever wins, Undo never applies to the later write.
+  let raceOk = true;
+  const raceNotes = [];
+  for (let round = 0; round < 12; round++) {
+    const path = `decisions/race-${round}.md`;
+    const text = `# Race ${round}\n\nSame.\n`;
+    const first = await rpc({ action: "knowledge-write", id, path, text, expectedRevision: null });
+    const [undo, write] = await Promise.allSettled([
+      rpc({ action: "memory-undo", projectId: id, path, revision: first.revision }),
+      rpc({ action: "knowledge-write", id, path, text, expectedRevision: first.revision }),
+    ]);
+    const history = await rpc({ action: "knowledge-history", id, path });
+    const undoRecords = history.filter((item) => item.author === "memory-undo");
+    const exists = existsSync(join(root, path));
+    const undoWon = undo.status === "fulfilled";
+    const consistent = undoWon
+      ? !exists && undoRecords.length === 1 && history.length === 2 && write.status === "rejected"
+      : exists && undoRecords.length === 0 && history.length === 2 && write.status === "fulfilled";
+    raceNotes.push([undo.status, write.status, history.map((item) => item.author)]);
+    if (!consistent) raceOk = false;
+  }
+  check("M19 Undo racing a write of the same text never applies to the later write", raceOk, raceNotes);
 
   // The prompt carries the preferences brief for every role and no memory index; agents search memory with projects_knowledge_list.
   await kit.ask(id, "MEMORY-TURN hello");

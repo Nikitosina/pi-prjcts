@@ -140,17 +140,29 @@ export async function preferencesText(dir: string): Promise<string> {
     : text;
 }
 
+type HistoryRecord = Awaited<ReturnType<typeof historyKnowledge>>[number];
+
+/** The one original write of `revision`; revisions are content hashes, so a revision written twice, or only produced by an undo, names no write. */
+function undoTarget(history: readonly HistoryRecord[], revision: string): HistoryRecord {
+  const writes = history.filter((item) => item.revision === revision && item.author !== "memory-undo");
+  if (writes.length !== 1) throw new Error("No single recorded write produced this revision; nothing to undo");
+  return writes[0]!;
+}
+
 /** Undo the write that produced `revision`: the prior text comes back, or a just-created entry is removed. The undo is itself a revision. */
 export async function undoMemory(dir: string, path: string, revision: string): Promise<{ entry: MemoryEntry | null }> {
   const current = await readKnowledge(dir, path);
   if (current.revision !== revision) throw new Error(`Memory revision conflict for ${path}; reread before undoing`);
-  const record = (await historyKnowledge(dir, path)).findLast((item) => item.revision === revision);
-  if (!record) throw new Error(`No recorded write produced this revision of ${path}; nothing to undo`);
+  const record = undoTarget(await historyKnowledge(dir, path), revision);
+  // Checked again under the knowledge lock: a write of the same text after the read above makes the click stale.
+  const guard = (history: HistoryRecord[]) => {
+    if (undoTarget(history, revision).id !== record.id) throw new Error(`Memory write changed for ${path}; reread before undoing`);
+  };
   if (record.priorText === null) {
-    await deleteKnowledge(dir, path, revision, "memory-undo");
+    await deleteKnowledge(dir, path, revision, "memory-undo", guard);
     return { entry: null };
   }
-  const restored = await writeKnowledge({ dir, path, text: record.priorText, expectedRevision: revision, author: "memory-undo" });
+  const restored = await writeKnowledge({ dir, path, text: record.priorText, expectedRevision: revision, author: "memory-undo" }, guard);
   return { entry: publicEntry(describe(path, restored.text, restored)) };
 }
 
