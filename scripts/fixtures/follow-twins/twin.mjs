@@ -13,6 +13,7 @@ export const twin = (name, envName) => ({
         repository: () => ({ repositoryId: data().repositoryId }),
         published: async () => data().published ?? [],
         observe: async ({ repositoryId, prior }) => {
+          if (data().fail) throw new Error(`${name} outage`);
           const baselined = prior?.baselined === true,
             prs = { ...(prior?.prs ?? {}) },
             items = [];

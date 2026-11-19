@@ -399,7 +399,8 @@ export function followRuntime(
     }
     return owners;
   }
-  async function recordBatch(batch: FollowBatch, waits: GithubWriteWait[]) {
+  /** `observing` is false when this poll read nothing new (its providers' saved records are not pruned). */
+  async function recordBatch(batch: FollowBatch, waits: GithubWriteWait[], observing = true) {
     // The batch stays pending, so nothing is lost while a write waits.
     if (batch.groups.length && waits.length)
       throw new Error(
@@ -409,7 +410,11 @@ export function followRuntime(
       );
     const target = await fixer.target();
     let eventId: string | undefined;
-    const off = () => plugins.followProvidersOff(loadProject(projectId));
+    // A tagged provider whose plugin is not loaded cannot be told on or off for the project, so its frozen group waits.
+    const unloaded = [
+      ...new Set([...batch.groups, ...Object.values(batch.repos)].flatMap((item) => (item.provider ? [item.provider] : []))),
+    ].filter((provider) => provider !== "github" && !loadedProviders().has(provider));
+    const off = () => [...plugins.followProvidersOff(loadProject(projectId)), ...unloaded];
     const delivering = (group: FollowBatch["groups"][number]) => deliverable(batch, off()).groups.includes(group);
     const outcomes = new Map<FollowBatch["groups"][number], Delivery>();
     for (const group of batch.groups) {
@@ -442,11 +447,13 @@ export function followRuntime(
       const doc = await tx.doc(Follow, root.id);
       scopeBare(doc.repos, doc.fixes, githubRepositoryIds());
       // A provider with a group still waiting keeps the record it had; the batch holds the advanced one until its last group is confirmed.
-      doc.repos = {
-        ...foreignRepos(doc.repos, claimed, batch.switchedOff && [...batch.switchedOff, ...stopped]),
-        ...Object.fromEntries(Object.entries(doc.repos).filter(([key]) => held.has(key))),
-        ...claimed,
-      };
+      doc.repos = observing
+        ? {
+            ...foreignRepos(doc.repos, claimed, batch.switchedOff && [...batch.switchedOff, ...stopped]),
+            ...Object.fromEntries(Object.entries(doc.repos).filter(([key]) => held.has(key))),
+            ...claimed,
+          }
+        : { ...doc.repos, ...claimed };
       pushNotices(doc, settled.publish);
       doc.lastPollAtMs = Date.now();
       doc.lastError = unsure.length
@@ -490,12 +497,15 @@ export function followRuntime(
       });
     const controller = new AbortController();
     controllers.add(controller);
+    // The frozen batch of an earlier poll while this poll's observations may still fail: it is delivered before the failure is reported.
+    let owed: { batch: FollowBatch; waits: GithubWriteWait[] } | undefined;
     try {
       const waits = (await Promise.all(repos.map((repo) => settleClosedGithubWrites(root, repo, controller.signal)))).flat();
       // Records an older host stored under a bare key for a provider move to the provider's key first, whichever providers are connected.
       await root.commit(async (tx) => {
         const doc = await tx.doc(Follow, root.id);
         scopeBare(doc.repos, doc.fixes, githubRepositoryIds());
+        if (doc.pending) scopeBare(doc.pending.repos, doc.fixes, githubRepositoryIds());
       }, BACKGROUND_CONTEXT);
       const state = await read(),
         leftover = state.pending;
@@ -503,6 +513,7 @@ export function followRuntime(
       if (!leftover && !repos.length && !connected.length)
         throw new Error("Follow PRs needs a GitHub authorization or a connected provider plugin; connect one in Owner setup");
       // A provider with an event still waiting is not read again until it is delivered or its outcome is known: its record is in the batch.
+      if (leftover) owed = { batch: leftover, waits };
       const waiting = new Set(leftover?.groups.map((group) => group.provider)),
         contested = (repositoryId: string) => connected.filter((item) => item.repositoryId === repositoryId).length > 1;
       const origin = new Map<Item, string>(),
@@ -723,7 +734,11 @@ export function followRuntime(
         const doc = await tx.doc(Follow, root.id);
         doc.pending = frozen;
       }, BACKGROUND_CONTEXT);
+      owed = undefined;
       return await recordBatch(frozen, waits);
+    } catch (error) {
+      if (owed && !isClosed()) await recordBatch(owed.batch, owed.waits, false).catch(() => {});
+      throw error;
     } finally {
       controllers.delete(controller);
     }

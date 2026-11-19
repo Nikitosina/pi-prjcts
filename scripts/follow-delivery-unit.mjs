@@ -712,6 +712,152 @@ await scenario("F14", async () => {
   );
 });
 
+// F15 a frozen batch an older host stored holds a record tagged by a plugin under the bare owner/name: it moves to the plugin's key with the
+// saved records, so GitHub's record for the same owner/name does not replace the advanced one, and both survive a restart and the replay.
+await scenario("F15", async () => {
+  reset();
+  const project = make(),
+    root = store(project.id);
+  saveProject({
+    ...loadProject(project.id),
+    githubAuthorization: [
+      {
+        repositoryId: "acme/mari",
+        numericId: 4242,
+        branchPrefix: "pi/",
+        baseBranch: "main",
+        owner: "o",
+        workspaceRevision: "0".repeat(64),
+        at: "",
+      },
+    ],
+  });
+  const head = "c1".repeat(20),
+    state = (ci) => ({
+      state: "open",
+      head,
+      ref: "alpha/7",
+      title: "PR 7",
+      updatedAt: "",
+      ci,
+      lastReview: 0,
+      lastComment: 0,
+      lastLineComment: 0,
+    });
+  const payload = "Twin alpha activity (Follow PRs).\n- PR #7 “PR 7” CI passed [alpha]";
+  root.docs.set("projects.pr-follow", {
+    pending: {
+      repos: { "acme/mari": { baselined: true, prs: { 7: state({ sha: head, result: "passed" }) }, provider: "alpha" } },
+      notices: [],
+      count: 1,
+      groups: [
+        {
+          input: { eventId: "follow:alpha:frozen", kind: "alpha.follow", payload },
+          chat: 100,
+          provider: "alpha",
+          count: 1,
+          waiting: "held",
+        },
+      ],
+      switchedOff: ["alpha"],
+    },
+    repos: {},
+    fixes: {},
+    lastPollAtMs: null,
+    lastError: null,
+    polls: 0,
+    events: 0,
+    lastEventAtMs: null,
+  });
+  off(project.id, "alpha");
+  await runtime(project, root).poll(true);
+  assert.equal(
+    doc(root).pending?.repos["alpha::acme/mari"]?.prs[7]?.ci?.result,
+    "passed",
+    "F15 the frozen advanced record moved to alpha's key",
+  );
+  assert.equal(doc(root).repos["acme/mari"]?.provider, "github", "F15 GitHub's record has the bare key, apart from it");
+  assert.equal(doc(root).pending.groups.length, 1, "F15 alpha's group is still frozen");
+  on(project.id);
+  set("alpha", { repositoryId: "acme/mari", prs: [pr(7, head, "passed")], published: [] });
+  await runtime(project, root).poll(true);
+  assert.equal(delivered(project).filter((item) => item.payload.includes("[alpha]")).length, 1, "F15 the frozen event arrived once");
+  assert.equal(doc(root).pending, undefined, "F15 nothing is pending afterwards");
+  assert.equal(doc(root).repos["alpha::acme/mari"]?.prs[7]?.ci?.result, "passed", "F15 alpha's advanced record was saved");
+  assert.equal(doc(root).repos["acme/mari"]?.provider, "github", "F15 and GitHub's stays its own");
+  await runtime(project, root).poll(true);
+  assert.equal(delivered(project).length, 1, "F15 and the replay announces nothing again");
+});
+
+// F16 an eligible frozen group is delivered although another provider's observation throws; the next polls send nothing again, and an
+// uncertain group of the same kind still waits for its receipt instead of being sent under another id.
+await scenario("F16", async () => {
+  reset();
+  const project = make(),
+    root = store(project.id);
+  const fail = (name, failing) =>
+    set(name, {
+      repositoryId: `${name}/repo`,
+      prs: [pr(7, name === "alpha" ? "4a".repeat(20) : "4b".repeat(20), "passed")],
+      published: [],
+      fail: failing,
+    });
+  const base = (name) =>
+    set(name, { repositoryId: `${name}/repo`, prs: [pr(7, name === "alpha" ? "4a".repeat(20) : "4b".repeat(20))], published: [] });
+  base("alpha");
+  base("beta");
+  await runtime(project, root).poll(true);
+  fail("alpha", false);
+  sink.status = "interrupted";
+  await runtime(project, root).poll(true);
+  assert.equal(doc(root).pending?.groups.length, 1, "F16 alpha's group waits after a proven refusal");
+  sink.status = "submitted";
+  fail("beta", true);
+  const error = await attempt(() => runtime(project, root).poll(true));
+  assert.match(error, /beta outage/, "F16 the poll still reports the outage");
+  assert.equal(
+    delivered(project).filter((item) => item.payload.includes("[alpha]")).length,
+    1,
+    "F16 alpha's event arrived during the outage",
+  );
+  assert.equal(doc(root).pending, undefined, "F16 and it is confirmed");
+  assert.equal(doc(root).repos["alpha::alpha/repo"].prs[7].ci?.result, "passed", "F16 alpha's record advanced");
+  await attempt(() => runtime(project, root).poll(true));
+  base("beta");
+  fail("beta", false);
+  await runtime(project, root).poll(true);
+  assert.equal(delivered(project).filter((item) => item.payload.includes("[alpha]")).length, 1, "F16 no repeat of alpha's event");
+  assert.equal(
+    delivered(project).filter((item) => item.payload.includes("[beta]")).length,
+    1,
+    "F16 beta's own event came once after the outage",
+  );
+
+  reset();
+  const second = make(),
+    again = store(second.id);
+  base("alpha");
+  base("beta");
+  await runtime(second, again).poll(true);
+  fail("alpha", false);
+  sink.status = "uncertain";
+  await runtime(second, again).poll(true);
+  const waiting = [...sink.intents.values()].find((item) => item.record.payload.includes("[alpha]"));
+  assert.ok(waiting, "F16 the uncertain delivery was tried once");
+  fail("beta", true);
+  sink.status = "submitted";
+  const failed = await attempt(() => runtime(second, again).poll(true));
+  assert.match(failed, /beta outage/, "F16 the outage is reported");
+  assert.equal(sink.intents.size, 1, "F16 an uncertain group is not sent under another id");
+  assert.equal(delivered(second).length, 0, "F16 and nothing reached a chat");
+  assert.equal(again.docs.get("projects.pr-follow").pending.groups[0].waiting, "uncertain", "F16 it keeps waiting as uncertain");
+  sink.resolve(second, waiting.record.eventId, "submitted");
+  base("beta");
+  fail("beta", false);
+  await runtime(second, again).poll(true);
+  assert.equal(delivered(second).filter((item) => item.payload.includes("[alpha]")).length, 1, "F16 the receipt confirmed it once");
+});
+
 if (failures.length) {
   console.error(`follow-delivery-unit: FAILED ${failures.map((item) => item.name).join(", ")}`);
   process.exit(1);

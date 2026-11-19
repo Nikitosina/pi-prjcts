@@ -260,6 +260,102 @@ await kit.run(async () => {
     check("63 another poll delivers nothing more", JSON.stringify(await allChats(id, chats)) === JSON.stringify(got));
   }
 
+  // 67: alpha is switched off while its event waits; the host restarts without the alpha plugin loaded. The frozen event wakes no chat, the other
+  // providers go on, and the record stays. Positive control: with the plugin back (still off for the project) nothing moves, and the enable delivers once.
+  {
+    const { id, chats } = await mixed("Unloaded");
+    hold({ uncertain: true });
+    await rpc({ action: "follow-poll", id }).catch(() => {});
+    await rpc({ action: "project-plugin", id, plugin: "alpha", enabled: false });
+    hold({ uncertain: false });
+    const withAlpha = kit.hostEnv.PI_PROJECTS_PLUGINS;
+    kit.hostEnv.PI_PROJECTS_PLUGINS = withAlpha
+      .split(":")
+      .filter((path) => !path.endsWith("alpha.mjs"))
+      .join(":");
+    await kit.restartHost();
+    await rpc({ action: "show", id });
+    await rpc({ action: "follow-poll", id });
+    await idle(id);
+    const got = await allChats(id, chats);
+    check(
+      "67 the other providers' events arrived while alpha was not loaded",
+      count(got["Chat A"], "Fix login copy") === 1 && count(got.Alerts, "[beta]") === 1,
+      got,
+    );
+    check(
+      "67 and no chat got alpha's event",
+      Object.values(got).every((list) => count(list, "[alpha]") === 0),
+      got,
+    );
+    const waiting = (await rpc({ action: "automation-snapshot", id })).follow;
+    check(
+      "67 alpha's event is kept as undelivered and its provider is shown as not loaded",
+      waiting.undelivered.length === 1 && waiting.undelivered[0].provider === "alpha" && waiting.unloadedProviders.includes("alpha"),
+      waiting,
+    );
+    kit.hostEnv.PI_PROJECTS_PLUGINS = withAlpha;
+    await kit.restartHost();
+    await rpc({ action: "show", id });
+    await rpc({ action: "follow-poll", id });
+    await idle(id);
+    check(
+      "67 control: loaded but still off for the project, alpha's event waits",
+      count(await events(id, chats["Chat B"]), "[alpha]") === 0,
+    );
+    await rpc({ action: "project-plugin", id, plugin: "alpha", enabled: true });
+    await rpc({ action: "follow-poll", id });
+    await idle(id);
+    const after = await allChats(id, chats);
+    check(
+      "67 control: the enable delivered alpha's event once to its chat, nothing else repeated",
+      count(after["Chat B"], "[alpha]") === 1 && count(after["Chat A"], "Fix login copy") === 1 && count(after.Alerts, "[beta]") === 1,
+      after,
+    );
+    await rpc({ action: "follow-poll", id });
+    await idle(id);
+    check("67 another poll delivers nothing more", JSON.stringify(await allChats(id, chats)) === JSON.stringify(after));
+  }
+
+  // 68: a frozen event is delivered although another provider's observation fails; repeat polls and the recovery send nothing twice.
+  {
+    const { id, chats } = await mixed("Outage");
+    jset(betaData, (data) => (data.prs = []));
+    hold({ armed: true, skip: 1, hold: true });
+    const polling = rpc({ action: "follow-poll", id }).then(
+      () => "",
+      (error) => error.message,
+    );
+    await kit.eventually(async () => holderStatus()?.holding, "the admission hold was not reached", 200);
+    hold({ hold: false, afterHold: true });
+    await polling;
+    hold({ afterHold: false });
+    await kit.restartHost();
+    jset(betaData, (data) => (data.fail = true));
+    const failed = await rpc({ action: "follow-poll", id }).then(
+      () => "",
+      (error) => error.message,
+    );
+    await idle(id);
+    check("68 the poll reports the outage", /beta outage/.test(failed), failed);
+    const got = await allChats(id, chats);
+    check(
+      "68 each frozen event reached its own chat once during the outage",
+      count(got["Chat A"], "Fix login copy") === 1 &&
+        count(got["Chat B"], "[alpha]") === 1 &&
+        got.Alerts.length === 0 &&
+        got.main.length === 0,
+      got,
+    );
+    await rpc({ action: "follow-poll", id }).catch(() => {});
+    jset(betaData, (data) => (data.fail = false));
+    await rpc({ action: "follow-poll", id });
+    await idle(id);
+    check("68 repeat polls and the recovery deliver nothing more", JSON.stringify(await allChats(id, chats)) === JSON.stringify(got));
+    const snapshot = (await rpc({ action: "automation-snapshot", id })).follow;
+    check("68 nothing stays undelivered and no error shows", snapshot.undelivered.length === 0 && !snapshot.lastError, snapshot);
+  }
+
   // 51 + 53: a disable that arrives while a delivery is held in the host's admission is refused, and the event arrives once.
   {
     const { id, chats } = await mixed("Race");
