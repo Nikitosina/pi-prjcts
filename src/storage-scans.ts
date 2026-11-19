@@ -75,7 +75,8 @@ export function createStorageScans(input: {
     },
     /** The last good measurement if it is within `maxAgeMs` (any age while busy), else a scan (joined when one runs). */
     usage(maxAgeMs: number): Promise<StorageUsage> {
-      if (latest && input.busy?.()) return Promise.resolve(latest.usage);
+      if (input.busy?.())
+        return latest ? Promise.resolve(latest.usage) : Promise.reject(new Error("A cleanup is running; measure again when it ends"));
       return latest && latest.generation === generation && now() - latest.usage.measuredAt <= maxAgeMs
         ? Promise.resolve(latest.usage)
         : scan();

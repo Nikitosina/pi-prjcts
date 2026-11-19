@@ -138,7 +138,15 @@ try {
   release();
   await idle();
   const quiet = started;
-  assert.equal((await scans.usage(0)).measuredAt, clock, "U16 a breakdown during cleanup gets the last measurement");
+  clock += 5000;
+  assert.equal((await scans.usage(0)).measuredAt < clock, true, "U16 a breakdown during cleanup gets the last, older measurement");
+  assert.equal(started, quiet, "U16 a breakdown during cleanup starts no scan");
+  const coldScans = createStorageScans({ measure: () => assert.fail("scanned"), ttlMs: 1, busy: () => true });
+  await assert.rejects(
+    coldScans.usage(0),
+    /cleanup is running/,
+    "U16 a breakdown during cleanup with nothing measured says so instead of scanning",
+  );
   scans.status(true);
   assert.equal(started, quiet, "U16 a refresh during cleanup starts no scan");
   console.log("storage-usage unit: all checks passed");

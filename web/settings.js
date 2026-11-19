@@ -521,6 +521,7 @@ async function storage(body, alive) {
             if (cleaning) outcome = { ok: false, text: error.message };
             cleaning = null;
             lost = false;
+            if (status) status = { ...status, scanning: false };
             if (alive()) draw();
             break;
           }
