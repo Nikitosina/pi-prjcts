@@ -39,6 +39,16 @@ off.add("p1:x");
 await assert.rejects(() => gate.run("p1", "x", async () => "late"), /disabled in this project/);
 assert.equal(gate.active("p1", "x"), 1, "3 only the earlier call is counted");
 void before;
+// 32: the gate counts how many calls began, so a disable can tell that work began while it was checking.
+{
+  const started = gate.started("p5", "s");
+  await gate.run("p5", "s", async () => "quick");
+  assert.equal(gate.started("p5", "s"), started + 1, "32 a finished call still counts as begun");
+  off.add("p5:s");
+  await assert.rejects(() => gate.run("p5", "s", async () => "late"), /disabled in this project/);
+  assert.equal(gate.started("p5", "s"), started + 1, "32 a refused call did not begin");
+  assert.equal(gate.started("p6", "s"), 0, "9 other project");
+}
 // 13: a provider's listed methods run through the gate; the others stay the provider's own.
 {
   const merges = [];

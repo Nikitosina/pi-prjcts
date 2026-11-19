@@ -7,12 +7,14 @@ import { createKit } from "./lib/e2e-kit.mjs";
 const fixtures = new URL("./fixtures/", import.meta.url).pathname;
 const gated = join(fixtures, "gated-plugin"),
   fakeVcs = join(fixtures, "fake-vcs-plugin");
-writeFileSync(join(tmpdir(), `plugin-enable-fake-${process.pid}.json`), JSON.stringify({ prs: [] }));
+const fakeData = join(tmpdir(), `plugin-enable-fake-${process.pid}.json`);
+const writeFake = (extra = {}) => writeFileSync(fakeData, JSON.stringify({ prs: [], ...extra }));
+writeFake();
 const kit = await createKit("plugin-enable", {
   env: {
     PI_PROJECTS_FOLLOW_TICK_MS: "200",
     PI_PROJECTS_PLUGINS: `${gated}:${fakeVcs}`,
-    FAKE_PLUGIN_DATA: join(tmpdir(), `plugin-enable-fake-${process.pid}.json`),
+    FAKE_PLUGIN_DATA: fakeData,
   },
   handler: ({ role, user, results }) =>
     role === "coordinator" && user.includes("GATED-CALL") && !results.length ? kit.call("gated_ping", {}) : undefined,
@@ -202,6 +204,18 @@ await kit.run(async () => {
     await followRepos(),
   );
   await set(alpha, "gated", true);
+  // 34: a poll that began while the plugin was off keeps its saved records when the plugin is turned on before the batch is built.
+  await set(alpha, "gated", false);
+  writeFake({ holdPublished: true });
+  const heldPoll = rpc({ action: "follow-poll", id: alpha });
+  await kit.delay(600);
+  await set(alpha, "gated", true);
+  writeFake();
+  check(
+    "34 a poll that began with the plugin off keeps its saved state after the plugin is turned on mid-poll",
+    (await heldPoll).follow.repos.some((item) => item.repositoryId === `gated/${alpha}`),
+    (await heldPoll).follow.repos,
+  );
   // The Settings → Plugins switches: a locked plugin is on and disabled with its reason; a busy one refuses with a message.
   const js = JSON.stringify;
   const toggle = (name) => `#settings [data-plugin-toggle="${name}"]`;
@@ -268,6 +282,52 @@ await kit.run(async () => {
   await page.waitFor(`!document.querySelector(${js(toggle("gated"))})?.checked`, "open list shows the switch off");
   await set(alpha, "gated", true);
   await page.waitFor(`document.querySelector(${js(toggle("gated"))})?.checked`, "open list shows the switch on");
+  // 32: an unresolved or unreadable write of the plugin refuses the disable; once resolved the disable works, and the plugin is never asked
+  // about writes of a project that turned it off. The other project keeps its checks.
+  const pluginCall = (method, params) => rpc({ action: "plugin", plugin: "gated", method, params });
+  const rootA = (await pluginCall("rootOf", { projectId: alpha })).root,
+    rootB = (await pluginCall("rootOf", { projectId: beta })).root;
+  const mark = (root, mode) => pluginCall("setUncertain", { root, mode });
+  const blocker = async (id) => (await rpc({ action: "schedule-snapshot", id, includeHistory: false })).automaticAdmissionBlocker;
+  const asked = async (root) => (await counters()).asked?.[root] ?? 0;
+  await mark(rootA, "yes");
+  await click(toggle("gated"));
+  await page.waitFor(`/unknown outcome/.test(document.body.innerText)`, "unresolved write refusal shown");
+  check(
+    "32 the switch stays on after the refusal that names the unresolved write",
+    await page.evaluate(`document.querySelector(${js(toggle("gated"))}).checked`),
+  );
+  await page.shot("03-unresolved-write", { force: true });
+  check("32 the refused disable changed nothing", (await entry(alpha, "gated")).enabled === true && !(await counters()).paused.includes(alpha));
+  check("32 the plugin still answers", (await call(alpha, "ping")).pong === alpha);
+  await mark(rootA, "fail");
+  const unreadable = await refused(() => set(alpha, "gated", false));
+  check("32 a check that fails refuses the disable", /could not be checked/.test(unreadable), unreadable);
+  check("32 the plugin is still on after a failed check", (await entry(alpha, "gated")).enabled === true);
+  await mark(rootA, "hold");
+  const racing = refused(() => set(alpha, "gated", false));
+  await kit.eventually(async () => (await pluginCall("checkWaiting")).count === 1, "check did not start");
+  await call(alpha, "ping");
+  await pluginCall("releaseCheck");
+  const raced = await racing;
+  check("32 work that began during the check refuses the disable", /began while/.test(raced), raced);
+  check("32 the plugin is still on after the race", (await entry(alpha, "gated")).enabled === true);
+  await mark(rootA, "no");
+  check("32 once the write is resolved the disable succeeds", (await set(alpha, "gated", false)).enabled === false);
+  check("32 and holds the pause", (await counters()).paused.includes(alpha), await counters());
+  await mark(rootA, "yes");
+  await mark(rootB, "yes");
+  const askedA = await asked(rootA);
+  check("32 job admission ignores the disabled plugin's unresolved write", (await blocker(alpha)) === null);
+  check("32 the disabled plugin is not asked", (await asked(rootA)) === askedA, await counters());
+  check("32 the other project's check stays active", (await blocker(beta)) === "uncertain-provider-write");
+  const betaRefused = await refused(() => set(beta, "gated", false));
+  check("32 the other project cannot disable with its own unresolved write", /unknown outcome/.test(betaRefused), betaRefused);
+  check("32 the other project stays enabled", (await entry(beta, "gated")).enabled === true);
+  await mark(rootB, "no");
+  await set(alpha, "gated", true);
+  check("32 enabling asks the plugin again", (await blocker(alpha)) === "uncertain-provider-write" && (await asked(rootA)) > askedA);
+  await mark(rootA, "no");
   // 14b: a disable whose project save fails changes nothing and does not leave the lifecycle pause held (the plugin is still on).
   const projectFolder = join(kit.home, alpha);
   chmodSync(projectFolder, 0o555);
@@ -309,6 +369,10 @@ await kit.run(async () => {
   check("19 the restarted host holds the disabled plugin's pause again", (await counters()).paused.includes(alpha), await counters());
   check("19 and not the enabled project's", !(await counters()).paused.includes(beta), await counters());
   check("14c its RPC is still refused", /disabled in this project/.test(await refused(() => call(alpha, "ping"))));
+  // 32: a project disabled before a restart is not asked either.
+  await mark(rootA, "yes");
+  check("32 after a restart the disabled plugin's unresolved write does not block admission", (await blocker(alpha)) === null);
+  check("32 and the plugin was not asked", (await asked(rootA)) === 0, await counters());
   // The refused route probes of 6 are the only expected HTTP errors.
   kit.result.httpErrors = kit.result.httpErrors.filter((error) => !(error.url.endsWith("/plugins/gated/data") && error.status === 409));
 });

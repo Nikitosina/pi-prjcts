@@ -5,6 +5,9 @@ const paused = new Set();
 let toolRuns = 0,
   listCalls = 0;
 const observed = new Map();
+const uncertain = new Map(),
+  asked = new Map(),
+  checking = [];
 const touchedBy = new Map(),
   publishedBy = new Map(),
   listedBy = new Map();
@@ -74,6 +77,11 @@ export default {
           ),
         holdin: async ({ params, withRoot }) =>
           withRoot(params.projectId, () => new Promise((resolve) => waiting.push(resolve)).then(() => ({ held: true }))),
+        // The root conversation id of a project, so a test can set what `uncertainWrites` answers for it (the hook receives only the root).
+        rootOf: async ({ params, withRoot }) => withRoot(params.projectId, async (root) => ({ root: String(root.id) })),
+        setUncertain: async ({ params }) => (uncertain.set(params.root, params.mode), { set: params.mode }),
+        releaseCheck: async () => (checking.splice(0).forEach((resolve) => resolve()), { released: true }),
+        checkWaiting: async () => ({ count: checking.length }),
         release: async () => (waiting.splice(0).forEach((resolve) => resolve()), { released: true }),
         waiting: async () => ({ count: waiting.length }),
         counters: async () => ({
@@ -82,11 +90,20 @@ export default {
           published: Object.fromEntries(publishedBy),
           listed: Object.fromEntries(listedBy),
           observed: Object.fromEntries(observed),
+          asked: Object.fromEntries(asked),
           touched: Object.fromEntries(touchedBy),
           paused: [...paused],
         }),
       },
-      rpcPolicy: { touch: "write", holdin: "write", ping: "read", hold: "write", release: "write", waiting: "read", counters: "read" },
+      uncertainWrites: async (_tx, root) => {
+        const key = String(root),
+          mode = uncertain.get(key);
+        asked.set(key, (asked.get(key) ?? 0) + 1);
+        if (mode === "fail") throw new Error("gated record unreadable");
+        if (mode === "hold") await new Promise((resolve) => checking.push(resolve));
+        return mode === "yes";
+      },
+      rpcPolicy: { rootOf: "read", setUncertain: "write", releaseCheck: "write", checkWaiting: "read", touch: "write", holdin: "write", ping: "read", hold: "write", release: "write", waiting: "read", counters: "read" },
       web: { routes: { data: async ({ projectId }) => ({ mime: "text/plain", bytes: Buffer.from(`data:${projectId}`) }) } },
       lifecycle: { pause: (projectId) => (paused.add(projectId), () => paused.delete(projectId)) },
       cleanup: async ({ projectId }) => (calls.push(projectId), ""),
