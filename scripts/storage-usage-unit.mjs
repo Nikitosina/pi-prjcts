@@ -4,6 +4,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { diskBytes, measureRows } from "../src/storage-usage.ts";
+import { createStorageScans } from "../src/storage-scans.ts";
 
 const root = mkdtempSync(join(tmpdir(), "storage-usage-"));
 try {
@@ -56,6 +57,98 @@ try {
   assert.match(rows[1].note, /simctl failed/);
   assert.equal(rows[2].bytes, null);
   assert.match(rows[2].note, /timed out/i);
+
+  // U13-U16: cached scans (scripts/storage-usage-failures.md).
+  const usageAt = (n) => ({ measuredAt: n, rows: [] });
+  let started = 0,
+    release = () => {},
+    fail = false,
+    clock = 1000,
+    cleaning = false;
+  const scans = createStorageScans({
+    ttlMs: 600,
+    now: () => clock,
+    busy: () => cleaning,
+    measure: () => {
+      started++;
+      return new Promise((resolve, reject) => {
+        release = () => (fail ? reject(new Error("du failed")) : resolve(usageAt(clock)));
+      });
+    },
+  });
+  const idle = () => new Promise((done) => setTimeout(done, 10));
+  const cold = scans.status();
+  assert.deepEqual([cold.usage, cold.scanning, started], [null, true, 1], "U16 a cold status answers at once and scans in the background");
+  scans.status(true);
+  const joined = scans.scan();
+  assert.equal(scans.status().scanning, true);
+  assert.equal(started, 1, "U14 refreshes join the scan in flight");
+  release();
+  await joined;
+  await idle();
+  const warm = scans.status();
+  assert.deepEqual(
+    [warm.usage?.measuredAt, warm.scanning, warm.stale, started],
+    [1000, false, false, 1],
+    "U13 a fresh measurement is reused",
+  );
+  clock += 700;
+  assert.equal(scans.status().stale, true, "U13 an old measurement is stale");
+  assert.equal(started, 2, "U13 a stale measurement is refreshed in the background");
+  fail = true;
+  release();
+  await idle();
+  const failed = scans.status();
+  assert.deepEqual([failed.usage?.measuredAt, failed.error], [1000, "du failed"], "U15 a failed scan keeps the last good measurement");
+  fail = false;
+  scans.status(true);
+  assert.equal(started, 3, "U15 a refresh retries after a failure");
+  release();
+  await idle();
+  cleaning = true;
+  clock += 700;
+  scans.status();
+  assert.equal(started, 3, "U16 no scan starts while cleanup deletes");
+  cleaning = false;
+  scans.invalidate();
+  assert.equal(started, 4, "U16 a scan starts when cleanup ends");
+  assert.equal(scans.status().stale, true, "U16 numbers from before the cleanup are stale");
+  release();
+  await idle();
+  assert.equal(scans.status().stale, false);
+  scans.invalidate();
+  scans.invalidate();
+  assert.equal(started, 5, "U14 invalidations during a scan join it");
+  release();
+  await idle();
+  assert.equal(started, 6, "U16 a scan that began before the invalidation is followed by one more");
+  release();
+  await idle();
+  // U16: a scan outdated by a cleanup that then fails is still followed by one; nothing scans on request while cleanup deletes.
+  const before = started;
+  scans.invalidate();
+  fail = true;
+  scans.invalidate();
+  release();
+  await idle();
+  fail = false;
+  assert.equal(started, before + 2, "U16 the follow-up scan runs although the outdated one failed");
+  cleaning = true;
+  assert.equal(scans.status(true).scanning, true, "U16 the follow-up scan already runs");
+  release();
+  await idle();
+  const quiet = started;
+  clock += 5000;
+  assert.equal((await scans.usage(0)).measuredAt < clock, true, "U16 a breakdown during cleanup gets the last, older measurement");
+  assert.equal(started, quiet, "U16 a breakdown during cleanup starts no scan");
+  const coldScans = createStorageScans({ measure: () => assert.fail("scanned"), ttlMs: 1, busy: () => true });
+  await assert.rejects(
+    coldScans.usage(0),
+    /cleanup is running/,
+    "U16 a breakdown during cleanup with nothing measured says so instead of scanning",
+  );
+  scans.status(true);
+  assert.equal(started, quiet, "U16 a refresh during cleanup starts no scan");
   console.log("storage-usage unit: all checks passed");
 } finally {
   rmSync(root, { recursive: true, force: true });

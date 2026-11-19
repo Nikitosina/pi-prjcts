@@ -918,6 +918,13 @@ try {
     progress?.step === "worktrees" && progress.done === 0 && progress.freedBytes === 0,
     progress,
   );
+  // U17: reopening Settings during a cleanup shows that run, and none starts beside it.
+  const during = await rpc({ action: "storage-status", id });
+  check(
+    "U17 the storage status carries the cleanup run in flight with its progress, and starts no scan beside it",
+    during.cleanup?.requestId === held.requestId && during.cleanup.progress.step === "worktrees" && !during.scanning,
+    during,
+  );
   host.kill("SIGKILL");
   await stopHost().catch(() => {});
   delete env.PI_PROJECTS_CLEANUP_START_DELAY_MS;
@@ -931,6 +938,7 @@ try {
     interrupted.length === 1 && interrupted[0].status === "interrupted",
     interrupted,
   );
+  const startedAt = Date.now();
   const started = await rpc({ action: "schedule-run", id, scheduleId: routine.id });
   await eventually(async () => !existsSync(w3Path) && !existsSync(results), "the cleanup routine did not remove W3 and e2e-results", 600);
   // R22: Settings → Storage waits for its own run by request id; history pages oldest first and may not reach it.
@@ -947,6 +955,16 @@ try {
     own.total === 1 && own.items[0].requestId === started.requestId && own.items[0].outcome === "completed" && !own.items[0].progress,
     own,
   );
+  // U16: when the run ends the old numbers are stale and one scan measures what is left.
+  const rescanned = await eventually(
+    async () => {
+      const status = await rpc({ action: "storage-status", id });
+      return status.cleanup === null && !status.scanning && !status.stale && status.usage.measuredAt > startedAt && status;
+    },
+    "no scan followed the cleanup run",
+    300,
+  );
+  check("U16 a scan after the cleanup run measured what was left", rescanned.error === null && rescanned.usage.rows.length >= 4, rescanned);
   const runs = await eventually(
     async () => {
       const items = (await rpc({ action: "schedule-history", id, kind: "intents" })).items.filter((item) => item.stableId === routine.id);

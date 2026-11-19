@@ -348,6 +348,39 @@ await kit.run(async () => {
       totalOf(fresh).measuredAt > measured.measuredAt,
     { own: own?.measuredAt, again: totalOf(again)?.measuredAt, measured: measured.measuredAt, fresh: totalOf(fresh)?.measuredAt },
   );
+  // U13-U15: Settings reads the kept measurement at once; a slow scan runs in the background and one refresh at a time.
+  const kept = await rpc({ action: "storage-status", id });
+  check(
+    "U13 the status answers the last measurement without measuring again",
+    kept.usage?.measuredAt === fresh.projects.find((item) => item.id === id).measuredAt &&
+      !kept.scanning &&
+      !kept.stale &&
+      kept.cleanup === null,
+    kept,
+  );
+  patchData((value) => (value.usageDelayMs = 3000));
+  const askedAt = Date.now();
+  const refreshing = await rpc({ action: "storage-status", id, refresh: true });
+  const refreshMs = Date.now() - askedAt;
+  const again2 = await rpc({ action: "storage-status", id, refresh: true });
+  check(
+    "U14 a refresh answers at once with the old measurement while the scan runs; a second refresh joins it",
+    refreshMs < 1500 &&
+      refreshing.scanning &&
+      refreshing.usage?.measuredAt === kept.usage.measuredAt &&
+      again2.scanStartedAt === refreshing.scanStartedAt,
+    { refreshMs, refreshing, again2 },
+  );
+  const settled = await kit.eventually(
+    async () => {
+      const status = await rpc({ action: "storage-status", id });
+      return !status.scanning && status.usage.measuredAt > kept.usage.measuredAt && status;
+    },
+    "the background scan never finished",
+    300,
+  );
+  patchData((value) => (value.usageDelayMs = 0));
+  check("U13 the finished scan replaced the kept measurement", settled.error === null && !settled.stale, settled);
   await rpc({ action: "plugin", plugin: "fake", method: "connect", id, params: { confirm: id } });
   check(
     "10 connect (mutateIdle) stored the provider record verbatim in project.json",

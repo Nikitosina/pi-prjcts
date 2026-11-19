@@ -14,24 +14,33 @@ export type StorageMeasure = {
 export type StorageRow = { id: string; kind: StorageKind; label: string } & StorageMeasure;
 export type StorageUsage = { measuredAt: number; rows: StorageRow[] };
 
-export const MEASURE_TIMEOUT_MS = 120_000;
+/** A scan runs in the background, so no request waits for it; a row still gives up eventually. */
+export const MEASURE_TIMEOUT_MS = 600_000;
 
-/** Disk use of these paths with `du` (symlinks not followed); a path gone meanwhile counts zero, anything unreadable makes it null. */
-export async function diskBytes(paths: readonly string[], timeoutMs = MEASURE_TIMEOUT_MS): Promise<number | null> {
+/** Disk use of each path with `du` (symlinks not followed), in one run; a path gone meanwhile counts zero, anything unreadable makes the answer null.
+ * `du` counts a file linked from two paths once, under the first. */
+export async function diskBytesByPath(paths: readonly string[], timeoutMs = MEASURE_TIMEOUT_MS): Promise<Map<string, number> | null> {
+  const sizes = new Map(paths.map((path) => [path, 0]));
   const present = paths.filter((path) => existsSync(path));
-  if (!present.length) return 0;
+  if (!present.length) return sizes;
   return new Promise((resolve) => {
     execFile("/usr/bin/du", ["-skP", "--", ...present], { timeout: timeoutMs, maxBuffer: 8 << 20 }, (error, stdout) => {
       if (error) return resolve(null);
-      let kb = 0;
       for (const line of stdout.split("\n").filter(Boolean)) {
-        const value = Number(line.split("\t")[0]);
-        if (!Number.isFinite(value)) return resolve(null);
-        kb += value;
+        const tab = line.indexOf("\t"),
+          kb = Number(line.slice(0, tab));
+        if (tab < 0 || !Number.isFinite(kb)) return resolve(null);
+        sizes.set(line.slice(tab + 1), kb * 1024);
       }
-      resolve(kb * 1024);
+      resolve(sizes);
     });
   });
+}
+
+/** Disk use of these paths together; null when any is unreadable. */
+export async function diskBytes(paths: readonly string[], timeoutMs = MEASURE_TIMEOUT_MS): Promise<number | null> {
+  const sizes = await diskBytesByPath(paths, timeoutMs);
+  return sizes && [...sizes.values()].reduce((sum, bytes) => sum + bytes, 0);
 }
 
 /** Measures every row; one that throws or outlasts `timeoutMs` is unknown with the reason, the others still answer. */
