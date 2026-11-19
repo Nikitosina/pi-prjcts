@@ -26,3 +26,5 @@ Written before the code. Each case names how the page can go wrong; `scripts/cha
 - P4b A refused short text is matched to a longer message that contains it, so the refusal disappears.
 - P6b A refusal that arrives after the owner left the chat and came back leaves the bubble on Sending, or restores the draft into another chat.
 - P7b The host recorded the job and then reported an error: the bubble says Not sent and the restored draft invites a second send.
+- P4c A recorded short text takes a longer message that contains it as its own canonical message.
+- P6c A restored draft that the owner edited keeps the bubble's claim that it is in the composer, hiding Retry.

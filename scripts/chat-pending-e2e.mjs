@@ -217,6 +217,18 @@ await kit.run(async () => {
   check("P4 two identical sends show two canonical messages", same.length === 2 && same.every((item) => !item.pending), same);
   check("P4 the host stored both", (await hostCount(A, undefined, "MARK-P4")) === 2);
 
+  // P4c: a short text and a longer one that contains it each find their own transcript message.
+  await reset();
+  await ev(`__hold("message")`);
+  await typeAndSend("yes MARK-Y");
+  await typeAndSend("yes MARK-Y please");
+  await page.waitFor(`document.querySelectorAll('#feed .msg.owner.pending').length === 2`, "two pending bubbles for P4c");
+  await ev(`__release("message")`);
+  await page.waitFor(`document.querySelector('#feed').innerText.includes("ACK yes MARK-Y please")`, "both answered");
+  await kit.delay(400);
+  const nested = await owners("MARK-Y");
+  check("P4c both messages settle to their own canonical bubble", nested.length === 2 && nested.every((item) => !item.pending), nested);
+
   // P5: a pending send survives a chat switch, never shows in the other chat.
   await reset();
   await ev(`__hold("message")`);
@@ -247,6 +259,14 @@ await kit.run(async () => {
   check("P8 the draft is restored", (await composer()) === "refused MARK-P6", await composer());
   check("P6 the host did not store it", (await hostCount(A, undefined, "MARK-P6")) === 0);
   await page.shot("02-failed", { force: true });
+  await ev(`document.querySelector('#composer-input').focus()`);
+  await page.cdp("Input.insertText", { text: " edited" });
+  check(
+    "P6 editing the restored draft gives the bubble its own Retry",
+    await ev(
+      `(() => { const n = document.querySelector('#feed .msg.owner[data-delivery="failed"]'); return !!n.querySelector("[data-pending-retry]") && !/composer/.test(n.innerText); })()`,
+    ),
+  );
   await select(chatButton(A, other));
   await page.waitFor(
     `document.querySelector(${JSON.stringify(chatButton(A, other))}).getAttribute("aria-current") === "true"`,
