@@ -28,12 +28,12 @@ export function priorRepo<R extends { provider?: string }>(
   repositoryId: string,
 ): { record: R | undefined; superseded: string | null } {
   const own = (key: string): R | undefined => (Object.prototype.hasOwnProperty.call(repos, key) ? repos[key] : undefined);
+  const bare = own(repositoryId);
+  if (provider === "github")
+    return { record: bare && (bare.provider === undefined || bare.provider === "github") ? bare : undefined, superseded: null };
   const current = own(repoKey(provider, repositoryId));
   if (current) return { record: current, superseded: null };
-  const bare = own(repositoryId);
   if (!bare) return { record: undefined, superseded: null };
-  if (provider === "github")
-    return { record: bare.provider === undefined || bare.provider === "github" ? bare : undefined, superseded: null };
   const claims = bare.provider === provider || (bare.provider === undefined && !/^[^/]+\/[^/]+$/.test(repositoryId));
   return claims ? { record: bare, superseded: repositoryId } : { record: undefined, superseded: null };
 }
