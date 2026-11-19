@@ -33,6 +33,8 @@ type FollowBatch = {
   notices: PrNotice[];
   count: number;
   groups: Array<{ input: Parameters<ReturnType<typeof scheduleRuntime>["ingest"]>[0]; chat: number }>;
+  /** Providers whose plugin the project had turned off when the poll began: their saved records are not this poll's to prune. Absent in older docs. */
+  switchedOff?: string[];
 };
 type FollowState = {
   pending?: FollowBatch;
@@ -312,20 +314,21 @@ export function followRuntime(
   }
 
   const loadedProviders = () => new Set(plugins.followProviders().map((item) => item.id));
-  /** Providers the project follows through now: a plugin the project turned off follows nothing but keeps its saved records. */
-  const followedProviders = () =>
-    new Set(plugins.followProviders().flatMap((item) => (item.repository(loadProject(projectId)) ? [item.id] : [])));
-  /** Records this poll did not claim stay when their provider is not followed now (plugin not loaded or off for the project) and for untagged older ones. */
-  const foreignRepos = (existing: FollowState["repos"], claimed: FollowState["repos"]): FollowState["repos"] => {
-    const followed = followedProviders();
-    return Object.fromEntries(
+  /** Records this poll did not claim stay when their provider's plugin is not loaded or was off for the project when the poll began, and for untagged older ones. */
+  const foreignRepos = (
+    existing: FollowState["repos"],
+    claimed: FollowState["repos"],
+    switchedOff: readonly string[] = [],
+  ): FollowState["repos"] =>
+    Object.fromEntries(
       Object.entries(existing).filter(
         ([id, repo]) =>
           !(id in claimed) &&
-          (repo.provider === undefined ? !/^[^/]+\/[^/]+$/.test(id) : repo.provider !== "github" && !followed.has(repo.provider)),
+          (repo.provider === undefined
+            ? !/^[^/]+\/[^/]+$/.test(id)
+            : repo.provider !== "github" && (switchedOff.includes(repo.provider) || !loadedProviders().has(repo.provider))),
       ),
     );
-  };
   /** PR number -> chat conversation of the Job that opened it (a verified publication receipt, or the Job's own PR link). */
   async function prOwners(
     repos: Array<{ numericId: number }>,
@@ -367,7 +370,7 @@ export function followRuntime(
     }
     await root.commit(async (tx) => {
       const doc = await tx.doc(Follow, root.id);
-      doc.repos = { ...foreignRepos(doc.repos, batch.repos), ...batch.repos };
+      doc.repos = { ...foreignRepos(doc.repos, batch.repos, batch.switchedOff), ...batch.repos };
       pushNotices(doc, batch.notices);
       doc.lastPollAtMs = Date.now();
       doc.lastError = null;
@@ -506,7 +509,13 @@ export function followRuntime(
         if (chat !== undefined) notice.chat = chat;
       }
       const delivered = [...groups.values()].reduce((sum, group) => sum + group.length, 0);
-      const batch: FollowBatch = { repos: repoStates, notices, count: delivered, groups: [] };
+      const batch: FollowBatch = {
+        repos: repoStates,
+        notices,
+        count: delivered,
+        groups: [],
+        switchedOff: plugins.followProvidersOff(project),
+      };
       const label = connected.length && !repos.length ? connected[0].provider.label : "GitHub";
       for (const [chat, group] of groups) {
         const lines = group.slice(0, 60).map((item) => {

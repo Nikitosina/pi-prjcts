@@ -543,23 +543,23 @@ on("plugins-changed", () => void pluginsRefresh?.().catch(() => {}));
 
 /** Every plugin the host loaded, and the panels plugins provide for this project (web/plugins.js). */
 async function pluginsSection(body, alive) {
-  let shown = "",
-    drawId = 0;
-  const draw = async () => {
-    const ask = ++drawId;
+  let shown = null,
+    readId = 0;
+  // Every read, the first one and one after a switch changed elsewhere (another tab, the Host agent), goes through here: only the newest
+  // read draws, and an unchanged status leaves the mounted panels alone unless `force` asks for a redraw.
+  const draw = async (force = false) => {
+    const ask = ++readId;
     const status = await call("plugins", state.projectId ? { id: state.projectId } : {});
-    if (!alive() || ask !== drawId) return;
-    shown = pluginsSignature(status);
+    if (!alive() || ask !== readId) return;
+    const signature = pluginsSignature(status);
+    if (!force && signature === shown) return;
+    shown = signature;
     unmount?.();
     body.innerHTML = `${line("Plugins this host loaded at its start. Turn one off to stop it in this project only; its saved data stays.", "A plugin with active work, or one this project's checkout needs, cannot be turned off. A panel is the plugin's own code running in this page. A changed plugin shows here after a host restart and a page reload.")}${pluginCards(status) || `<p class="muted">No plugins are loaded. List one in plugins.json and restart the host.</p>`}`;
     unmount = mountPanels(body, state.projectId, status.web);
   };
-  await draw();
-  // A switch changed elsewhere (another tab, the Host agent) redraws the open list; an unchanged status leaves the mounted panels alone.
-  pluginsRefresh = async () => {
-    const status = await call("plugins", state.projectId ? { id: state.projectId } : {});
-    if (alive() && pluginsSignature(status) !== shown) await draw();
-  };
+  pluginsRefresh = draw;
+  await draw(true);
   body.addEventListener("change", async (event) => {
     const toggle = event.target.closest("[data-plugin-toggle]");
     if (!toggle) return;
@@ -569,7 +569,7 @@ async function pluginsSection(body, alive) {
     } catch (error) {
       sayFail(error);
     }
-    if (alive()) await draw();
+    if (alive()) await draw(true);
   });
 }
 

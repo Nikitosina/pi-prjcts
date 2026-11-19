@@ -24,7 +24,7 @@ The contract is `HostPluginApi` and `PluginCapabilities` in `src/plugin-types.ts
 | `prs` | PR provider: generic card data (checks, conflicts, optional draft/review/unresolved threads), detail, `#` refs, watch/hide validation, status, worker-published ids, watch document kind; optional `normalizeId` (number/URL input), `transitions`/`noticeFor` (monitor kinds), `followCovers` (what Follow PRs already announces) |
 | `follow` | Follow PRs for publication receipts: observe, fix brief (host supplies receipts) |
 | `merge` | result acceptance for the checkout kind (`MergeProvider`, `kind` matches the `vcs` kind): `inspect` the PR (state, draft, head, base, `mergeable` yes/later/no), `merge` exactly the approved head, `enableAutoMerge` pinned to that head, and `pullMain` for the main checkout. Approve calls it, and Follow PRs calls `pullMain` (with `inspect` for the base) when a followed PR becomes merged; without it a Job of this kind cannot be approved |
-| `uncertainWrites` | blocks automatic admission while a plugin write outcome is unknown |
+| `uncertainWrites` | blocks automatic admission while a plugin write outcome is unknown; still asked after a project turns the plugin off, so an unresolved write is never ignored |
 
 A provider plugin can also use the general capabilities, for example `rpc` for the `connect` call of a setup card; the [reference](docs/plugins/reference.md) describes them.
 

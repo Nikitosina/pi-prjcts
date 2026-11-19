@@ -257,6 +257,11 @@ export const plugins = {
         }),
       ];
     }),
+  /** Follow providers whose plugin this project has turned off. */
+  followProvidersOff: (project: Pick<Project, "disabledPlugins">): string[] =>
+    [...builtins(), ...loaded].flatMap((item) =>
+      item.capabilities.follow && disabledIn(project, item.plugin) ? [item.capabilities.follow.id] : [],
+    ),
   /** The merge provider for a checkout kind, its methods counted and refused by the project gate (`plugin` is the provider's plugin). */
   mergeProvider: (projectId: string, kind: string): MergeProvider | undefined => {
     const item = [...builtins(), ...loaded].find((entry) => entry.capabilities.merge?.kind === kind);
