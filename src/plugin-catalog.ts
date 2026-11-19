@@ -31,8 +31,9 @@ const present = () => {
   try {
     lstatSync(configFile());
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw new Error(`plugins.json is unreadable: ${error instanceof Error ? error.message : String(error)}`);
   }
 };
 
