@@ -124,14 +124,14 @@ function checkoutKind(project: Project): string | null {
 }
 
 /** Why the project cannot turn the plugin off whatever else happens, or null. Looks at the real checkout, so it holds before a grant and after one is revoked. */
-function requiredBy(project: Project, name: string): string | null {
+function requiredBy(project: Project, name: string, checkout: () => string | null = () => checkoutKind(project)): string | null {
   const item = [...builtins(), ...loaded].find((entry) => entry.plugin === name);
   if (!item) return null;
   const claims = [item.capabilities.workspace?.id, item.capabilities.vcs?.kind, item.capabilities.merge?.kind];
   const provider = project.workspaceAuthorization?.provider;
   if (provider && (provider === name || claims.includes(provider)))
     return "required by this project's checkout (its workspace grant uses this plugin)";
-  const kind = checkoutKind(project);
+  const kind = checkout();
   if (kind && (claims.includes(kind) || (kind === "git" && name === "github")))
     return `required by this project's checkout (its folder is a ${kind} checkout this plugin serves)`;
   if (name === "github" && project.githubAuthorization?.length) return "required by this project's GitHub authorizations";
@@ -163,19 +163,18 @@ function guarded<T extends object>(plugin: string, capability: string, provider:
 export const plugins = {
   gate,
   /** One row per plugin for a project: whether it is on, and why it cannot be turned off now (null when it can). */
-  forProject: (project: Project): Array<PluginStatus & { enabled: boolean; lock: string | null }> =>
-    statuses.map((status) => {
+  forProject: (project: Project): Array<PluginStatus & { enabled: boolean; lock: string | null }> => {
+    let kind: string | null | undefined;
+    const checkout = () => (kind === undefined ? (kind = checkoutKind(project)) : kind);
+    return statuses.map((status) => {
       const name = status.name;
       const enabled = !(name && disabledIn(project, name));
       const busy = name ? gate.active(project.id, name) : 0;
       const lock =
-        name && status.state === "loaded" ? (requiredBy(project, name) ?? (busy ? `active work (${busy} running)` : null)) : null;
+        name && status.state === "loaded" ? (requiredBy(project, name, checkout) ?? (busy ? `active work (${busy} running)` : null)) : null;
       return { ...status, enabled, lock };
-    }),
-  /**
-   * The project with the plugin turned on or off. Synchronous on purpose: the caller saves the result in the same tick, so no call
-   * can begin between the work check and the stored flag. Refuses a plugin with active work or one the checkout needs.
-   */
+    });
+  },
   /** Why the plugin cannot be turned off in this project right now (needed by its checkout, or work in flight), or null. Read-only, so it can run before a lock. */
   disableBlock: (project: Project, name: string): string | null => {
     const required = requiredBy(project, name);
@@ -235,7 +234,11 @@ export const plugins = {
     }
     return plugins.setEnabled(latest, name, false, save, paused);
   },
-  /** `paused` is a lifecycle pause already taken for this disable; setEnabled owns it from here and releases it on every refusal. */
+  /**
+   * The project with the plugin turned on or off. Synchronous on purpose: the caller saves the result in the same tick, so no call
+   * can begin between the work check and the stored flag. Refuses a plugin with active work or one the checkout needs.
+   * `paused` is a lifecycle pause already taken for this disable; setEnabled owns it from here and releases it on every refusal.
+   */
   setEnabled: (project: Project, name: string, enabled: boolean, save: (next: Project) => void, paused?: () => void): Project => {
     if (!loadedName(name)) throw new Error(`Plugin "${name}" is not loaded`);
     const off = new Set(project.disabledPlugins ?? []);

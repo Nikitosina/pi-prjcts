@@ -71,7 +71,11 @@ export function showSection(id) {
 on("select", () => dialog.open && paint());
 dialog.addEventListener("cancel", (event) => event.preventDefault()); // Esc goes through the hotkey registry (leave-focus)
 // The close event is queued: a dialog reopened since then keeps the section it just painted.
-dialog.addEventListener("close", () => dialog.open || leaveSection());
+dialog.addEventListener("close", () => {
+  if (dialog.open) return;
+  leaveSection();
+  hostCatalog = null;
+});
 function leaveSection() {
   pluginsRefresh = null;
   unmount?.();
@@ -538,8 +542,13 @@ async function storage(body, alive) {
 // ---------------------------------------------------------------------------------------------------------------- Plugins
 
 let pluginsRefresh = null;
+// The bundled catalog is host-wide: it is read once per opening of Settings, not at every project selection.
+let hostCatalog = null;
 const pluginsSignature = (status) =>
   JSON.stringify(status.plugins.map((plugin) => [plugin.name, plugin.state, plugin.enabled, plugin.lock]));
+on("connection", (up) => {
+  if (!up) hostCatalog = null;
+});
 on("plugins-changed", () => void pluginsRefresh?.().catch(() => {}));
 
 /** Every plugin the host loaded, and the panels plugins provide for this project (web/plugins.js). */
@@ -554,26 +563,32 @@ async function pluginsSection(body, alive) {
     if (!alive() || ask !== readId) return;
     const signature = pluginsSignature(status);
     if (!force && signature === shown) return;
-    const catalog = await call("plugin-catalog");
+    const entries = hostCatalog ?? (await call("plugin-catalog")).entries;
     if (!alive() || ask !== readId) return;
+    hostCatalog = entries;
     shown = signature;
     unmount?.();
-    body.innerHTML = `${line("Plugins this host loaded at its start. Turn one off to stop it in this project only; its saved data stays.", "A plugin with active work, or one this project's checkout needs, cannot be turned off. A panel is the plugin's own code running in this page. A changed plugin shows here after a host restart and a page reload.")}${catalogBlock(catalog.entries)}${pluginCards(status) || `<p class="muted">No plugins are loaded. List one in plugins.json and restart the host.</p>`}`;
+    body.innerHTML = `${line("Plugins this host loaded at its start. Turn one off to stop it in this project only; its saved data stays.", "A plugin with active work, or one this project's checkout needs, cannot be turned off. A panel is the plugin's own code running in this page. A changed plugin shows here after a host restart and a page reload.")}${catalogBlock(entries)}${pluginCards(status) || `<p class="muted">No plugins are loaded. List one in plugins.json and restart the host.</p>`}`;
     unmount = mountPanels(body, state.projectId, status.web);
   };
   pluginsRefresh = draw;
   body.addEventListener("change", async (event) => {
     const toggle = event.target.closest("[data-plugin-toggle]");
     if (!toggle) return;
+    const projectId = state.projectId;
     try {
-      await call("project-plugin", { id: state.projectId, plugin: toggle.dataset.pluginToggle, enabled: toggle.checked });
-      toast(`${toggle.dataset.pluginToggle} ${toggle.checked ? "on" : "off"} in this project.`);
+      await call("project-plugin", { id: projectId, plugin: toggle.dataset.pluginToggle, enabled: toggle.checked });
+      if (state.projectId === projectId) toast(`${toggle.dataset.pluginToggle} ${toggle.checked ? "on" : "off"} in this project.`);
     } catch (error) {
-      sayFail(error);
+      if (state.projectId === projectId) sayFail(error);
     }
     if (alive()) await draw(true);
   });
-  wireCatalog(body, [], () => showSection("deploy"));
+  wireCatalog(
+    body,
+    () => showSection("deploy"),
+    (entries) => (hostCatalog = entries),
+  );
   await draw(true);
 }
 

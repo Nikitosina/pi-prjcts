@@ -35,6 +35,7 @@ assert.deepEqual(globalThis.sharedCalls, ["repository", "applies"]);
   assert.deepEqual(globalThis.sharedCalls, [], "W2 no isRoot for a project with the plugin off");
   plugins.forProject(project({}));
   assert.ok(globalThis.sharedCalls.includes("isRoot"), "W2 positive control: another project asks the plugin");
+  assert.equal(globalThis.sharedCalls.filter((name) => name === "isRoot").length, 1, "W3 one status read looks at the checkout once, not once per plugin");
   const lock = plugins.forProject(project({})).find((item) => item.name === "shared")?.lock;
   assert.equal(lock, null, "W2 a git checkout does not lock the plugin on");
 }

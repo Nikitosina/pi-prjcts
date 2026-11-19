@@ -229,6 +229,7 @@ const CATALOG_STATES = {
 };
 
 /** The plugins shipped with pi-prjcts and what this host does with each; the loaded plugins' cards stay below it. */
+const catalogAlert = (error) => `<p class="plugin-error small" role="alert">${esc(error)}</p>`;
 export function catalogBlock(entries, error = "") {
   const rows = entries
     .map((entry) => {
@@ -248,24 +249,29 @@ export function catalogBlock(entries, error = "") {
       return `<div class="catalog-row" data-catalog="${esc(entry.id)}" data-state="${esc(entry.state)}"><div class="plugin-head"><span class="mono">${esc(entry.name)}</span>${entry.version ? `<span class="muted small mono">${esc(entry.version)}</span>` : ""}<span class="badge ${state.tone}"${entry.state === "failed" ? ' data-tone="bad"' : ""}>${state.label}</span>${action}</div><p class="small muted">${esc(entry.description)}</p>${note}</div>`;
     })
     .join("");
-  return `<section class="plugin-catalog" aria-label="Plugins shipped with pi-prjcts"><h2 class="small">Shipped with pi-prjcts</h2><p class="small muted">Adding one writes it to this host's plugins.json for every project. Nothing restarts; the plugin loads at the next host restart.</p>${error ? `<p class="plugin-error small" role="alert">${esc(error)}</p>` : ""}${rows}</section>`;
+  return `<section class="plugin-catalog" aria-label="Plugins shipped with pi-prjcts"><h2 class="small">Shipped with pi-prjcts</h2><p class="small muted">Adding one writes it to this host's plugins.json for every project. Nothing restarts; the plugin loads at the next host restart.</p>${error ? catalogAlert(error) : ""}${rows}</section>`;
 }
 
-/** Wires the catalog block inside `container`: one request per click, the block redrawn with the host's answer. `openDeploy` shows Settings → Deploy. */
-export function wireCatalog(container, entries, openDeploy) {
-  const draw = (list, error = "") => {
-    entries = list;
-    container.querySelector(".plugin-catalog").outerHTML = catalogBlock(list, error);
-  };
+/**
+ * Wires the catalog block inside `container`: one request per click, the block redrawn with the host's answer (`onEntries` gets it).
+ * A refused request keeps the rows and shows its error above them. `openDeploy` shows Settings → Deploy.
+ */
+export function wireCatalog(container, openDeploy, onEntries = () => {}) {
   container.addEventListener("click", async (event) => {
     if (event.target.closest("[data-catalog-deploy]")) return openDeploy();
     const button = event.target.closest("[data-catalog-activate]");
     if (!button || button.disabled) return;
     button.disabled = true;
     try {
-      draw((await call("plugin-activate", { plugin: button.dataset.catalogActivate })).entries);
+      const { entries } = await call("plugin-activate", { plugin: button.dataset.catalogActivate });
+      onEntries(entries);
+      const block = container.querySelector(".plugin-catalog");
+      if (block) block.outerHTML = catalogBlock(entries);
     } catch (error) {
-      draw(entries, messageOf(error));
+      button.disabled = false;
+      const block = container.querySelector(".plugin-catalog");
+      block?.querySelector("[role=alert]")?.remove();
+      block?.querySelector("h2 + p")?.insertAdjacentHTML("afterend", catalogAlert(messageOf(error)));
     }
   });
 }

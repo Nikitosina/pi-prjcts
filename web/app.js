@@ -82,6 +82,7 @@ async function select(projectId, chatId = "main", { keepFocus = false } = {}) {
       },
       (up) => {
         state.connected = up;
+        emit("connection", up);
         paintStatusLine();
       },
     );

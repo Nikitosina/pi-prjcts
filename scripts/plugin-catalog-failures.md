@@ -38,3 +38,6 @@ Combined with the per-project switches (plugin-enable-failures.md); e2e checks C
 21. The merged Settings → Plugins list loses the catalog block when a switch redraws it, wires the activate handler once per redraw, or shows the catalog row as off for a project that turned the plugin off. The catalog is host-wide: its row stays and says loaded; only the project's switch changes.
 22. A refused disable (unresolved write) redraws the list without the catalog block, or changes `plugins.json`.
 23. Chat sends or project switches read the catalog. It is read only when Settings → Plugins draws (the first read, and a redraw after a changed switch); no timer, no feed topic.
+24. A refused activation redraws the block from an empty list, so every catalog row disappears and nothing can be retried. The error shows above the existing rows and the button is usable again. e2e C14.
+25. A switch answer for a project that is no longer selected toasts or says "on/off in this project" in the new project. The answer is shown only while the clicked project is still selected. e2e C13.
+26. Selecting a project with Settings open reads the catalog again. The host-wide catalog is read once per opening of Settings and again after the connection dropped; activations update it. e2e C12.

@@ -172,6 +172,7 @@ await kit.run(async () => {
   await rpc({ action: "plugin", plugin: "gated", method: "mark-uncertain", params: { projectId: alpha, mode: "yes" } });
   await click(toggle("gated"));
   await page.waitFor(`/unknown outcome/.test(document.body.innerText)`, "unresolved write refusal shown");
+  await page.waitFor(`document.querySelector(${js(toggle("gated"))})?.checked`, "the refused switch redrawn on");
   check(
     "C7 the refused switch stays on and the plugin is still enabled",
     (await entry(alpha, "gated")).enabled === true && (await page.evaluate(`document.querySelector(${js(toggle("gated"))}).checked`)),
@@ -205,4 +206,64 @@ await kit.run(async () => {
   await click(`.tree-head[data-project="${alpha}"]`);
   await kit.delay(1500);
   check("C11 chat sends and project switches never read the catalog", (await page.evaluate("window.__catalogCalls")) === 0);
+
+  // C12: with Settings → Plugins open, selecting another project keeps the host-scoped catalog without reading it again.
+  const select = async (id) => {
+    await page.evaluate(`import('/state.js').then((m) => m.emit('select-request', { projectId: ${js(id)}, chatId: 'main' }))`);
+    await page.waitFor(`location.search.includes(${js(id)})`, "project selected");
+  };
+  await openPlugins();
+  await page.waitFor(`!!document.querySelector(${js(toggle("second"))})`, "second switch");
+  await page.evaluate("window.__catalogCalls = 0");
+  await select(beta);
+  await page.waitFor(
+    `document.querySelector("#settings .plugin-catalog") && !!document.querySelector(${js(toggle("second"))})`,
+    "beta redraw",
+  );
+  await select(alpha);
+  await kit.delay(1000);
+  check("C12 selecting projects with Settings open does not read the catalog again", (await page.evaluate("window.__catalogCalls")) === 0);
+  check("C12 the catalog rows stay drawn", (await rowState("tasks")) === "loaded" && (await rowState("simulator")) === "available");
+
+  // C13: the answer of a switch clicked in one project says nothing in another project after a selection.
+  await page.evaluate(
+    `(() => { const original = window.fetch; window.__fetchOriginal = original; window.__held = new Promise((resolve) => (window.__release = resolve)); window.fetch = async (input, init) => { if (typeof init?.body === "string" && /"action":"project-plugin"/.test(init.body)) await window.__held; return original(input, init); }; })()`,
+  );
+  await click(toggle("second"));
+  await select(beta);
+  await page.waitFor(`!!document.querySelector(${js(toggle("second"))})`, "beta switches");
+  await page.evaluate("window.__release()");
+  await kit.eventually(async () => (await entry(alpha, "second")).enabled === false, "the held switch reached the host");
+  await kit.delay(500);
+  check(
+    "C13 no success toast or status for the other project",
+    await page.evaluate(
+      `!/second (on|off) in this project/.test(document.querySelector("#toasts").innerText + document.querySelector("#settings .settings-status").innerText)`,
+    ),
+  );
+  check("C13 the project that was selected keeps its own switch", (await entry(beta, "second")).enabled === true);
+  await page.evaluate("window.fetch = window.__fetchOriginal");
+  await set(alpha, "second", true);
+
+  // C14: a refused activation keeps every catalog row and the button, so the owner can retry.
+  await select(alpha);
+  await page.waitFor(`document.querySelector(${js(row("simulator"))})`, "rows after selection");
+  await page.evaluate(
+    `(() => { const original = window.fetch; window.__fetchOriginal = original; window.fetch = async (input, init) => typeof init?.body === "string" && /"action":"plugin-activate"/.test(init.body) ? new Response(JSON.stringify({ ok: false, error: "disk full" }), { status: 500 }) : original(input, init); })()`,
+  );
+  await click(`${row("simulator")} [data-catalog-activate]`);
+  await page.waitFor(`/disk full/.test(document.querySelector("#settings .plugin-catalog").innerText)`, "activation error shown");
+  check("C14 both rows stay after the refusal", (await rowState("tasks")) === "loaded" && (await rowState("simulator")) === "available");
+  check(
+    "C14 the button is usable again",
+    await page.evaluate(`document.querySelector(${js(`${row("simulator")} [data-catalog-activate]`)})?.disabled === false`),
+  );
+  await shot("09-activation-refused");
+  await page.evaluate("window.fetch = window.__fetchOriginal");
+  await click(`${row("simulator")} [data-catalog-activate]`);
+  await page.waitFor(`document.querySelector(${js(row("simulator"))})?.dataset.state === "configured"`, "retry configured it");
+  check(
+    "C14 the retry works and clears the error",
+    await page.evaluate(`!/disk full/.test(document.querySelector("#settings .plugin-catalog").innerText)`),
+  );
 });
