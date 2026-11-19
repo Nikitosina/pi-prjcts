@@ -70,6 +70,7 @@ export default {
       leaseName,
       lifecycle: {
         pause: simulators.pause,
+        unresolved: simulators.unresolved,
         close: async () => {
           clearInterval(pruning);
           await simulators.close();

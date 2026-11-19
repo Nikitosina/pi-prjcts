@@ -138,6 +138,22 @@ function requiredBy(project: Project, name: string, checkout: () => string | nul
   return null;
 }
 
+/** Takes the held pauses of a project's disabled plugins again after a lifecycle transition resumed the plugins' hooks. */
+function keepHeld(projectId: string) {
+  for (const [held, resume] of [...heldPauses]) {
+    const [id, name] = held.split("\0");
+    if (id !== projectId) continue;
+    release(resume);
+    heldPauses.delete(held);
+    try {
+      const paused = [...builtins(), ...loaded].find((entry) => entry.plugin === name)?.capabilities.lifecycle?.pause?.(projectId);
+      if (paused) heldPauses.set(held, paused);
+    } catch {
+      /* the stored flag already refuses every entry of the plugin */
+    }
+  }
+}
+
 /** Takes the plugin's lifecycle pause for a disable; a plugin whose pause refuses blocks the disable. */
 function pauseOf(project: Project, name: string): (() => void) | undefined {
   const lifecycle = [...builtins(), ...loaded].find((entry) => entry.plugin === name)?.capabilities.lifecycle;
@@ -207,6 +223,19 @@ export const plugins = {
       clearTimeout(timer);
     }
   },
+  /** Why the plugin cannot be turned off while it holds an unresolved write outside the Durable store (its lifecycle `unresolved` hook), or null. Fails closed. */
+  unresolvedOutside: (projectId: string, name: string): string | null => {
+    const hook = [...builtins(), ...loaded].find((entry) => entry.plugin === name)?.capabilities.lifecycle?.unresolved;
+    if (!hook) return null;
+    try {
+      const reason = hook(projectId);
+      if (reason === null) return null;
+      if (typeof reason === "string" && reason) return `Cannot disable "${name}": it has a write with an unknown outcome in this project (${reason}).`;
+      throw new Error("the check did not answer with a reason or null");
+    } catch (error) {
+      return `Cannot disable "${name}": its unresolved writes could not be checked (${message(error)}). Try again.`;
+    }
+  },
   /**
    * Turns the plugin off once its unresolved writes are known to be none. The lifecycle pause is taken first, so the plugin's own
    * background work cannot finish a write after the check; work that begins during the check (the gate's started count) refuses
@@ -222,7 +251,7 @@ export const plugins = {
     const paused = pauseOf(project, name);
     let latest: Project;
     try {
-      const unresolved = await plugins.unresolvedWrites(name, root);
+      const unresolved = (await plugins.unresolvedWrites(name, root)) ?? plugins.unresolvedOutside(project.id, name);
       if (unresolved) throw new Error(unresolved);
       if (gate.started(project.id, name) !== before)
         throw new Error(`Cannot disable "${name}": work began while its writes were being checked. Try again.`);
@@ -373,17 +402,16 @@ export const plugins = {
         }),
       ];
     }),
-  /** Runs every plugin's lifecycle pause; one refusal resumes the others and refuses the change. Returns the combined resume. */
+  /**
+   * Runs every plugin's lifecycle pause; one refusal resumes the others and refuses the change. Returns the combined resume.
+   * A pause held by a plugin disable is the host's to keep: a plugin whose hook is one flag per project loses it when the transition
+   * resumes, so each held pause of this project is released and taken again after the resumes.
+   */
   pauseLifecycle: (projectId: string): (() => void) => {
     const resumes: Array<() => void> = [];
     const resumeAll = () => {
-      for (const resume of resumes.splice(0).reverse()) {
-        try {
-          resume();
-        } catch {
-          /* resuming never blocks the host */
-        }
-      }
+      for (const resume of resumes.splice(0).reverse()) release(resume);
+      keepHeld(projectId);
     };
     try {
       for (const hooks of each((caps) => caps.lifecycle)) if (hooks.pause) resumes.push(hooks.pause(projectId));
@@ -391,7 +419,12 @@ export const plugins = {
       resumeAll();
       throw error;
     }
-    return resumeAll;
+    let resumed = false;
+    return () => {
+      if (resumed) return;
+      resumed = true;
+      resumeAll();
+    };
   },
   /** Cleanup routine steps of loaded plugins, by plugin name. */
   cleanupSteps: (projectId: string) =>
@@ -483,6 +516,7 @@ export const plugins = {
     loaded.length = 0;
     statuses.length = 0;
     attempts.clear();
+    heldPauses.clear();
     loading = undefined;
   },
 };
@@ -587,7 +621,7 @@ function validate(caps: PluginCapabilities): void {
   if (caps.leaseName !== undefined && typeof caps.leaseName !== "function") throw new Error("leaseName must be a function");
   if (caps.cleanup !== undefined && typeof caps.cleanup !== "function") throw new Error("cleanup must be a function");
   if (caps.usage !== undefined && typeof caps.usage !== "function") throw new Error("usage must be a function");
-  for (const hook of ["pause", "close"] as const)
+  for (const hook of ["pause", "unresolved", "close"] as const)
     if (caps.lifecycle?.[hook] !== undefined && typeof caps.lifecycle[hook] !== "function")
       throw new Error(`lifecycle.${hook} must be a function`);
   for (const file of ["script", "style"] as const) {

@@ -487,6 +487,8 @@ export type WorkerToolsProvider = {
 export type LifecycleHooks = {
   /** Called before a project lifecycle change (pause, resume, archive, delete); throw to refuse it. Returns the resume callback. */
   pause?(projectId: string): () => void;
+  /** A write of this project whose outcome is unknown and kept outside the Durable store; the host refuses to turn the plugin off while it answers a reason. Fails closed: a throw refuses too. */
+  unresolved?(projectId: string): string | null;
   /** Host shutdown: abort outstanding work. */
   close?(): Promise<void>;
 };
