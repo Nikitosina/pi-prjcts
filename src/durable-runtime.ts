@@ -1146,13 +1146,17 @@ export async function openDurableProject(input: {
     });
     stopTaskWorkspaces = taskWorkspaces.close;
     // Scouts and reviewers read the cwd they were configured with: their own worktree at a commit, a worker's worktree or the checkout.
-    const readOnlyCode = readOnlyCodeTools(project.cwd, async (api, context) => {
-      const cwd = (await api.agent(context)).cwd;
-      const ofWorker = (await api.snapshot(Jobs, ROOT_CONVERSATION_ID, context))?.subagents[String(api.conversationId)] !== undefined;
-      if ((ofWorker && !cwd) || (cwd && !existsSync(cwd)))
-        throw new Error(`This thread's checkout ${cwd || "(none)"} is missing; it is not read from the project checkout instead.`);
-      return cwd;
-    });
+    const readOnlyCode = readOnlyCodeTools(
+      project.cwd,
+      async (api, context) => {
+        const cwd = (await api.agent(context)).cwd;
+        const ofWorker = (await api.snapshot(Jobs, ROOT_CONVERSATION_ID, context))?.subagents[String(api.conversationId)] !== undefined;
+        if ((ofWorker && !cwd) || (cwd && !existsSync(cwd)))
+          throw new Error(`This thread's checkout ${cwd || "(none)"} is missing; it is not read from the project checkout instead.`);
+        return cwd;
+      },
+      () => loadProject(project.id),
+    );
     /** The safe worktree rule and the cache sweep; caches the sweep could not remove are listed. */
     type WorktreeCleanup = Awaited<ReturnType<typeof cleanupWorktrees>> & { unremovedCaches: string[] };
     let cleanup: (onProgress?: (done: number, total: number) => void) => Promise<WorktreeCleanup> = async () => {
@@ -1298,7 +1302,10 @@ export async function openDurableProject(input: {
       readDrift: async (agent) => {
         const target = (await harness?.snapshot(Jobs, ROOT_CONVERSATION_ID, context))?.agents[agent.readRef ?? ""];
         const cwd = target ? await conversationCwd(target.conversationId) : undefined;
-        const [head, dirty] = cwd && existsSync(cwd) ? await Promise.all([headCommit(cwd), changedFiles(cwd)]) : [null, null];
+        const [head, dirty] =
+          cwd && existsSync(cwd)
+            ? await Promise.all([headCommit(cwd, loadProject(project.id)), changedFiles(cwd, loadProject(project.id))])
+            : [null, null];
         if (head === agent.readHead && dirty?.length === 0) return null;
         const what =
           head === null
@@ -1327,7 +1334,7 @@ export async function openDurableProject(input: {
             const cwd = await conversationCwd(target.conversationId);
             if (!cwd || !existsSync(cwd))
               throw new Error(`Agent ${agent.readRef} has no worktree to read (it never started or was cleaned up)`);
-            const [dirty, head] = await Promise.all([changedFiles(cwd), headCommit(cwd)]);
+            const [dirty, head] = await Promise.all([changedFiles(cwd, loadProject(project.id)), headCommit(cwd, loadProject(project.id))]);
             if (dirty === null || dirty.length || !head)
               throw new Error(
                 `Agent ${agent.readRef}'s worktree ${dirty?.length ? "has uncommitted changes" : "status is unreadable"}. Ask it to commit, then spawn the reader with that full commit SHA.`,
@@ -1447,10 +1454,10 @@ export async function openDurableProject(input: {
               taskText: "",
             })
           : undefined;
-        if (!held) return confirmCheckout(cwd);
+        if (!held) return confirmCheckout(cwd, loadProject(project.id));
         if (!existsSync(cwd) || realpathSync(held.cwd) !== realpathSync(cwd))
           return { refusal: "The directory is not the checkout this task helper owns" };
-        if (!held.state) return confirmCheckout(cwd);
+        if (!held.state) return confirmCheckout(cwd, loadProject(project.id));
         if (!FULL_COMMIT.test(held.state.revision)) return { refusal: "The task checkout's provider reported no commit" };
         return held.state.clean
           ? { sha: held.state.revision }
@@ -2564,7 +2571,7 @@ export async function openDurableProject(input: {
       },
       workerDiff: async (threadId, base, page) => {
         assertOpen();
-        return workerChanges(await agentCwd(threadId), base, page);
+        return workerChanges(await agentCwd(threadId), base, { ...page, project: loadProject(project.id) });
       },
       workerRead: async (threadId, options = {}) => {
         assertOpen();

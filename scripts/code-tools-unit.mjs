@@ -204,6 +204,24 @@ try {
   assert.match(kindStat, /^\+2 -0 u\.swift$/m, "F15 an untracked block without a hunk header counts");
   assert.equal(paths("narrowing").at(-1), null, "no path when none was asked");
 
+  // F20 a project that turned the checkout kind's plugin off is not served through it: the plugin's diff never runs for that project.
+  {
+    const logged = () =>
+      readFileSync(join(kinds.narrowing.root, ".narrowing", "paths.log"), "utf8")
+        .trim()
+        .split("\n").length;
+    const before = logged();
+    const off = readOnlyCodeTools(join(kinds.narrowing.root, "proj"), undefined, () => ({ disabledPlugins: ["narrowing"] })).tools;
+    await assert.rejects(
+      () => runIn(off, "code_diff", {}),
+      /not a git checkout/,
+      "F20 a disabled kind's checkout has no diff for the project",
+    );
+    assert.equal(logged(), before, "F20 the disabled plugin's codeDiff did not run");
+    const on = readOnlyCodeTools(join(kinds.narrowing.root, "proj"), undefined, () => ({})).tools;
+    assert.match(await runIn(on, "code_diff", {}), /narrowing/, "F20 positive control: the same project with the plugin on");
+  }
+
   // F8 a plugin without codeDiffPath: path is refused before its diff runs and no note advises it.
   await assert.rejects(
     () => runIn(kinds.legacy.tools, "code_diff", { path: "k.swift" }),

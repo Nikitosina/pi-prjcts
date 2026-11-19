@@ -230,7 +230,8 @@ export const plugins = {
     try {
       const reason = hook(projectId);
       if (reason === null) return null;
-      if (typeof reason === "string" && reason) return `Cannot disable "${name}": it has a write with an unknown outcome in this project (${reason}).`;
+      if (typeof reason === "string" && reason)
+        return `Cannot disable "${name}": it has a write with an unknown outcome in this project (${reason}).`;
       throw new Error("the check did not answer with a reason or null");
     } catch (error) {
       return `Cannot disable "${name}": its unresolved writes could not be checked (${message(error)}). Try again.`;

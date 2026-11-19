@@ -4,6 +4,9 @@ import { dirname, join } from "node:path";
 import { plugins } from "./plugins.ts";
 import type { Project } from "./state.ts";
 
+/** What a project-scoped lookup needs of the project: the plugins it turned off are not asked about a folder. */
+type ProjectScope = Pick<Project, "disabledPlugins">;
+
 /** Version-control binaries. */
 export const cli = {
   git: () => "/usr/bin/git",
@@ -30,16 +33,16 @@ export function runCli(file: string, args: string[], cwd?: string): Promise<CliR
   );
 }
 /** HEAD commit of a worktree (git or a plugin kind); null when it cannot be read. */
-export async function headCommit(cwd: string): Promise<string | null> {
-  const head = await readHead(cwd);
+export async function headCommit(cwd: string, project?: ProjectScope): Promise<string | null> {
+  const head = await readHead(cwd, project);
   return head.kind === "commit" ? head.sha : null;
 }
 export type HeadRead = { kind: "commit"; sha: string } | { kind: "unreadable"; reason: string };
 /** HEAD commit of a worktree through its checkout kind (a plugin kind's provider, else git), or why it cannot be read. */
-export async function readHead(cwd: string): Promise<HeadRead> {
+export async function readHead(cwd: string, project?: ProjectScope): Promise<HeadRead> {
   const unreadable = (reason: string): HeadRead => ({ kind: "unreadable", reason });
   try {
-    const found = findVcsRoot(cwd);
+    const found = findVcsRoot(cwd, project);
     const provider = found && found.kind !== "git" ? plugins.vcsProvider(found.kind) : undefined;
     if (found && provider) {
       const head = (await provider.workerState(found.root)).head.trim();
@@ -55,19 +58,19 @@ export async function readHead(cwd: string): Promise<HeadRead> {
   }
 }
 /** Uncommitted paths of a worktree (git or a plugin kind, by what is found above it); null when the status cannot be read. */
-export async function changedFiles(cwd: string): Promise<string[] | null> {
-  const found = findVcsRoot(cwd);
+export async function changedFiles(cwd: string, project?: ProjectScope): Promise<string[] | null> {
+  const found = findVcsRoot(cwd, project);
   const provider = found && found.kind !== "git" ? plugins.vcsProvider(found.kind) : undefined;
   if (provider) return provider.changedFiles(cwd);
   const result = await runCli(cli.git(), ["-C", cwd, "status", "--porcelain", "--untracked-files=normal"]);
   return result.code === 0 ? result.stdout.split("\n").filter(Boolean) : null;
 }
 /** A worktree's HEAD commit when it is readable and has no uncommitted changes (git or a plugin kind), else why a reviewer must not read it. */
-export async function confirmCheckout(cwd: string): Promise<{ sha: string } | { refusal: string }> {
+export async function confirmCheckout(cwd: string, project?: ProjectScope): Promise<{ sha: string } | { refusal: string }> {
   if (!existsSync(cwd)) return { refusal: `The checkout ${cwd} does not exist` };
-  const head = await readHead(cwd);
+  const head = await readHead(cwd, project);
   if (head.kind !== "commit") return { refusal: `The checkout's HEAD cannot be read (${head.reason})` };
-  const dirty = await changedFiles(cwd);
+  const dirty = await changedFiles(cwd, project);
   if (dirty === null) return { refusal: "The checkout's status cannot be read" };
   if (dirty.length) return { refusal: `The checkout has ${dirty.length} uncommitted change(s); commit them first` };
   return { sha: head.sha };
