@@ -1,6 +1,18 @@
 // Unit: a frozen Follow batch delivers nothing of a plugin the project has turned off since the batch was frozen, and keeps the rest.
 import assert from "node:assert/strict";
-import { deliverable, deliveryOf, groupEventId, groupProviders, ownerKey, prLabel, priorRepo, prRef, repoKey, scopeBare, settle } from "../src/follow-batch.ts";
+import {
+  deliverable,
+  deliveryOf,
+  groupEventId,
+  groupProviders,
+  ownerKey,
+  prLabel,
+  priorRepo,
+  prRef,
+  repoKey,
+  scopeBare,
+  settle,
+} from "../src/follow-batch.ts";
 
 const group = (provider, chat, count) => ({
   input: { eventId: `e-${provider}-${chat}`, kind: `${provider}.follow`, payload: provider },
@@ -87,7 +99,11 @@ assert.deepEqual(groupProviders(batch, { input: batch.groups[0].input, chat: 1 }
 
 // B6 what a scheduler answer means for a group: reached the chat, proven not to have, or unknown. Only the middle one gets a new attempt id.
 assert.equal(deliveryOf({ status: "submitted", submissionId: 3 }), "submitted", "B6 submitted");
-assert.equal(deliveryOf({ status: "interrupted", submissionId: null }), "refused", "B6 interrupted before any submission is a proven refusal");
+assert.equal(
+  deliveryOf({ status: "interrupted", submissionId: null }),
+  "refused",
+  "B6 interrupted before any submission is a proven refusal",
+);
 assert.equal(deliveryOf({ status: "interrupted", submissionId: 4 }), "submitted", "B6 an aborted run was submitted");
 assert.equal(deliveryOf({ status: "failed", submissionId: 4 }), "submitted", "B6 a failed run was submitted");
 assert.equal(deliveryOf({ status: "failed", submissionId: null }), "uncertain", "B6 a failure without a receipt is not proven");
@@ -99,17 +115,64 @@ assert.equal(groupEventId({ ...group("gated", 1, 1), attempt: 2 }), "e-gated-1~2
 // B7 settling a delivery: confirmed groups leave, the rest wait with their provider's record and notices; a refusal bumps the attempt.
 const [gh, gated, other] = [group("github", 1, 2), group("gated", 1, 3), group("gated", 2, 4)];
 const two = { ...batch, groups: [gh, gated, other], count: 9 };
-const mixed = settle(two, new Map([[gh, "submitted"], [gated, "submitted"], [other, "refused"]]), []);
+const mixed = settle(
+  two,
+  new Map([
+    [gh, "submitted"],
+    [gated, "submitted"],
+    [other, "refused"],
+  ]),
+  [],
+);
 assert.deepEqual(mixed.confirmed, [gh, gated], "B7 the submitted groups are confirmed");
-assert.deepEqual(mixed.waiting.map((item) => [item.chat, item.attempt, item.waiting]), [[2, 1, "refused"]], "B7 the refused one waits as the next attempt");
+assert.deepEqual(
+  mixed.waiting.map((item) => [item.chat, item.attempt, item.waiting]),
+  [[2, 1, "refused"]],
+  "B7 the refused one waits as the next attempt",
+);
 assert.equal(mixed.count, 5, "B7 only confirmed groups are counted");
 assert.deepEqual(mixed.heldRepos, ["x/y"], "B7 the record of the provider with a waiting group stays out");
-assert.deepEqual(mixed.publish.map((item) => item.key), ["gh:a/b#1:merged"], "B7 GitHub's notice is published (its notice key says gh)");
-assert.deepEqual(mixed.carry.map((item) => item.key), ["gated:x/y#2:ci"], "B7 the waiting provider's notice is carried");
-const off = settle(two, new Map([[gh, "submitted"], [gated, "held"], [other, "held"]]), ["gated"]);
-assert.deepEqual(off.waiting.map((item) => [item.attempt ?? 0, item.waiting]), [[0, "held"], [0, "held"]], "B7 held groups keep their attempt");
-const uncertain = settle(two, new Map([[gh, "submitted"], [gated, "uncertain"], [other, "submitted"]]), []);
-assert.deepEqual(uncertain.waiting.map((item) => [item.attempt ?? 0, item.waiting]), [[0, "uncertain"]], "B7 an uncertain group keeps its id");
+assert.deepEqual(
+  mixed.publish.map((item) => item.key),
+  ["gh:a/b#1:merged"],
+  "B7 GitHub's notice is published (its notice key says gh)",
+);
+assert.deepEqual(
+  mixed.carry.map((item) => item.key),
+  ["gated:x/y#2:ci"],
+  "B7 the waiting provider's notice is carried",
+);
+const off = settle(
+  two,
+  new Map([
+    [gh, "submitted"],
+    [gated, "held"],
+    [other, "held"],
+  ]),
+  ["gated"],
+);
+assert.deepEqual(
+  off.waiting.map((item) => [item.attempt ?? 0, item.waiting]),
+  [
+    [0, "held"],
+    [0, "held"],
+  ],
+  "B7 held groups keep their attempt",
+);
+const uncertain = settle(
+  two,
+  new Map([
+    [gh, "submitted"],
+    [gated, "uncertain"],
+    [other, "submitted"],
+  ]),
+  [],
+);
+assert.deepEqual(
+  uncertain.waiting.map((item) => [item.attempt ?? 0, item.waiting]),
+  [[0, "uncertain"]],
+  "B7 an uncertain group keeps its id",
+);
 const legacy = settle({ ...batch, groups: [{ input: batch.groups[0].input, chat: 1 }], count: 4 }, new Map(), []);
 assert.deepEqual([legacy.heldAll, legacy.heldRepos.length, legacy.count], [true, 2, 0], "B7 an unresolved legacy group holds every record");
 
@@ -120,8 +183,16 @@ const fix = (sha) => ({ sha, at: 1, mode: "none", workId: null, threadId: null, 
 const repos = { "a/b": record("ghost"), "c/d": record("ghost"), "e/f": record("github"), "g/h": record(), "ghost::c/d": record("ghost") };
 const fixes = { "a/b#1": [fix("1")], "c/d#2": [fix("2")], "e/f#3": [fix("3")] };
 assert.equal(scopeBare(repos, fixes, ["c/d"]), true, "B8 something moved");
-assert.deepEqual(Object.keys(repos).sort(), ["e/f", "g/h", "ghost::a/b", "ghost::c/d"].sort(), "B8 tagged bare records are scoped; others stay");
+assert.deepEqual(
+  Object.keys(repos).sort(),
+  ["e/f", "g/h", "ghost::a/b", "ghost::c/d"].sort(),
+  "B8 tagged bare records are scoped; others stay",
+);
 assert.equal(repos["ghost::a/b"].repositoryId, "a/b", "B8 the scoped record names its repository");
-assert.deepEqual(Object.keys(fixes).sort(), ["c/d#2", "e/f#3", "ghost:a/b#1", "ghost:c/d#2"].sort(), "B8 unambiguous attempts move, ambiguous ones are copied");
+assert.deepEqual(
+  Object.keys(fixes).sort(),
+  ["c/d#2", "e/f#3", "ghost:a/b#1", "ghost:c/d#2"].sort(),
+  "B8 unambiguous attempts move, ambiguous ones are copied",
+);
 assert.equal(scopeBare(repos, fixes, ["c/d"]), false, "B8 a second run changes nothing");
 console.log("follow-batch-unit: ok");

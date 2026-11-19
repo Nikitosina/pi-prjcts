@@ -14,7 +14,10 @@ process.env.TWIN_ALPHA_DATA = dataFile("alpha");
 process.env.TWIN_BETA_DATA = dataFile("beta");
 const gh = join(home, "fake-gh");
 writeFileSync(gh, `#!/bin/sh\nexec "${process.execPath}" "${new URL("./fake-gh.mjs", import.meta.url).pathname}" "$@"\n`, { mode: 0o755 });
-writeFileSync(join(home, "gh-state.json"), JSON.stringify({ repo: { id: 4242, full_name: "acme/mari", default_branch: "main" }, issues: [], checks: {}, pulls: [] }));
+writeFileSync(
+  join(home, "gh-state.json"),
+  JSON.stringify({ repo: { id: 4242, full_name: "acme/mari", default_branch: "main" }, issues: [], checks: {}, pulls: [] }),
+);
 writeFileSync(join(home, "gh-calls.jsonl"), "");
 process.env.PI_PROJECTS_GH_CLI = gh;
 process.env.FAKE_GH_STATE = join(home, "gh-state.json");
@@ -555,13 +558,23 @@ await scenario("F11", async () => {
   saveProject({
     ...loadProject(project.id),
     githubAuthorization: [
-      { repositoryId: "acme/mari", numericId: 4242, branchPrefix: "pi/", baseBranch: "main", owner: "o", workspaceRevision: "0".repeat(64), at: "" },
+      {
+        repositoryId: "acme/mari",
+        numericId: 4242,
+        branchPrefix: "pi/",
+        baseBranch: "main",
+        owner: "o",
+        workspaceRevision: "0".repeat(64),
+        at: "",
+      },
     ],
   });
   const head = "a1".repeat(20);
   const stored = {
     baselined: true,
-    prs: { 7: { state: "open", head, ref: "alpha/7", title: "PR 7", updatedAt: "", ci: null, lastReview: 0, lastComment: 0, lastLineComment: 0 } },
+    prs: {
+      7: { state: "open", head, ref: "alpha/7", title: "PR 7", updatedAt: "", ci: null, lastReview: 0, lastComment: 0, lastLineComment: 0 },
+    },
     provider: "alpha",
   };
   const attemptOf = { sha: head, at: 1, mode: "follow-up", workId: "w0", threadId: "t5", error: null };
@@ -646,7 +659,11 @@ await scenario("F12", async () => {
     "F12 after the enable the second chat gets its event and the first one nothing again",
   );
   assert.equal(doc(root).pending, undefined, "F12 nothing is pending afterwards");
-  assert.equal(doc(root).repos["alpha::alpha/repo"].prs[8].ci?.result, "passed", "F12 the record advanced once its last group was confirmed");
+  assert.equal(
+    doc(root).repos["alpha::alpha/repo"].prs[8].ci?.result,
+    "passed",
+    "F12 the record advanced once its last group was confirmed",
+  );
   await runtime(project, root, { jobs }).poll(true);
   assert.equal(alphaEvents().length, 2, "F12 and later polls announce nothing again");
 });
@@ -689,7 +706,10 @@ await scenario("F14", async () => {
     "F14 each provider's merge asks its own pull",
   );
   assert.equal(delivered(project).length, 2, "F14 both events arrived");
-  assert.ok(delivered(project).every((item) => item.payload.includes("main checkout not pulled: test")), "F14 each with the pull note");
+  assert.ok(
+    delivered(project).every((item) => item.payload.includes("main checkout not pulled: test")),
+    "F14 each with the pull note",
+  );
 });
 
 if (failures.length) {

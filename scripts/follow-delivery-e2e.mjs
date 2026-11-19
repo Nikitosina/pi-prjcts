@@ -179,6 +179,87 @@ await kit.run(async () => {
     );
   }
 
+  // 61: the host's admission turns uncertain between recording an event and submitting it, so its intent is interrupted before the chat; the
+  // poll fails, the host restarts, and the event still arrives once in its chat as a new attempt, with every other event once.
+  {
+    const { id, chats } = await mixed("Refused");
+    hold({ armed: true, skip: 1, hold: true });
+    const polling = rpc({ action: "follow-poll", id }).then(
+      () => "",
+      (error) => error.message,
+    );
+    await kit.eventually(async () => holderStatus()?.holding, "the admission hold was not reached", 200);
+    hold({ hold: false, afterHold: true });
+    const failed = await polling;
+    check("61 the blocked admission fails the poll and keeps the batch", /uncertain effect/.test(failed), failed);
+    hold({ afterHold: false });
+    const before = await allChats(id, chats);
+    check("61 the refused event reached no chat yet", count(before["Chat A"], "Fix login copy") === 0, before);
+    await kit.restartHost();
+    await rpc({ action: "show", id });
+    await rpc({ action: "follow-poll", id });
+    await idle(id);
+    const got = await allChats(id, chats);
+    check(
+      "61 after the restart each event reached its own chat once",
+      count(got["Chat A"], "Fix login copy") === 1 && count(got["Chat B"], "[alpha]") === 1 && count(got.Alerts, "[beta]") === 1,
+      got,
+    );
+    check(
+      "61 and no chat got another provider's event",
+      !count(got["Chat A"], "[alpha]") && !count(got["Chat B"], "Fix login copy") && !got.main.length,
+      got,
+    );
+    const snapshot = (await rpc({ action: "automation-snapshot", id })).follow;
+    check("61 nothing stays undelivered and no error shows", snapshot.undelivered.length === 0 && !snapshot.lastError, snapshot);
+    await rpc({ action: "follow-poll", id });
+    await idle(id);
+    const later = await allChats(id, chats);
+    check("61 another poll delivers nothing more", JSON.stringify(later) === JSON.stringify(got), later);
+  }
+
+  // 63: alpha is switched off while its event waits in a frozen batch; the other providers go on, the event is not lost across a restart, and the
+  // enable delivers it once to its own chat.
+  {
+    const { id, chats } = await mixed("Reenable");
+    hold({ uncertain: true });
+    await rpc({ action: "follow-poll", id }).catch(() => {});
+    await rpc({ action: "project-plugin", id, plugin: "alpha", enabled: false });
+    hold({ uncertain: false });
+    await rpc({ action: "follow-poll", id });
+    await idle(id);
+    const first = await allChats(id, chats);
+    check(
+      "63 the other providers' events arrived while alpha was off",
+      count(first["Chat A"], "Fix login copy") === 1 && count(first.Alerts, "[beta]") === 1 && count(first["Chat B"], "[alpha]") === 0,
+      first,
+    );
+    const waiting = (await rpc({ action: "automation-snapshot", id })).follow.undelivered;
+    check(
+      "63 alpha's event is shown as undelivered",
+      waiting.length === 1 && waiting[0].provider === "alpha" && waiting[0].state === "held",
+      waiting,
+    );
+    await kit.restartHost();
+    await rpc({ action: "show", id });
+    await rpc({ action: "project-plugin", id, plugin: "alpha", enabled: true });
+    await rpc({ action: "follow-poll", id });
+    await idle(id);
+    const got = await allChats(id, chats);
+    check(
+      "63 the enable delivered alpha's event once to its chat, and nothing was repeated",
+      count(got["Chat B"], "[alpha]") === 1 &&
+        count(got["Chat A"], "Fix login copy") === 1 &&
+        count(got.Alerts, "[beta]") === 1 &&
+        count(got.Alerts, "[alpha]") === 0,
+      got,
+    );
+    check("63 nothing stays undelivered", (await rpc({ action: "automation-snapshot", id })).follow.undelivered.length === 0);
+    await rpc({ action: "follow-poll", id });
+    await idle(id);
+    check("63 another poll delivers nothing more", JSON.stringify(await allChats(id, chats)) === JSON.stringify(got));
+  }
+
   // 51 + 53: a disable that arrives while a delivery is held in the host's admission is refused, and the event arrives once.
   {
     const { id, chats } = await mixed("Race");

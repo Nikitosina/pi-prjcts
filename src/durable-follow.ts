@@ -13,7 +13,21 @@ import { plugins } from "./plugins.ts";
 import type { FollowFailure, FollowItem, FollowPrState } from "./plugin-types.ts";
 import { catalog } from "./workspace-authorization.ts";
 import { prNoticeText, pushNotices, type PrNotice } from "./pr-notices.ts";
-import { afterDelivery, deliverable, groupProviders, ownerKey, prLabel, prRef, priorRepo, repoKey } from "./follow-batch.ts";
+import {
+  deliverable,
+  deliveryOf,
+  groupEventId,
+  groupProviders,
+  moveFixes,
+  ownerKey,
+  prLabel,
+  prRef,
+  priorRepo,
+  repoKey,
+  scopeBare,
+  settle,
+  type Delivery,
+} from "./follow-batch.ts";
 import { describeMainPull, type MainPull } from "./main-pull.ts";
 import type { scheduleRuntime } from "./durable-schedule.ts";
 
@@ -33,8 +47,18 @@ type FollowBatch = {
   repos: Record<string, RepoState>;
   notices: PrNotice[];
   count: number;
-  /** `provider` and `count` tag who an event group came from, so a replay can skip a plugin turned off since; absent in older docs. */
-  groups: Array<{ input: Parameters<ReturnType<typeof scheduleRuntime>["ingest"]>[0]; chat: number; provider?: string; count?: number }>;
+  /**
+   * `provider` and `count` tag who an event group came from, so a replay can skip a plugin turned off since (absent in older docs). `attempt`
+   * is the retry after a proven refusal (the event goes out as `<id>~<attempt>`); `waiting` says why an unconfirmed group is still here.
+   */
+  groups: Array<{
+    input: Parameters<ReturnType<typeof scheduleRuntime>["ingest"]>[0];
+    chat: number;
+    provider?: string;
+    count?: number;
+    attempt?: number;
+    waiting?: Exclude<Delivery, "submitted">;
+  }>;
   /** Providers whose plugin the project had turned off when the poll began: their saved records are not this poll's to prune. Absent in older docs. */
   switchedOff?: string[];
 };
@@ -60,16 +84,6 @@ const Follow = defineDoc<FollowState>({
 });
 const own = <T>(record: Record<string, T>, key: string): T | undefined =>
   Object.prototype.hasOwnProperty.call(record, key) ? record[key] : undefined;
-/** Auto-fix attempts an older host stored under a bare `<repository>#<number>` belong to the provider that took the repository over; a scoped list already holding them wins. */
-const moveFixes = (fixes: Record<string, FixAttempt[]>, repositoryId: string, provider: string) => {
-  for (const key of Object.keys(fixes)) {
-    const found = /^(.+)#(\d+)$/.exec(key);
-    if (found?.[1] !== repositoryId) continue;
-    const scoped = prLabel(provider, repositoryId, found[2]);
-    if (!own(fixes, scoped)) fixes[scoped] = fixes[key];
-    delete fixes[key];
-  }
-};
 const clip = (text: unknown, max = 240) => {
   const value = String(text ?? "")
     .replace(/\s+/g, " ")
@@ -327,6 +341,7 @@ export function followRuntime(
       : `auto-fix ${attempt.mode === "follow-up" ? "sent to the thread that opened it" : "dispatched to a new worker"} (thread ${attempt.threadId}, attempt ${number} of ${cap})`;
   }
 
+  const githubRepositoryIds = () => (loadProject(projectId).githubAuthorization ?? []).map((repo) => repo.repositoryId);
   const loadedProviders = () => new Set(plugins.followProviders().map((item) => item.id));
   /**
    * Records this poll did not claim stay when their provider's plugin is not loaded or was off for the project when the poll began, and for
@@ -393,49 +408,68 @@ export function followRuntime(
           .join("; ")}. Merging or closing the PR settles its write.`,
       );
     const target = await fixer.target();
-    let eventId = "";
+    let eventId: string | undefined;
     const off = () => plugins.followProvidersOff(loadProject(projectId));
     const delivering = (group: FollowBatch["groups"][number]) => deliverable(batch, off()).groups.includes(group);
-    const attempted: FollowBatch["groups"] = [],
-      submitted: FollowBatch["groups"] = [];
+    const outcomes = new Map<FollowBatch["groups"][number], Delivery>();
     for (const group of batch.groups) {
       const where = (await fixer.chatConversation(group.chat)) || target;
-      if (!delivering(group)) continue;
-      eventId = group.input.eventId;
+      if (!delivering(group)) {
+        outcomes.set(group, "held");
+        continue;
+      }
       const live = async () => !isClosed() && loadAutomations(projectId).follow.enabled && delivering(group);
-      attempted.push(group);
-      // The delivery is the providers' work until it ends, so a disable is refused meanwhile; checked and counted in one step.
-      const intent = await plugins.followWork(projectId, groupProviders(batch, group), () =>
-        schedules.ingest(group.input, live, undefined, { target: where, automation: true }),
-      );
-      if (intent.status === "submitted") submitted.push(group);
+      let intent: Awaited<ReturnType<typeof schedules.ingest>>;
+      for (;;) {
+        // The delivery is the providers' work until it ends, so a disable is refused meanwhile; checked and counted in one step.
+        intent = await plugins.followWork(projectId, groupProviders(batch, group), () =>
+          schedules.ingest({ ...group.input, eventId: groupEventId(group) }, live, undefined, { target: where, automation: true }),
+        );
+        // A refusal recorded before this call is proven, so the next attempt is safe at once; one made by this call waits for the next poll.
+        if (deliveryOf(intent) === "refused" && intent.duplicate) group.attempt = (group.attempt ?? 0) + 1;
+        else break;
+      }
+      const outcome = deliveryOf(intent);
+      outcomes.set(group, outcome);
+      if (outcome === "submitted") eventId = groupEventId(group);
     }
     const stopped = off(),
-      sent = afterDelivery(batch, attempted, submitted, stopped);
-    // A provider whose events were held back keeps the record it had, so they are announced once it is on again.
-    const held = Object.entries(batch.repos).filter(
-      ([, repo]) => sent.heldAll || (repo.provider && sent.heldProviders.includes(repo.provider)),
-    );
-    const claimed = Object.fromEntries(Object.entries(batch.repos).filter(([key]) => !held.some(([heldKey]) => heldKey === key)));
+      settled = settle(batch, outcomes, stopped),
+      held = new Set(settled.heldRepos);
+    const claimed = Object.fromEntries(Object.entries(batch.repos).filter(([key]) => !held.has(key)));
+    const unsure = settled.waiting.filter((group) => group.waiting !== "held");
     await root.commit(async (tx) => {
       const doc = await tx.doc(Follow, root.id);
-      const keep = new Set(held.map(([key]) => key));
+      scopeBare(doc.repos, doc.fixes, githubRepositoryIds());
+      // A provider with a group still waiting keeps the record it had; the batch holds the advanced one until its last group is confirmed.
       doc.repos = {
         ...foreignRepos(doc.repos, claimed, batch.switchedOff && [...batch.switchedOff, ...stopped]),
-        ...Object.fromEntries(Object.entries(doc.repos).filter(([key]) => keep.has(key))),
+        ...Object.fromEntries(Object.entries(doc.repos).filter(([key]) => held.has(key))),
         ...claimed,
       };
-      pushNotices(doc, sent.notices);
+      pushNotices(doc, settled.publish);
       doc.lastPollAtMs = Date.now();
-      doc.lastError = null;
+      doc.lastError = unsure.length
+        ? `Follow PRs keeps ${unsure.length} event${unsure.length === 1 ? "" : "s"} undelivered until the outcome is known: ${unsure.map((group) => `${group.provider ?? "provider"} ${group.waiting}`).join(", ")}`
+        : null;
       doc.polls++;
-      if (sent.count) {
-        doc.events += sent.count;
+      if (settled.count) {
+        doc.events += settled.count;
         doc.lastEventAtMs = Date.now();
       }
-      delete doc.pending;
+      if (settled.waiting.length)
+        doc.pending = {
+          repos: Object.fromEntries(Object.entries(batch.repos).filter(([key]) => held.has(key))),
+          notices: settled.carry,
+          count: batch.groups.every((group) => group.count !== undefined)
+            ? settled.waiting.reduce((sum, group) => sum + group.count!, 0)
+            : batch.count,
+          groups: settled.waiting,
+          switchedOff: batch.switchedOff,
+        };
+      else delete doc.pending;
     }, BACKGROUND_CONTEXT);
-    return submitted.length ? { events: sent.count, eventId } : { events: 0 };
+    return eventId ? { events: settled.count, eventId } : { events: 0 };
   }
   async function pollOnce(manual: boolean) {
     const config = loadAutomations(projectId);
@@ -458,10 +492,19 @@ export function followRuntime(
     controllers.add(controller);
     try {
       const waits = (await Promise.all(repos.map((repo) => settleClosedGithubWrites(root, repo, controller.signal)))).flat();
-      const state = await read();
-      if (state.pending) return await recordBatch(state.pending, waits);
-      if (!repos.length && !connected.length)
+      // Records an older host stored under a bare key for a provider move to the provider's key first, whichever providers are connected.
+      await root.commit(async (tx) => {
+        const doc = await tx.doc(Follow, root.id);
+        scopeBare(doc.repos, doc.fixes, githubRepositoryIds());
+      }, BACKGROUND_CONTEXT);
+      const state = await read(),
+        leftover = state.pending;
+      if (leftover?.groups.some((group) => group.provider === undefined)) return await recordBatch(leftover, waits);
+      if (!leftover && !repos.length && !connected.length)
         throw new Error("Follow PRs needs a GitHub authorization or a connected provider plugin; connect one in Owner setup");
+      // A provider with an event still waiting is not read again until it is delivered or its outcome is known: its record is in the batch.
+      const waiting = new Set(leftover?.groups.map((group) => group.provider)),
+        contested = (repositoryId: string) => connected.filter((item) => item.repositoryId === repositoryId).length > 1;
       const origin = new Map<Item, string>(),
         items: Item[] = [],
         failed: Failure[] = [],
@@ -470,7 +513,7 @@ export function followRuntime(
         superseded: Array<{ key: string; provider: string }> = [],
         notices: PrNotice[] = [];
       const prior = (provider: string, repositoryId: string) => {
-        const found = priorRepo(state.repos, provider, repositoryId),
+        const found = priorRepo(state.repos, provider, repositoryId, contested(repositoryId)),
           key = repoKey(provider, repositoryId);
         if (found.record) priors[key] = found.record;
         if (found.superseded) {
@@ -479,7 +522,7 @@ export function followRuntime(
         }
         return found.record;
       };
-      for (const repo of repos) {
+      for (const repo of repos.filter(() => !waiting.has("github"))) {
         const seen = await observe(repo, prior("github", repo.repositoryId), controller.signal);
         repoStates[repoKey("github", repo.repositoryId)] = { ...seen.state, provider: "github", repositoryId: repo.repositoryId };
         for (const item of seen.items) origin.set(item, "github");
@@ -487,7 +530,7 @@ export function followRuntime(
         notices.push(...seen.items.flatMap((item) => (item.notice ? [{ key: `gh:${item.id}`, ...item.notice, at: Date.now() }] : [])));
         failed.push(...seen.failed);
       }
-      for (const { provider, repositoryId } of connected) {
+      for (const { provider, repositoryId } of connected.filter((item) => !waiting.has(item.provider.id))) {
         const seen = await provider.observe({
           root,
           project,
@@ -627,6 +670,7 @@ export function followRuntime(
         groups: [],
         switchedOff: plugins.followProvidersOff(project),
       };
+      const fresh = batch.groups;
       for (const { chat, provider, items: group } of groups.values()) {
         const source = connected.find((item) => item.provider.id === provider)?.provider;
         const lines = group.slice(0, 60).map((item) => {
@@ -664,12 +708,22 @@ export function followRuntime(
           count: group.length,
         });
       }
+      // What still waits from an earlier poll rides along with its frozen payloads, so it is neither regrouped nor announced twice.
+      const frozen: FollowBatch = leftover
+        ? {
+            ...batch,
+            repos: { ...leftover.repos, ...batch.repos },
+            notices: [...leftover.notices, ...batch.notices],
+            count: leftover.count + batch.count,
+            groups: [...leftover.groups, ...fresh],
+          }
+        : batch;
       // Freeze payloads and routing so a retry cannot lose or regroup observations.
       await root.commit(async (tx) => {
         const doc = await tx.doc(Follow, root.id);
-        doc.pending = batch;
+        doc.pending = frozen;
       }, BACKGROUND_CONTEXT);
-      return await recordBatch(batch, waits);
+      return await recordBatch(frozen, waits);
     } finally {
       controllers.delete(controller);
     }
@@ -727,6 +781,14 @@ export function followRuntime(
       polls: state.polls,
       events: state.events,
       lastEventAtMs: state.lastEventAtMs,
+      /** Events frozen but not yet confirmed as delivered: held for a plugin that is off, refused and waiting for a new attempt, or of unknown outcome. */
+      undelivered: (state.pending?.groups ?? []).map((group) => ({
+        provider: group.provider ?? null,
+        chat: group.chat,
+        eventId: groupEventId(group),
+        state: group.waiting ?? "held",
+        events: group.count ?? 0,
+      })),
       repos: Object.entries(state.repos)
         .filter(([, repo]) => !repo.provider || repo.provider === "github" || loadedProviders().has(repo.provider))
         .map(([key, repo]) => ({

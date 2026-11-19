@@ -1,4 +1,4 @@
-// Reports an unknown-outcome write or holds one admission check, as told by $HOLDER_CONTROL; its own state goes to $HOLDER_CONTROL.status.
+// Reports an unknown-outcome write or holds one admission check (answering `afterHold` once released), as told by $HOLDER_CONTROL; its own state goes to $HOLDER_CONTROL.status.
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -29,8 +29,9 @@ export default {
           status.holding = false;
           status.log.push(`release ${status.calls}`);
           publish();
+          return control().afterHold === true;
         }
-        return false;
+        return control().afterHold === true;
       },
     });
   },
