@@ -379,15 +379,19 @@ function pendingHtml(send) {
 /** Sends one pending message under its own request id (the host returns the job it already holds for a repeated id). A failure never sends again on its own. */
 async function deliver(send) {
   if (!rememberSend(send)) {
-    send.state = "failed";
+    // Only a first attempt is known not to have been sent; an earlier one may have reached the host, so its status stays as it was.
+    if (send.state === "sending") {
+      send.state = "failed";
+      send.error = NO_HANDLE;
+    }
     send.restored = false;
-    send.error = NO_HANDLE;
     toast(NO_HANDLE, { error: true, ms: 8000 });
     renderFeed();
     return;
   }
   send.state = "sending";
   send.error = "";
+  renderFeed();
   let job;
   try {
     job = await call("message", {
@@ -1049,10 +1053,7 @@ feed.addEventListener("click", async (event) => {
       }
     }
     follow.follow();
-    if (pendingRetry) {
-      send.state = "sending";
-      send.restored = false;
-    }
+    if (pendingRetry) send.restored = false;
     renderFeed();
     if (pendingRetry) await deliver(send);
     return;
@@ -1080,7 +1081,7 @@ feed.addEventListener("click", async (event) => {
         failedRead: 0,
       };
       pendingSends.push(send);
-    } else send.state = "sending";
+    }
     follow.follow();
     renderFeed();
     try {

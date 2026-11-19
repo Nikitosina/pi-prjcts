@@ -896,6 +896,8 @@ await kit.run(async () => {
     const secondRecord = JSON.parse(ledgerText(second));
     delete secondRecord.admitted;
     delete secondRecord.entry;
+    await rpc({ action: "chat-update", id: A, chatId: archivedAfter, archived: true });
+    await kit.delay(500);
     writeFileSync(ledgerPath(second), JSON.stringify({ ...secondRecord, state: "queued", delivery: { content: "expanded MARK-R32D" } }));
     writeFileSync(
       join(kit.home, A, "invoked-skills.txt"),
@@ -903,7 +905,7 @@ await kit.run(async () => {
         .filter((name) => name && name !== "pend-skill-crash")
         .join("\n") + "\n",
     );
-    await rpc({ action: "chat-update", id: A, chatId: archivedAfter, archived: true });
+    check("R32 the grant is missing and the record unadmitted at shutdown", !crashSkills().includes("pend-skill-crash"), invokedSkills());
     await kit.restartHost();
     await kit.eventually(async () => crashSkills().includes("pend-skill-crash"), "R32 grant finished from the receipt alone");
     await kit.eventually(async () => JSON.parse(ledgerText(second)).admitted === true, "R32 second record admitted from the receipt");
@@ -967,6 +969,12 @@ await kit.run(async () => {
     await ev(`document.querySelector('#feed [data-pending-retry]').click()`);
     await kit.delay(700);
     check("R37 Retry without a handle that can be stored sends nothing", (await countCalls("message")) === 1, await calls("message"));
+    const unsure = await owners("MARK-R37");
+    check(
+      "R37 the earlier attempt may have reached the host, so the bubble stays unconfirmed with its Retry",
+      unsure.length === 1 && unsure[0].delivery === "unconfirmed" && (await ev(`!!document.querySelector('#feed [data-pending-retry]')`)),
+      unsure,
+    );
     await ev(`(Storage.prototype.setItem = window.__realSet, true)`);
     await ev(`document.querySelector('#feed [data-pending-retry]').click()`);
     await page.waitFor(`document.querySelector('#feed').innerText.includes("ACK other tab MARK-R37")`, "R37 retried");

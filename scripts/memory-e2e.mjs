@@ -187,7 +187,7 @@ await kit.run(async () => {
     proven,
   );
 
-  // Revisions are content hashes: writing the same text again after an undo is a new write, current and not undone.
+  // Revisions are content hashes: the same text written again after an undo is two writes of one revision, and no chat row can say which it is.
   const again = await rpc({
     action: "knowledge-write",
     id,
@@ -198,10 +198,10 @@ await kit.run(async () => {
   const rewritten = (
     await rpc({ action: "memory-writes", projectId: id, writes: [{ path: "decisions/new.md", revision: again.revision }] })
   ).writes[0];
-  const listedAgain = (await rpc({ action: "memory-recent", projectId: id })).writes.find((item) => item.path === "decisions/new.md");
+  const listedAgain = (await rpc({ action: "memory-recent", projectId: id })).writes.filter((item) => item.path === "decisions/new.md");
   check(
-    "M15 the same text written again after an undo is current and not undone",
-    again.revision === created.revision && rewritten?.current === true && rewritten.undone === false && listedAgain?.undone === false,
+    "M15 a revision written twice is offered Undo by neither answer",
+    again.revision === created.revision && rewritten?.current === false && listedAgain.length === 1 && listedAgain[0].current === false,
     [rewritten, listedAgain],
   );
 
