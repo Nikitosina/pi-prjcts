@@ -16,3 +16,4 @@ These cases come from the independent review of PR #60 and precede the repair. `
 - X12 A shared helper of a plugin checkout, which borrows the chat's attachment and has no task attachment, is confirmed by a generic provider status instead of being refused; a task checkout is confirmed without the ownership check its own tools pass.
 - X13 A call admitted before a restart sends its first turn to a checkout that has moved off the pinned commit.
 - X14 A job subagent with an empty `cwd` reads the project checkout through its code tools.
+- X15 A fresh full review or a fresh re-check (no continues) starts on a checkout that is not the Job's recorded candidate, and spends budget on a revision the owner never verified.

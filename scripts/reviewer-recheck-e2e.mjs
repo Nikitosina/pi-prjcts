@@ -71,7 +71,9 @@ const kit = await createKit("reviewer-recheck", {
       return results.length ? say(`SAW[${results[0].trim()}]`) : call("code_read", { path: "proof.txt" });
     }
     if (role !== "worker" || !/RECHK|GONE|ROUND|MISMATCH/.test(user)) return undefined;
-    const step = (user.includes("RECHK") ? STEPS : user.includes("GONE") ? GONE : user.includes("MISMATCH") ? MISMATCH : ROUND)[results.length];
+    const step = (user.includes("RECHK") ? STEPS : user.includes("GONE") ? GONE : user.includes("MISMATCH") ? MISMATCH : ROUND)[
+      results.length
+    ];
     return step ? step(results) : say("Finished the scripted re-checks.");
   },
 });

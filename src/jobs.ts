@@ -1503,6 +1503,10 @@ export function createJobs(host: JobsHost) {
         }
         if (args.role === "reviewer") {
           if (!pin || "refusal" in pin) throw none(`${pin ? pin.refusal : "The checkout was not confirmed"}.`);
+          if (job.candidate && pin.sha !== job.candidate)
+            throw none(
+              `The checkout is at ${pin.sha}, not the recorded candidate ${job.candidate}; verify it, then record it with job candidate.`,
+            );
           const spent = await countedReviews(tx, job);
           // Given-back re-checks still closed the full round.
           const refusal = reviewRefusal(
