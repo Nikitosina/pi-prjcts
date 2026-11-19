@@ -24,6 +24,13 @@ routine would free with its current settings. Clean up runs the cleanup routine 
 ## Host breakdown
 - U11 `storage-summary` (the disk readout's breakdown) disagrees with the project's own rows, measures every project again on each open (minutes on a big machine), includes deleted or archived projects, or fails as a whole when one project fails. A total is the sum of the known rows; unknown rows are counted, not guessed; the last totals are kept 10 minutes unless `fresh` asks again.
 
+## Cached scans
+- U13 Each time Settings opens, the project is measured again although a successful measurement is minutes old.
+- U14 A refresh, a reopened Settings and the disk breakdown each start their own scan of the same project, so scans pile up; or one answer waits on a whole `du` run in a single HTTP request.
+- U15 A scan that fails or is slow replaces the last good measurement with nothing.
+- U16 A scan runs while the cleanup routine deletes (double work, half-deleted numbers), or the numbers stay as they were before cleanup once it ends.
+- U17 Reopening Settings during a cleanup shows an idle Clean up button or "Measuring…" instead of the run's real progress, or a second run can be started.
+
 ## UI
 - U9 Settings shows no Storage section, sizes without units, no unknown state, or a Clean up button that gives no outcome.
 - U12 The disk readout in the status line opens no breakdown, or the breakdown gives no way to reach a project's Storage section.

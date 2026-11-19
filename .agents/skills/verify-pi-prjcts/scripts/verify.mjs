@@ -1207,6 +1207,17 @@ const journeys = {
     await page.click(`dialog[open] [data-section="storage"]`);
     await page.waitFor(`!!document.querySelector('dialog[open] [data-storage-clean]:not([disabled])')`, "Clean up ready", 60000);
     await page.shot(dir, "01-storage");
+    // U13: leaving and reopening Settings shows the kept measurement at once, with no "Measuring…" line.
+    await page.evaluate(`document.querySelector('dialog[open] [data-section="storage"]').closest('dialog').close()`);
+    await page.evaluate(`document.querySelector('[data-cmd="settings"]').click()`);
+    await page.click(`dialog[open] [data-section="storage"]`);
+    await page.waitFor(
+      `!!document.querySelector('dialog[open] table.storage tfoot') && !document.querySelector('dialog[open] .loading-line')`,
+      "kept measurement on reopen",
+      3000,
+    );
+    await page.shot(dir, "01b-storage-reopened");
+    record("visible", "reopened Settings → Storage: the table showed at once, no Measuring line");
     await page.click(`dialog[open] [data-storage-clean]`);
     // R24: while the run is held at its first step the button shows a bar and the step.
     await page.waitFor(
@@ -1216,6 +1227,20 @@ const journeys = {
     );
     await page.shot(dir, "02-progress");
     record("visible", `progress: ${await page.evaluate(`document.querySelector('dialog[open] .storage-progress').innerText`)}`);
+    // U17: leave while the run is held, reopen: the same run shows with its progress and Clean up stays disabled.
+    await page.evaluate(`document.querySelector('dialog[open] [data-section="storage"]').closest('dialog').close()`);
+    await page.evaluate(`document.querySelector('[data-cmd="settings"]').click()`);
+    await page.click(`dialog[open] [data-section="storage"]`);
+    await page.waitFor(
+      `/Step \\d of 4/.test(document.querySelector('dialog[open] .storage-progress')?.innerText ?? '') && !!document.querySelector('dialog[open] [data-storage-clean][disabled]') && !document.querySelector('dialog[open] .loading-line')`,
+      "cleanup progress after reopening",
+      10000,
+    );
+    await page.shot(dir, "02b-progress-reopened");
+    record(
+      "visible",
+      `reopened during cleanup: ${await page.evaluate(`document.querySelector('dialog[open] .storage-progress').innerText`)}`,
+    );
     await page.waitFor(`!!document.querySelector('dialog[open] .storage-outcome')`, "Clean up outcome", 60000);
     const shown = await page.evaluate(`document.querySelector('dialog[open] .storage-outcome').innerText`);
     await page.shot(dir, "03-cleaned");

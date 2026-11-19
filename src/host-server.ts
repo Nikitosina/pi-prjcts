@@ -126,7 +126,8 @@ import {
   startCursorLogin,
 } from "./usage-limits.ts";
 import { machineStatus } from "./machine-status.ts";
-import { storageTotal, type StorageTotal, type StorageUsage } from "./storage-usage.ts";
+import { STORAGE_SCAN_TTL_MS } from "./storage-scans.ts";
+import { storageTotal, type StorageTotal } from "./storage-usage.ts";
 import { DEFAULT_SCRIPT_TIMEOUT_MS } from "./routine-script.ts";
 
 process.env.PI_PROJECTS_HOST = "1";
@@ -298,15 +299,12 @@ async function withDefaultGithub(id: string): Promise<void> {
   });
 }
 
-// Storage is measured outside the project lock: `du` may take minutes and only reads (U10). The disk readout's breakdown reuses
-// the last totals for 10 minutes; a project's own measurement refreshes its total (U11).
-const STORAGE_TOTAL_TTL_MS = 10 * 60_000;
-const storageTotals = new Map<string, StorageTotal>();
-async function measureStorage(id: string): Promise<StorageUsage> {
+// Storage is measured outside the project lock: `du` may take minutes and only reads (U10). Each project keeps its last measurement
+// and runs one scan at a time (src/storage-scans.ts); the disk readout's breakdown reuses it for 10 minutes (U11).
+async function measureStorage(id: string, maxAgeMs?: number) {
   ownedProjectDir(id);
-  const usage = await (await durable(id)).storageUsage();
-  storageTotals.set(id, storageTotal(usage));
-  return usage;
+  const owner = await durable(id);
+  return maxAgeMs === undefined ? owner.storageUsage() : owner.storageUsageWithin(maxAgeMs);
 }
 async function storageSummary(fresh: boolean) {
   const projects = listProjects().filter((project) => !project.deleted && !project.archived);
@@ -316,10 +314,8 @@ async function storageSummary(fresh: boolean) {
     totals.push(
       ...(await Promise.all(
         projects.slice(at, at + 2).map(async ({ id, name }) => {
-          const cached = storageTotals.get(id);
-          if (!fresh && cached && Date.now() - cached.measuredAt < STORAGE_TOTAL_TTL_MS) return { id, name, ...cached };
           try {
-            return { id, name, ...storageTotal(await measureStorage(id)) };
+            return { id, name, ...storageTotal(await measureStorage(id, fresh ? undefined : STORAGE_SCAN_TTL_MS)) };
           } catch (error) {
             return { id, name, error: error instanceof Error ? error.message : String(error) };
           }
@@ -984,6 +980,9 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return withDurableOwner({ id: input.id, operation: (owner) => owner.worktrees() });
     case "storage-usage":
       return measureStorage(input.id);
+    case "storage-status":
+      ownedProjectDir(input.id);
+      return (await durable(input.id)).storageStatus(input.refresh === true);
     case "storage-summary":
       return storageSummary(input.fresh === true);
     case "worktrees-cleanup":
