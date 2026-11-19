@@ -1,7 +1,7 @@
 import { inbox } from "./inbox.ts";
 import { evidence } from "./evidence.ts";
 import { openDurableProject, type DurableProjectRuntime, type DurableSubmissionState } from "./durable-runtime.ts";
-import { attachmentContent, listUploads } from "./uploads.ts";
+import { listUploads } from "./uploads.ts";
 import { plugins } from "./plugins.ts";
 import { feed } from "./change-feed.ts";
 import type { MessageText } from "./transcript-reader.ts";
@@ -40,14 +40,6 @@ export async function openDurableHost(
   });
   opened = owner;
   try {
-    if (!(await owner.jobs()).paused) {
-      for (const job of jobs(project.id).filter((job) => job.state === "queued" || job.state === "running")) {
-        await owner.admit(attachmentContent(projectDir(project.id), job.text, job.attachments, owner.acceptsImages), {
-          requestId: job.id,
-          chatId: job.chatId,
-        });
-      }
-    }
     await settle();
     return owner;
   } catch (error) {

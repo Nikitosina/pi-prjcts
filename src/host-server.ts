@@ -26,6 +26,7 @@ import {
   Request,
   Project,
   errorText,
+  jobById,
   jobs,
   legacyProjectIds,
   listProjects,
@@ -1668,11 +1669,12 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           error: null,
           ...(input.chatId && input.chatId !== "main" ? { chatId: input.chatId } : {}),
           ...(input.attachments ? { attachments: input.attachments } : {}),
+          ...(input.origin ? { origin: input.origin } : {}),
         } satisfies import("./state.ts").Job;
       };
       // The runtime may have settled the job while it was being admitted, so the saved record is the base.
       const markAdmitted = (job: import("./state.ts").Job) => {
-        const held = { ...(jobs(input.id).find((item) => item.id === job.id) ?? job), admitted: true as const };
+        const held = { ...(jobById(input.id, job.id) ?? job), admitted: true as const };
         saveJob(input.id, held);
         return held;
       };
@@ -1683,10 +1685,20 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           if (project.archived) throw new Error("Project is archived; admission is denied");
         },
         operation: async (owner) => {
-          // A repeated request ID (Telegram update replay) returns the job the runtime already holds; a record the runtime never admitted is admitted now.
-          const prior = input.requestId ? jobs(input.id).find((job) => job.id === input.requestId) : undefined;
+          // A request ID names one message: a repeat must carry the same chat, text, attachments and origin, or it is refused before anything is touched.
+          const prior = input.requestId ? jobById(input.id, input.requestId) : undefined;
+          if (
+            prior &&
+            ((prior.chatId ?? "main") !== (input.chatId ?? "main") ||
+              prior.text !== input.text ||
+              JSON.stringify(prior.attachments ?? []) !== JSON.stringify(input.attachments ?? []) ||
+              prior.origin !== input.origin)
+          )
+            throw new Error("This request id belongs to a different message; nothing was changed");
           if (prior?.admitted) return prior;
           if (prior && (await owner.ledgerSubmissions(input.chatId ?? "main", [prior.id])).length) return markAdmitted(prior);
+          // A settled record the runtime has no submission for is history, not a message waiting to be sent.
+          if (prior && prior.state !== "queued" && prior.state !== "running") return prior;
           const job = prior ?? prepareJob();
           // The job keeps what the owner typed; the coordinator receives the expanded skill.
           // `/skill:<name>` anywhere: skill blocks precede the owner's words. `@issue:/@doc:/@upload:/@file:` and `#123` / `PR #123`: compact untrusted blocks follow them.
@@ -1696,17 +1708,17 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
             (await referencedPrBlock(loadProject(input.id), job.text));
           if (text.length > 120_000)
             throw new Error(`Message with its skills and references is too large to send (${text.length} characters; limit 120000)`);
-          for (const invoked of skillNames(job.text)) recordInvokedSkill(ownedProjectDir(input.id), invoked);
           const plan = await owner.jobs();
           if (plan.paused) throw new Error("Project plan is paused; admission is denied");
           // Validate the chat before recording the job, so an unknown or archived chat leaves no ledger entry.
           const chat = (await owner.chats()).find((item) => item.id === (input.chatId ?? "main"));
           if (!chat) throw new Error("Unknown chat for this project");
           if (chat.archived) throw new Error("Chat is archived; restore it before sending");
+          for (const invoked of skillNames(job.text)) recordInvokedSkill(ownedProjectDir(input.id), invoked);
           if (!prior) saveJob(input.id, job);
           await owner.admit(attachmentContent(ownedProjectDir(input.id), text, job.attachments, owner.acceptsImages), {
             requestId: job.id,
-            origin: input.origin,
+            origin: job.origin,
             chatId: input.chatId,
             title: job.text,
           });

@@ -254,6 +254,8 @@ export const Job = Type.Object(
     chatId: Type.Optional(Id),
     /** Owner uploads attached to the message. */
     attachments: Type.Optional(Type.Array(Id, { minItems: 1, maxItems: 10, uniqueItems: true })),
+    /** Where the message came from; a repeat of its request id must carry the same origin. */
+    origin: messageOrigin,
     /** Set once the runtime holds the message's submission; a ledger record without it was recorded but not necessarily admitted. */
     admitted: Type.Optional(Type.Literal(true)),
     /** Transcript entry the message became, once the runtime placed it. */
@@ -1568,6 +1570,16 @@ export function jobs(id: string): Job[] {
     jobCache.delete(oldest);
   }
   return [...current.values()].map(({ job }) => structuredClone(job)).sort((a, b) => a.at.localeCompare(b.at));
+}
+
+/** One job by its id: a single file read, so a lookup does not scan the folder that holds every message ever sent. */
+export function jobById(id: string, jobId: string): Job | undefined {
+  try {
+    return parse(Job, readJson(join(projectDir(id), "inbox", `${parse(Id, jobId)}.json`)));
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
+    throw error;
+  }
 }
 
 export function saveJob(id: string, job: Job): void {

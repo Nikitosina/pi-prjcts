@@ -890,11 +890,17 @@ feed.addEventListener("click", async (event) => {
   }
   const retry = event.target.closest("[data-retry-job]");
   if (retry) {
-    const job = (state.view?.jobs ?? []).find((item) => item.id === retry.dataset.retryJob);
-    if (!job || retry.disabled) return;
+    const failed = (state.view?.jobs ?? []).find((item) => item.id === retry.dataset.retryJob);
+    if (!failed || retry.disabled) return;
     retry.disabled = true; // a second click must not resend
     try {
-      const job = await call("message", { id: state.projectId, text: job.text, requestId: uuid(), ...chatArgs() });
+      await call("message", {
+        id: state.projectId,
+        text: failed.text,
+        requestId: uuid(),
+        ...(failed.attachments ? { attachments: failed.attachments } : {}),
+        ...chatArgs(),
+      });
       follow.follow();
     } catch (error) {
       retry.disabled = false;

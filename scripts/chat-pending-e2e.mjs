@@ -1,7 +1,7 @@
 // Browser E2E: the owner's message shows as pending the moment it is sent and reconciles to one canonical message; Undo state
 // (`memory-recent`) loads on project selection and knowledge changes only. Failure cases: chat-pending-failures.md.
 // The page's fetch is wrapped to hold, delay or fail single actions; the host and the fake model are real. Artifact: artifacts/chat-pending-<time>/.
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createKit, call, say } from "./lib/e2e-kit.mjs";
@@ -21,6 +21,11 @@ const kit = await createKit("chat-pending", {
 });
 const { check, rpc } = kit;
 kit.initRepo();
+mkdirSync(join(kit.agentDir, "skills", "pend-skill"), { recursive: true });
+writeFileSync(
+  join(kit.agentDir, "skills", "pend-skill", "SKILL.md"),
+  "---\nname: pend-skill\ndescription: Pending-send fixture skill.\n---\n\nBODY-pend-skill\n",
+);
 
 const wrapFetch = `(() => {
   window.__calls = [];
@@ -418,6 +423,50 @@ await kit.run(async () => {
   check("P10 Retry reused the request id", retriedStranded.length === 2 && retriedStranded[0].requestId === retriedStranded[1].requestId);
   check("P10 the host stored three", (await hostCount(A, undefined, "MARK-STRAND")) === 3);
 
+  const ledgerPath = (id) => join(kit.home, A, "inbox", `${id}.json`);
+  const ledgerText = (id) => readFileSync(ledgerPath(id), "utf8");
+  const plant = (record) => {
+    mkdirSync(join(kit.home, A, "inbox"), { recursive: true });
+    writeFileSync(ledgerPath(record.id), JSON.stringify({ at: new Date().toISOString(), error: null, ...record }));
+  };
+  const send = (extra) => rpc({ action: "message", id: A, ...extra });
+  const invokedSkills = () => {
+    try {
+      return readFileSync(join(kit.home, A, "invoked-skills.txt"), "utf8");
+    } catch {
+      return "";
+    }
+  };
+
+  // U1: the turn card's Retry resends the failed turn's text.
+  const failedId = randomUUID();
+  plant({
+    id: failedId,
+    text: "turn card MARK-TURNRETRY",
+    state: "failed",
+    error: "provider exploded",
+    at: new Date(Date.now() + 60000).toISOString(),
+    admitted: true,
+  });
+  await select(chatButton(A, other));
+  await page.waitFor(
+    `document.querySelector(${JSON.stringify(chatButton(A, other))}).getAttribute("aria-current") === "true"`,
+    "other selected for U1",
+  );
+  await select(chatButton(A, "main"));
+  await page.waitFor(`!!document.querySelector('[data-retry-job="${failedId}"]')`, "turn card Retry");
+  await page.shot("04-turn-card-retry", { force: true });
+  await reset();
+  await ev(`document.querySelector('[data-retry-job="${failedId}"]').click()`);
+  await page.waitFor(`document.querySelector('#feed').innerText.includes("ACK turn card MARK-TURNRETRY")`, "turn card retry answered");
+  const turnRetry = await calls("message");
+  check(
+    "U1 the turn card Retry sends the failed text once under a new id",
+    turnRetry.length === 1 && turnRetry[0].requestId !== failedId && turnRetry[0].text === "turn card MARK-TURNRETRY",
+    turnRetry,
+  );
+  check("U1 the host stored one message", (await hostCount(A, undefined, "MARK-TURNRETRY")) === 1);
+
   // P8: slash commands do not create a pending bubble.
   await reset();
   await typeAndSend("/name Slash named");
@@ -428,4 +477,83 @@ await kit.run(async () => {
       (await countCalls("chat-update")) === 1 &&
       (await ev(`document.querySelectorAll('#feed .msg.owner.pending').length`)) === 0,
   );
+
+  // H: a request id names one message. The host refuses a repeat whose chat, text, attachments or origin differ, before it touches anything.
+  const colliding = randomUUID();
+  await send({ text: "identity MARK-ID", requestId: colliding, chatId: other });
+  await kit.eventually(async () => JSON.parse(ledgerText(colliding)).state === "done", "colliding job settled");
+  const held = ledgerText(colliding);
+  const mismatches = {
+    "another chat": { text: "identity MARK-ID", requestId: colliding },
+    "other text": { text: "identity MARK-ID changed", requestId: colliding, chatId: other },
+    attachments: { text: "identity MARK-ID", requestId: colliding, chatId: other, attachments: [randomUUID()] },
+    origin: { text: "identity MARK-ID", requestId: colliding, chatId: other, origin: "telegram" },
+  };
+  for (const [name, input] of Object.entries(mismatches)) {
+    const refusal = await kit.rejects({ action: "message", id: A, ...input });
+    check(`H1 a repeated id with ${name} is refused as a different message`, /different message/.test(refusal ?? ""), refusal);
+  }
+  check("H1 the refusals left the saved record untouched", ledgerText(colliding) === held);
+  check(
+    "H1 the message is in its own chat once and in no other",
+    (await hostCount(A, other, "MARK-ID")) === 1 && (await hostCount(A, undefined, "MARK-ID")) === 0,
+  );
+  const repeat = await send({ text: "identity MARK-ID", requestId: colliding, chatId: other });
+  check("H1 the identical repeat returns the held job", repeat.id === colliding && (await hostCount(A, other, "MARK-ID")) === 1);
+
+  const stranded1 = randomUUID();
+  plant({ id: stranded1, text: "stranded MARK-ID2", state: "queued" });
+  const heldStranded = ledgerText(stranded1);
+  const strandedRefusal = await kit.rejects({ action: "message", id: A, text: "stranded MARK-ID2", requestId: stranded1, chatId: other });
+  check("H1b a recorded job is bound to its chat before it was admitted", /different message/.test(strandedRefusal ?? ""), strandedRefusal);
+  check("H1b nothing was sent or rewritten", ledgerText(stranded1) === heldStranded && (await hostCount(A, other, "MARK-ID2")) === 0);
+
+  // H2: a denied retry has no side effect, not even an invoked-skill record.
+  const archived = (await rpc({ action: "chat-create", id: A, title: "Archived" })).id;
+  await rpc({ action: "chat-update", id: A, chatId: archived, archived: true });
+  const denied = await kit.rejects({ action: "message", id: A, text: "/skill:pend-skill go", requestId: randomUUID(), chatId: archived });
+  check("H2 an archived chat refuses", /archived/i.test(denied ?? ""), denied);
+  check("H2 the refused message recorded no invoked skill", !invokedSkills().includes("pend-skill"), invokedSkills());
+  await send({ text: "/skill:pend-skill go", requestId: randomUUID() });
+  check("H2 an admitted message records the skill", invokedSkills().includes("pend-skill"), invokedSkills());
+
+  // H3: a terminal job the runtime has no record of is never admitted again.
+  const legacy = randomUUID();
+  plant({ id: legacy, text: "legacy MARK-LEGACY", state: "failed", error: "provider exploded" });
+  const heldLegacy = ledgerText(legacy);
+  const legacyReply = await send({ text: "legacy MARK-LEGACY", requestId: legacy });
+  check("H3 the repeat returns the terminal job", legacyReply.id === legacy && legacyReply.state === "failed", legacyReply);
+  check(
+    "H3 it was not delivered and not rewritten",
+    (await hostCount(A, undefined, "MARK-LEGACY")) === 0 && ledgerText(legacy) === heldLegacy,
+  );
+
+  // H4: a crash between recording and admitting. The host reopens, keeps the record unconfirmed, and a deliberate retry delivers the original once.
+  const crashed = randomUUID();
+  plant({ id: crashed, text: "/skill:pend-skill crash MARK-CRASH", state: "queued", origin: "telegram" });
+  await kit.restartHost();
+  await kit.delay(800);
+  check("H4 a restart does not deliver an unconfirmed record on its own", (await hostCount(A, undefined, "MARK-CRASH")) === 0);
+  const afterRestart = JSON.parse(ledgerText(crashed));
+  check(
+    "H4 the record keeps its text and origin and stays unadmitted",
+    afterRestart.origin === "telegram" && !afterRestart.admitted,
+    afterRestart,
+  );
+  const lostOrigin = await kit.rejects({ action: "message", id: A, text: "/skill:pend-skill crash MARK-CRASH", requestId: crashed });
+  check("H4 a retry without the original origin is refused", /different message/.test(lostOrigin ?? ""), lostOrigin);
+  const retriedCrash = await send({ text: "/skill:pend-skill crash MARK-CRASH", requestId: crashed, origin: "telegram" });
+  check("H4 the deliberate retry admits the record", retriedCrash.admitted === true, retriedCrash);
+  const duo = await Promise.all([
+    send({ text: "/skill:pend-skill crash MARK-CRASH", requestId: crashed, origin: "telegram" }),
+    send({ text: "/skill:pend-skill crash MARK-CRASH", requestId: crashed, origin: "telegram" }),
+  ]);
+  await kit.eventually(async () => (await hostCount(A, undefined, "MARK-CRASH")) >= 1, "crash message delivered");
+  check("H4 repeated retries deliver once", (await hostCount(A, undefined, "MARK-CRASH")) === 1 && duo.every((job) => job.id === crashed));
+
+  // H5: two concurrent first sends under one id deliver once.
+  const racing = randomUUID();
+  await Promise.all([send({ text: "race MARK-RACE", requestId: racing }), send({ text: "race MARK-RACE", requestId: racing })]);
+  await kit.delay(500);
+  check("H5 concurrent sends of one id deliver once", (await hostCount(A, undefined, "MARK-RACE")) === 1);
 });
