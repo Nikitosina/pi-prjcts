@@ -70,7 +70,8 @@ export function showSection(id) {
 }
 on("select", () => dialog.open && paint());
 dialog.addEventListener("cancel", (event) => event.preventDefault()); // Esc goes through the hotkey registry (leave-focus)
-dialog.addEventListener("close", () => leaveSection());
+// The close event is queued: a dialog reopened since then keeps the section it just painted.
+dialog.addEventListener("close", () => dialog.open || leaveSection());
 function leaveSection() {
   pluginsRefresh = null;
   unmount?.();
