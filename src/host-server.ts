@@ -47,7 +47,6 @@ import { referencedPrBlock } from "./pr-monitor.ts";
 import { plugins } from "./plugins.ts";
 import { expandSkillCommand, listSkills, skillNames, skillPreview } from "./coordinator-skills.ts";
 import { refCandidates, referencedItemsBlock, refPreview } from "./inline-refs.ts";
-import { recordInvokedSkill } from "./skill-profiles.ts";
 import { mcpCatalog, mcpPool } from "./mcp-servers.ts";
 import { resolveEntry, inbox } from "./inbox.ts";
 import { body } from "./http.ts";
@@ -56,7 +55,7 @@ import { feed, HOST_FEED, publishHost } from "./change-feed.ts";
 import { approvals } from "./approvals.ts";
 import { openHostAgent, type HostAgent } from "./host-agent.ts";
 import { profilesSnapshot, readStorage, readUi, setStorage, setTiers, setUi, tiersFor, tiersSnapshot } from "./host-documents.ts";
-import { memoryIndex, memoryRecent, undoMemory } from "./memory.ts";
+import { memoryIndex, memoryRecent, memoryWrites, undoMemory } from "./memory.ts";
 import { splitSkillToggles } from "./profiles.ts";
 import { createRemote, type RemoteAccess } from "./remote.ts";
 import { startWebhooks } from "./webhook.ts";
@@ -82,7 +81,7 @@ import { sendOwnerMessage, startTelegram } from "./telegram.ts";
 import type { JobsSnapshot } from "./jobs.ts";
 import { loadAutomations, rotateWebhookSecret, updateAutomations } from "./project-automations.ts";
 import { listArtifacts } from "./artifacts.ts";
-import { openDurableHost, durableHostSnapshot, durableHostActivity, type ProjectActivity } from "./durable-host.ts";
+import { openDurableHost, durableHostSnapshot, durableHostActivity, finishGrant, type ProjectActivity } from "./durable-host.ts";
 import {
   archiveConfig,
   archiveHistory,
@@ -112,9 +111,8 @@ import {
 import { settingsApplication } from "./settings-application.ts";
 import { libraryImport, libraryList, libraryRead } from "./project-library.ts";
 import {
-  attachmentContent,
-  attachmentImages,
-  inlineImageIds,
+  attachmentImageCopies,
+  attachmentMessage,
   deleteUpload,
   listUploads,
   saveUpload,
@@ -242,11 +240,6 @@ async function refusing<T>(operation: () => Promise<T>): Promise<T> {
   } catch (error) {
     throw error instanceof Refused ? error : new Refused(errorText(error));
   }
-}
-/** The text of an owner message with its attachment block, as the runtime receives it. */
-function attachmentText(dir: string, text: string, job: import("./state.ts").Job, acceptsImages: boolean): string {
-  const content = attachmentContent(dir, text, job.attachments, acceptsImages);
-  return typeof content === "string" ? content : content[0].type === "text" ? content[0].text : text;
 }
 async function withDurableOwner<T>({
   id,
@@ -865,6 +858,8 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return memoryIndex(await knowledgeDir(input.projectId), { includeArchive: input.includeArchive });
     case "memory-recent":
       return memoryRecent(await knowledgeDir(input.projectId));
+    case "memory-writes":
+      return memoryWrites(await knowledgeDir(input.projectId), input.writes);
     case "chat-stop": {
       const project = loadProject(input.projectId);
       if (project.deleted || project.archived) throw new Error("Inactive project has no running turn to stop");
@@ -1696,9 +1691,12 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           ...(input.attachments ? { attachments: input.attachments } : {}),
         };
       };
-      // The runtime may have settled the job while it was being admitted, so the saved record is the base. Once the runtime holds the message, its saved content is dropped.
+      // The runtime may have settled the job while it was being admitted, so the saved record is the base. Once the runtime holds the message, its
+      // skill grant is finished (a crash may have cut it off) and its saved content is dropped.
       const markAdmitted = (job: import("./state.ts").Job) => {
-        const { delivery: _saved, ...held } = { ...(jobById(input.id, job.id) ?? job), admitted: true as const };
+        const base = jobById(input.id, job.id) ?? job;
+        finishGrant(ownedProjectDir(input.id), base);
+        const { delivery: _saved, ...held } = { ...base, admitted: true as const };
         saveJob(input.id, held);
         return held;
       };
@@ -1728,49 +1726,51 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           // A settled record the runtime has no submission for is history, not a message waiting to be sent.
           if (prior && prior.state !== "queued" && prior.state !== "running") return prior;
           // Everything that can refuse runs before anything is recorded or granted.
-          const job = await refusing(async () => {
+          const { job, parts } = await refusing(async () => {
             const job = prior ?? prepareJob();
             // The saved content is the message; only a record without it (legacy) or a new message is built from the text.
             // The job keeps what the owner typed; the coordinator receives the expanded skill.
             // `/skill:<name>` anywhere: skill blocks precede the owner's words. `@issue:/@doc:/@upload:/@file:` and `#123` / `PR #123`: compact untrusted blocks follow them.
             const dir = ownedProjectDir(input.id);
             const saved = job.delivery;
-            const content =
-              saved?.content ??
-              attachmentText(
-                dir,
-                (skillNames(job.text).length ? await expandSkillCommand(await configuredSkills(input.id), job.text) : job.text) +
-                  (await referencedItemsBlock(loadProject(input.id), dir, job.text)) +
-                  (await referencedPrBlock(loadProject(input.id), job.text)),
-                job,
-                owner.acceptsImages,
-              );
+            // The uploads are read once: the same reduced copies are checked here and handed to the runtime below.
+            const built = saved
+              ? undefined
+              : attachmentMessage(
+                  dir,
+                  (skillNames(job.text).length ? await expandSkillCommand(await configuredSkills(input.id), job.text) : job.text) +
+                    (await referencedItemsBlock(loadProject(input.id), dir, job.text)) +
+                    (await referencedPrBlock(loadProject(input.id), job.text)),
+                  job.attachments,
+                  owner.acceptsImages,
+                );
+            const content = saved?.content ?? built!.content;
             // The limit applies to what the runtime receives, attachment block included, so a skill is never granted for a message it would refuse.
             if (content.length > 120_000)
               throw new Error(`Message with its skills and references is too large to send (${content.length} characters; limit 120000)`);
             if (saved && saved.images === undefined && job.attachments?.length)
               throw new Error("The saved message does not say which images went with it; send it again as a new message");
-            const images = saved ? (saved.images ?? []) : inlineImageIds(dir, job.attachments, owner.acceptsImages);
-            if (attachmentImages(dir, images, true).length !== images.length)
+            const images = built?.images ?? attachmentImageCopies(dir, saved!.images, true);
+            if (images.length !== (saved?.images?.length ?? images.length))
               throw new Error("An image attached to the saved message is no longer available; send it again as a new message");
             if ((await owner.jobs()).paused) throw new Error("Project plan is paused; admission is denied");
             // Validate the chat before recording the job, so an unknown or archived chat leaves no ledger entry.
             const chat = (await owner.chats()).find((item) => item.id === chatId);
             if (!chat) throw new Error("Unknown chat for this project");
             if (chat.archived) throw new Error("Chat is archived; restore it before sending");
-            return { ...job, origin, delivery: { content, images } };
+            return {
+              job: { ...job, origin, delivery: { content, images: images.map(({ id }) => id) } },
+              parts: images.map(({ part }) => part),
+            };
           });
           saveJob(input.id, job);
-          const dir = ownedProjectDir(input.id),
-            effective = job.delivery!.content,
-            images = attachmentImages(dir, job.delivery!.images, true);
-          await owner.admit(images.length ? [{ type: "text", text: effective }, ...images] : effective, {
+          const effective = job.delivery!.content;
+          await owner.admit(parts.length ? [{ type: "text", text: effective }, ...parts] : effective, {
             requestId: job.id,
             origin: job.origin === "telegram" ? "telegram" : undefined,
             chatId: input.chatId,
             title: job.text,
           });
-          for (const invoked of skillNames(job.text)) recordInvokedSkill(ownedProjectDir(input.id), invoked);
           return markAdmitted(job);
         },
       });

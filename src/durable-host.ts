@@ -1,14 +1,14 @@
 import { inbox } from "./inbox.ts";
 import { evidence } from "./evidence.ts";
 import { openDurableProject, type DurableProjectRuntime, type DurableSubmissionState } from "./durable-runtime.ts";
-import { attachmentImages, listUploads } from "./uploads.ts";
+import { attachmentImageCopies, listUploads } from "./uploads.ts";
 import { skillNames } from "./coordinator-skills.ts";
 import { recordInvokedSkill } from "./skill-profiles.ts";
 import { plugins } from "./plugins.ts";
 import { feed } from "./change-feed.ts";
 import type { MessageText } from "./transcript-reader.ts";
 import type { ToolSummaries } from "./tool-summaries.ts";
-import { jobs, loadProject, notes, projectDir, saveJob, saveProject, type Project, type Snapshot } from "./state.ts";
+import { jobById, jobs, loadProject, notes, projectDir, saveJob, saveProject, type Job, type Project, type Snapshot } from "./state.ts";
 
 export async function openDurableHost(
   project: Project,
@@ -51,8 +51,14 @@ export async function openDurableHost(
   }
 }
 
+/** Finishes the skill grant of a message the runtime holds. The saved content marks a grant not yet finished; a record without it was granted, or never owed one. */
+export function finishGrant(dir: string, job: Job): void {
+  if (job.delivery) for (const invoked of skillNames(job.text)) recordInvokedSkill(dir, invoked);
+}
+
 // A message the host saved with its exact content but never marked admitted is continued under its own request id: the runtime's receipt is read
 // first, and only a message the runtime does not hold is admitted, from the saved content, to the saved chat. A refusal leaves the record unconfirmed.
+// A receipt also finishes the original skill grant a crash may have cut off; nothing is submitted again for it.
 async function recoverUnadmitted(owner: DurableProjectRuntime, project: Project): Promise<void> {
   const waiting = jobs(project.id).filter((job) => job.delivery && !job.admitted && (job.state === "queued" || job.state === "running"));
   if (!waiting.length) return;
@@ -68,18 +74,22 @@ async function recoverUnadmitted(owner: DurableProjectRuntime, project: Project)
         // The images that went in with the saved content are the ones that go in now; a missing one leaves the message unconfirmed.
         if (job.delivery!.content.length > 120_000) continue;
         if (job.delivery!.images === undefined && job.attachments?.length) continue;
-        const images = attachmentImages(dir, job.delivery!.images, true);
+        const images = attachmentImageCopies(dir, job.delivery!.images, true);
         if (images.length !== (job.delivery!.images?.length ?? 0)) continue;
-        await owner.admit(images.length ? [{ type: "text", text: job.delivery!.content }, ...images] : job.delivery!.content, {
-          requestId: job.id,
-          origin: job.origin === "telegram" ? "telegram" : undefined,
-          chatId: job.chatId,
-          title: job.text,
-        });
-        for (const invoked of skillNames(job.text)) recordInvokedSkill(dir, invoked);
+        await owner.admit(
+          images.length ? [{ type: "text", text: job.delivery!.content }, ...images.map(({ part }) => part)] : job.delivery!.content,
+          {
+            requestId: job.id,
+            origin: job.origin === "telegram" ? "telegram" : undefined,
+            chatId: job.chatId,
+            title: job.text,
+          },
+        );
       }
-      const { delivery: _saved, ...held } = jobs(project.id).find((item) => item.id === job.id) ?? job;
-      saveJob(project.id, { ...held, admitted: true });
+      const held = jobById(project.id, job.id) ?? job;
+      finishGrant(dir, held);
+      const { delivery: _saved, ...admitted } = held;
+      saveJob(project.id, { ...admitted, admitted: true });
     } catch {
       // Stays unconfirmed; the owner's explicit retry carries the same request id.
     }
@@ -92,6 +102,12 @@ function settleLedger(projectId: string, ledger: JobLedger, submissions: Durable
   for (const job of ledger) {
     const submission = submissions.find((item) => item.requestId === job.id);
     if (!submission) continue;
+    // The receipt is the proof that the message was admitted, so the grant a crash may have cut off is finished before the saved content goes.
+    try {
+      finishGrant(projectDir(projectId), job);
+    } catch {
+      continue;
+    }
     const before = `${job.state}\0${job.error}\0${job.admitted}\0${job.entry}\0${!!job.delivery}`,
       wasSettled = job.state === "done" || job.state === "failed";
     switch (submission.status) {

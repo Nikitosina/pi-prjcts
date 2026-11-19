@@ -193,39 +193,35 @@ export function uploadImageResult(dir: string, id: string): ResultBlock[] {
     : "No reduced copy; the owner can view the image in the Knowledge tab.";
   return [{ type: "text", text: JSON.stringify({ record, ref: `upload:${record.id}`, note }) }, ...(copy ? [copy] : [])];
 }
-/** Coordinator input for an owner message: the text plus an attachment block naming each upload; images inline when the model accepts them. */
-export function attachmentContent(
+export type AttachedImage = { id: string; part: ImagePart };
+/** An owner message's text with its attachment block naming each upload, and the reduced image copies that go in inline (one pass over the uploads). */
+export function attachmentMessage(
   dir: string,
   text: string,
   ids: readonly string[] | undefined,
   acceptsImages: boolean,
-): string | ({ type: "text"; text: string } | ImagePart)[] {
-  if (!ids?.length) return text;
+): { content: string; images: AttachedImage[] } {
+  if (!ids?.length) return { content: text, images: [] };
   // A deleted upload (e.g. before a restart re-admits a queued job) stays named, not fatal; `message` validates IDs up front.
   const known = new Map(listUploads(dir).map((record) => [record.id, record]));
-  const images: ImagePart[] = [];
+  const images: AttachedImage[] = [];
   const lines = ids.map((id) => {
     const record = known.get(id);
     if (!record) return `- deleted upload ${id}`;
     const copy = acceptsImages && record.kind === "image" ? uploadModelCopy(dir, record.id) : null,
       inline = copy !== null;
-    if (copy) images.push(copy);
+    if (copy) images.push({ id: record.id, part: copy });
     return `- ${record.filename} · ${record.kind} · ${record.size} bytes · upload ${record.id}${inline ? " · image attached (reduced copy)" : ""}`;
   });
-  const block = `${text}\n\n${ATTACHMENT_HEADER}\n${lines.join("\n")}`;
-  return images.length ? [{ type: "text", text: block }, ...images] : block;
+  return { content: `${text}\n\n${ATTACHMENT_HEADER}\n${lines.join("\n")}`, images };
 }
-/** The reduced image copies of an owner message's attachments, for content whose text was saved earlier. */
-export function attachmentImages(dir: string, ids: readonly string[] | undefined, acceptsImages: boolean): ImagePart[] {
+/** The reduced image copies of the given uploads, for content whose text was saved earlier; an upload without one is left out. */
+export function attachmentImageCopies(dir: string, ids: readonly string[] | undefined, acceptsImages: boolean): AttachedImage[] {
   if (!ids?.length || !acceptsImages) return [];
   const known = new Map(listUploads(dir).map((record) => [record.id, record]));
   return ids.flatMap((id) => {
-    const record = known.get(id),
-      copy = record?.kind === "image" ? uploadModelCopy(dir, id) : null;
-    return copy ? [copy] : [];
+    const copy = known.get(id)?.kind === "image" ? uploadModelCopy(dir, id) : null;
+    return copy ? [{ id, part: copy }] : [];
   });
 }
-/** The attachments whose reduced image copies `attachmentContent` puts inline. */
-export const inlineImageIds = (dir: string, ids: readonly string[] | undefined, acceptsImages: boolean): string[] =>
-  (ids ?? []).filter((id) => attachmentImages(dir, [id], acceptsImages).length);
 export const ATTACHMENT_HEADER = "[Attached files: project uploads; read with projects_upload_read, find with projects_search]";

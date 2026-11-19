@@ -164,6 +164,7 @@ export type MemoryWrite = {
   current: boolean;
 };
 export const RECENT_LIMIT = 50;
+export const WRITES_LIMIT = 20;
 /**
  * Recent writes, newest first, with whether `memory-undo` reverted each and whether it is still the entry's current revision,
  * so a client reloaded after an undo shows "Undone" instead of offering Undo again.
@@ -188,5 +189,36 @@ export async function memoryRecent(dir: string): Promise<{ writes: MemoryWrite[]
       undone: undone.has(`${record.path}\0${record.revision}`),
       current: newest.get(record.path) === record.revision,
     }));
+  return { writes };
+}
+
+/**
+ * The state of specific writes, read from the history of each path alone: how a write older than the recent window is proven undoable, or not.
+ * A write the history does not hold is left out of the answer, so absence means unknown, never undoable.
+ */
+export async function memoryWrites(dir: string, wanted: readonly { path: string; revision: string }[]): Promise<{ writes: MemoryWrite[] }> {
+  const writes: MemoryWrite[] = [];
+  for (const path of new Set(wanted.slice(0, WRITES_LIMIT).map((item) => item.path))) {
+    let history: Awaited<ReturnType<typeof historyKnowledge>>;
+    try {
+      history = await historyKnowledge(dir, path);
+    } catch {
+      continue;
+    }
+    const newest = history.at(-1)?.revision;
+    for (const { revision } of wanted.slice(0, WRITES_LIMIT).filter((item) => item.path === path)) {
+      const record = history.findLast((item) => item.revision === revision && item.author !== "memory-undo");
+      if (record)
+        writes.push({
+          path,
+          revision,
+          author: record.author,
+          updatedAt: record.updatedAt,
+          created: record.priorText === null,
+          undone: history.some((item) => item.author === "memory-undo" && item.priorRevision === revision),
+          current: newest === revision,
+        });
+    }
+  }
   return { writes };
 }

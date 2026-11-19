@@ -46,6 +46,11 @@ export const memoryEntry = (path) => (cache.projectId === state.projectId ? cach
 // Host-owned Undo state, including writes made and undone before this page loaded. It belongs to a project, not to a chat, and the host
 // computes it with a knowledge scan, so it loads on project selection and knowledge changes, never with a transcript read.
 let recent = { projectId: null, writes: new Map(), ready: false };
+// Writes outside the recent list (it holds 50), proven one by one by `memory-writes`; absence from both is unknown, never undoable.
+let proven = new Map(),
+  asked = new Set(),
+  askTimer = null,
+  provenEpoch = 0; // bumped whenever the Undo state is replaced: an answer to a question asked before it is dropped
 let recentLoad = null,
   epoch = 0; // bumped when the held Undo state is withdrawn: an answer to a read that began before it is not trusted
 
@@ -56,6 +61,7 @@ export function refreshRecentMemory({ again = false, invalidate = false } = {}) 
   if (!projectId) return null;
   if (invalidate && recent.projectId === projectId) {
     epoch++;
+    dropProven();
     if (recent.ready) {
       recent = { ...recent, ready: false };
       emit("memory-recent", projectId);
@@ -79,6 +85,7 @@ export function refreshRecentMemory({ again = false, invalidate = false } = {}) 
           // Another project was selected meanwhile, or a newer load took over: this answer is not for the page any more.
           if (recentLoad !== run || projectId !== state.projectId) return;
           recent = { projectId, writes: new Map(read.writes.map((write) => [`${write.path}@${write.revision}`, write])), ready: true };
+          dropProven();
           emit("memory-recent", projectId);
         } catch (error) {
           fail(error);
@@ -90,19 +97,61 @@ export function refreshRecentMemory({ again = false, invalidate = false } = {}) 
   })();
   return run.promise;
 }
+function dropProven() {
+  provenEpoch++;
+  proven = new Map();
+  asked = new Set();
+}
 on("select", ({ projectId }) => {
-  if (recent.projectId !== projectId) recent = { projectId, writes: new Map(), ready: false };
+  if (recent.projectId !== projectId) {
+    recent = { projectId, writes: new Map(), ready: false };
+    dropProven();
+  }
   else if (recent.ready || recentLoad?.projectId === projectId) return;
   void refreshRecentMemory();
 });
-/** The write's Undo state; null when unknown. `ready` is false until the project's first read arrived. */
-export const memoryWrite = (path, revision) =>
-  recent.projectId === state.projectId ? recent.writes.get(`${path}@${revision}`) : undefined;
+/** The write's Undo state as the host proved it; undefined when it is not proven (yet). `ready` is false until the project's first read arrived. */
+export function memoryWrite(path, revision) {
+  if (recent.projectId !== state.projectId) return undefined;
+  const key = `${path}@${revision}`;
+  return recent.writes.get(key) ?? proven.get(key);
+}
+/** Asks the host about a chat row's write that the recent list does not hold; rows on screen join one question. */
+export function wantMemoryWrite(path, revision) {
+  const key = `${path}@${revision}`,
+    projectId = state.projectId;
+  if (!recent.ready || recent.projectId !== projectId || recent.writes.has(key) || asked.has(key)) return;
+  asked.add(key);
+  clearTimeout(askTimer);
+  askTimer = setTimeout(() => void askWrites(projectId), 0);
+}
+async function askWrites(projectId) {
+  const wanted = [...asked].filter((key) => !proven.has(key)).slice(0, 20),
+    began = provenEpoch;
+  if (!wanted.length || projectId !== state.projectId) return;
+  try {
+    const answer = await call("memory-writes", {
+      projectId,
+      writes: wanted.map((key) => {
+        const at = key.lastIndexOf("@");
+        return { path: key.slice(0, at), revision: key.slice(at + 1) };
+      }),
+    });
+    if (began !== provenEpoch || projectId !== state.projectId) return;
+    for (const key of wanted) proven.set(key, null);
+    for (const write of answer.writes) proven.set(`${write.path}@${write.revision}`, write);
+    emit("memory-recent", projectId);
+  } catch (error) {
+    fail(error);
+  }
+}
 export const memoryReady = () => recent.projectId === state.projectId && recent.ready;
 export function markMemoryUndone(path, revision) {
   const key = `${path}@${revision}`,
-    write = recent.writes.get(key);
-  recent.writes.set(key, { ...write, path, revision, undone: true, current: false });
+    write = recent.writes.get(key) ?? proven.get(key),
+    undone = { ...write, path, revision, undone: true, current: false };
+  recent.writes.set(key, undone);
+  proven.set(key, undone);
 }
 
 /** The Memory list in the center. */

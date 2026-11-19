@@ -164,6 +164,29 @@ await kit.run(async () => {
     recent.map((item) => [item.path, item.author]),
   );
 
+  // memory-writes proves specific writes from their own history, whatever the recent window holds; an unknown revision is left out.
+  const proven = (
+    await rpc({
+      action: "memory-writes",
+      projectId: id,
+      writes: [
+        { path: "decisions/twice.md", revision: twice.revision },
+        { path: "decisions/twice.md", revision: replaced.revision },
+        { path: "decisions/new.md", revision: created.revision },
+        { path: "decisions/twice.md", revision: "0".repeat(40) },
+      ],
+    })
+  ).writes;
+  const provenWrite = (path, revision) => proven.find((item) => item.path === path && item.revision === revision);
+  check(
+    "M14 memory-writes proves changed, current and undone writes and leaves an unknown revision out",
+    proven.length === 3 &&
+      provenWrite("decisions/twice.md", twice.revision)?.current === false &&
+      provenWrite("decisions/twice.md", replaced.revision)?.current === true &&
+      provenWrite("decisions/new.md", created.revision)?.undone === true,
+    proven,
+  );
+
   // The prompt carries the preferences brief for every role and no memory index; agents search memory with projects_knowledge_list.
   await kit.ask(id, "MEMORY-TURN hello");
   const coordinator = result.calls.findLast((call) => call.role === "coordinator").system;

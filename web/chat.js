@@ -6,7 +6,7 @@ import { hydrateMedia } from "./media.js";
 import { FILE_ONLY_NOTE, PathSource, insertText, pathsFromTransfer } from "./path-drop.js";
 import { slashCommand, slashKey } from "./slash.js";
 import { chatArgs, emit, fail, on, stale, state, toast } from "./state.js";
-import { markMemoryUndone, memoryEntry, memoryKind, memoryReady, memoryTitle, memoryWrite } from "./memory.js";
+import { markMemoryUndone, memoryEntry, memoryKind, memoryReady, memoryTitle, memoryWrite, wantMemoryWrite } from "./memory.js";
 import { follower } from "./follow.js";
 
 const feed = document.querySelector("#feed"),
@@ -72,25 +72,29 @@ function loadHandles() {
   } catch {}
   return found;
 }
-function saveHandles() {
+/** Stores the handle before anything is sent; false when the browser cannot keep it, and then nothing may be sent: a reload would lose the message without a trace. */
+function rememberSend({ id, projectId, chatId, text, attachments, retryOf }) {
+  const stored = JSON.stringify({ id, projectId, chatId, text, ...(retryOf ? { retryOf } : {}), ...(attachments ? { attachments } : {}) });
+  if (savedHandles.get(id) === stored) return true;
   try {
-    const open = new Set();
-    for (const send of pendingSends) {
-      if (send.state === "failed" && send.restored) continue;
-      open.add(send.id);
-      const { id, projectId, chatId, text, attachments, retryOf } = send,
-        stored = JSON.stringify({ id, projectId, chatId, text, ...(retryOf ? { retryOf } : {}), ...(attachments ? { attachments } : {}) });
-      if (savedHandles.get(id) !== stored) {
-        localStorage.setItem(HANDLE_PREFIX + id, stored);
-        savedHandles.set(id, stored);
-      }
-    }
-    for (const id of [...savedHandles.keys()])
-      if (!open.has(id)) {
+    localStorage.setItem(HANDLE_PREFIX + id, stored);
+    if (localStorage.getItem(HANDLE_PREFIX + id) !== stored) return false;
+  } catch {
+    return false;
+  }
+  savedHandles.set(id, stored);
+  return true;
+}
+// A handle goes once its message is settled: delivered and shown, dismissed, or refused with the text back in the composer.
+function saveHandles() {
+  const open = new Set(pendingSends.filter((send) => !(send.state === "failed" && send.restored)).map((send) => send.id));
+  for (const id of [...savedHandles.keys()])
+    if (!open.has(id)) {
+      try {
         localStorage.removeItem(HANDLE_PREFIX + id);
-        savedHandles.delete(id);
-      }
-  } catch {}
+      } catch {}
+      savedHandles.delete(id);
+    }
 }
 pendingSends.push(...loadHandles());
 const expanded = new Set(); // tool callIds and group keys the owner opened
@@ -354,6 +358,7 @@ function failSend(send) {
     grow();
   }
 }
+const NO_HANDLE = "This browser cannot keep a recovery copy of the message, so it was not sent.";
 const DELIVERY = { sending: "Sending…", sent: "Sent", failed: "Not sent", unconfirmed: "Delivery not confirmed" };
 function pendingHtml(send) {
   const note =
@@ -374,6 +379,14 @@ function pendingHtml(send) {
 }
 /** Sends one pending message under its own request id (the host returns the job it already holds for a repeated id). A failure never sends again on its own. */
 async function deliver(send) {
+  if (!rememberSend(send)) {
+    send.state = "failed";
+    send.restored = false;
+    send.error = NO_HANDLE;
+    toast(NO_HANDLE, { error: true, ms: 8000 });
+    renderFeed();
+    return;
+  }
   send.state = "sending";
   send.error = "";
   let job;
@@ -699,12 +712,16 @@ function memoryRowHtml(item, result, args, status) {
     title = path ? (memoryEntry(path)?.title ?? memoryTitle(path)) : "memory index";
   const revision = /"revision":\s*"([^"]+)"/.exec(result?.preview ?? "")?.[1] ?? "";
   if (item.name === "projects_knowledge_write") {
-    const write = revision ? memoryWrite(path, revision) : null;
+    const write = revision ? memoryWrite(path, revision) : undefined;
+    if (status === "ok" && revision && !write) wantMemoryWrite(path, revision);
+    // Undo is offered only for a write the host proved current and not undone; an unproven one shows nothing.
     const action = write?.undone
       ? `<span class="muted small">Undone</span>`
       : write && !write.current
         ? `<span class="muted small">Changed since</span>`
-        : `<button type="button" class="link-btn" data-memory-undo="${esc(path)}" data-revision="${esc(revision)}">Undo</button>`;
+        : write
+          ? `<button type="button" class="link-btn" data-memory-undo="${esc(path)}" data-revision="${esc(revision)}">Undo</button>`
+          : "";
     return `<div class="memory-row" data-tool="${esc(item.name)}" data-status="${status}"><span class="mem-icon" aria-hidden="true">◆</span><span class="mem-text">${status === "error" ? "Could not remember" : "Remembered"}: <button type="button" class="link-btn" data-memory="${esc(path)}">${esc(title)}</button></span>${status === "ok" && revision && memoryReady() ? action : ""}<button type="button" class="link-btn" data-memory="${esc(path)}" data-edit="1">Edit</button></div>`;
   }
   const kind = path ? memoryKindLabel(path) : "";
@@ -845,7 +862,8 @@ form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const text = input.value.trim();
   if (!text || !state.projectId) return;
-  const gen = state.generation;
+  const gen = state.generation,
+    ownedDraft = drafts.get(draftKey());
   drafts.delete(draftKey());
   input.value = "";
   grow();
@@ -861,9 +879,6 @@ form.addEventListener("submit", async (event) => {
     }
     return;
   }
-  // Sending the restored text again supersedes the bubble it came from.
-  for (const old of pendingSends.filter((item) => item.restored && item.state === "failed" && item.text === text && inCurrentChat(item)))
-    pendingSends.splice(pendingSends.indexOf(old), 1);
   const send = {
     id: uuid(),
     projectId: state.projectId,
@@ -875,6 +890,17 @@ form.addEventListener("submit", async (event) => {
     refused: false,
     failedRead: 0,
   };
+  if (!rememberSend(send)) {
+    // Nothing is sent without a handle that survives a reload: the text stays where the owner typed it.
+    if (!input.value) input.value = text;
+    if (ownedDraft) drafts.set(draftKey(), ownedDraft);
+    grow();
+    toast(NO_HANDLE, { error: true, ms: 8000 });
+    return;
+  }
+  // Sending the restored text again supersedes the bubble it came from.
+  for (const old of pendingSends.filter((item) => item.restored && item.state === "failed" && item.text === text && inCurrentChat(item)))
+    pendingSends.splice(pendingSends.indexOf(old), 1);
   pendingSends.push(send);
   renderFeed();
   await deliver(send);

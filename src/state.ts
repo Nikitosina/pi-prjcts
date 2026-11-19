@@ -684,6 +684,14 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("memory-recent"), projectId: Id }, { additionalProperties: false }),
   Type.Object(
     {
+      action: Type.Literal("memory-writes"),
+      projectId: Id,
+      writes: Type.Array(Type.Object({ path: knowledgePath, revision }, { additionalProperties: false }), { minItems: 1, maxItems: 20 }),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
       action: Type.Literal("chat-stop"),
       projectId: Id,
       chatId: Type.Optional(ChatId),
