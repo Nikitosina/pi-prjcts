@@ -103,7 +103,19 @@ export default {
         if (mode === "hold") await new Promise((resolve) => checking.push(resolve));
         return mode === "yes";
       },
-      rpcPolicy: { rootOf: "read", setUncertain: "write", releaseCheck: "write", checkWaiting: "read", touch: "write", holdin: "write", ping: "read", hold: "write", release: "write", waiting: "read", counters: "read" },
+      rpcPolicy: {
+        rootOf: "read",
+        setUncertain: "write",
+        releaseCheck: "write",
+        checkWaiting: "read",
+        touch: "write",
+        holdin: "write",
+        ping: "read",
+        hold: "write",
+        release: "write",
+        waiting: "read",
+        counters: "read",
+      },
       web: { routes: { data: async ({ projectId }) => ({ mime: "text/plain", bytes: Buffer.from(`data:${projectId}`) }) } },
       lifecycle: { pause: (projectId) => (paused.add(projectId), () => paused.delete(projectId)) },
       cleanup: async ({ projectId }) => (calls.push(projectId), ""),

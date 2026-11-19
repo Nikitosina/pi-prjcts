@@ -298,7 +298,10 @@ await kit.run(async () => {
     await page.evaluate(`document.querySelector(${js(toggle("gated"))}).checked`),
   );
   await page.shot("03-unresolved-write", { force: true });
-  check("32 the refused disable changed nothing", (await entry(alpha, "gated")).enabled === true && !(await counters()).paused.includes(alpha));
+  check(
+    "32 the refused disable changed nothing",
+    (await entry(alpha, "gated")).enabled === true && !(await counters()).paused.includes(alpha),
+  );
   check("32 the plugin still answers", (await call(alpha, "ping")).pong === alpha);
   await mark(rootA, "fail");
   const unreadable = await refused(() => set(alpha, "gated", false));
