@@ -52,3 +52,10 @@ Written before the code. The saved request is the intent: a restart continues it
 - R14 Undo is offered from a stale answer after a reconnect or while a read is in flight, or the worker feed never learns the Undo state.
 - R15 A long pending message is not clamped like the saved one.
 - R16 A job id embedded in the page (a report link in a message) is trusted without being one of the project's jobs.
+- R17 A record whose embedded id differs from its file name is taken as the message of that file, and its admitted flag shows a false Sent.
+- R18 Recovery admits text that names an image without the image (deleted meanwhile), or with an image the saved content never had.
+- R19 The 120000 limit is checked before the attachment block is added, so a skill is granted for a message the runtime then refuses.
+- R20 Two tabs share one storage entry for recovery handles, so one erases the other's.
+- R21 Retrying the original bubble while an edited draft is in the composer leaves that draft unowned, and it follows the owner into another chat.
+- R22 A snapshot returns the saved effective content of an unadmitted record.
+- R23 The Undo answer of a read that began before a reconnect is shown as current; the first connection of a stream withdraws Undo it just loaded.

@@ -839,6 +839,36 @@ await kit.run(async () => {
     );
     check("R5 it stays unadmitted for the owner to see", JSON.parse(ledgerText(recoverDenied)).admitted !== true);
     check("R13 the denied recovery granted no skill access", !invokedSkills().includes("pend-skill-denied"), invokedSkills());
+    // Review: a record is the message of its own file name, and a snapshot never carries the saved content.
+    const filed = randomUUID(),
+      embedded = randomUUID();
+    writeFileSync(
+      ledgerPath(filed),
+      JSON.stringify({
+        id: embedded,
+        text: "swapped MARK-Z1",
+        at: new Date().toISOString(),
+        state: "queued",
+        error: null,
+        origin: "owner",
+        admitted: true,
+      }),
+    );
+    const swapped = await kit.rejects({ action: "message", id: A, text: "swapped MARK-Z1", requestId: filed });
+    check(
+      "Z1 a record whose embedded id differs from its file is refused, not taken as delivered",
+      /does not carry the id/.test(swapped ?? ""),
+      swapped,
+    );
+    check("Z1 nothing was delivered", (await hostCount(A, undefined, "MARK-Z1")) === 0);
+    const hidden = randomUUID();
+    saved(hidden, "SECRET-EXPANDED-CONTENT MARK-Z2", { text: "hidden MARK-Z2", chatId: archived });
+    const shown = JSON.stringify((await rpc({ action: "show", id: A, chatId: archived })).jobs);
+    check(
+      "Z2 a snapshot lists the unadmitted record without its saved content",
+      shown.includes(hidden) && !shown.includes("SECRET-EXPANDED"),
+      shown,
+    );
     const cli = spawnSync(process.execPath, [join(kit.core, "src", "cli.ts"), "send", A, "from the CLI MARK-CLI"], {
       cwd: kit.core,
       env: kit.hostEnv,

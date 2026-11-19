@@ -65,8 +65,10 @@ async function recoverUnadmitted(owner: DurableProjectRuntime, project: Project)
         if (current.deleted || current.archived || (await owner.jobs()).paused) continue;
         const chat = (await owner.chats()).find((item) => item.id === chatId);
         if (!chat || chat.archived) continue;
+        // The images that went in with the saved content are the ones that go in now; a missing one leaves the message unconfirmed.
+        const images = attachmentImages(dir, job.delivery!.images, true);
+        if (images.length !== (job.delivery!.images?.length ?? 0)) continue;
         for (const invoked of skillNames(job.text)) recordInvokedSkill(dir, invoked);
-        const images = attachmentImages(dir, job.attachments, owner.acceptsImages);
         await owner.admit(images.length ? [{ type: "text", text: job.delivery!.content }, ...images] : job.delivery!.content, {
           requestId: job.id,
           origin: job.origin === "telegram" ? "telegram" : undefined,
@@ -212,7 +214,7 @@ export async function durableHostSnapshot(owner: DurableProjectRuntime, chatId?:
     project: { ...project, problem: chatProblems(all, chats, view.chatId), phase: project.phase },
     busy: view.coordinator.busy,
     paused,
-    jobs: ledgerOf(view.chatId),
+    jobs: ledgerOf(view.chatId).map(({ delivery: _saved, ...job }) => job),
     messages: view.coordinator.history.items,
     before: view.coordinator.history.before,
     ...(view.coordinator.history.toolGroups ? { toolGroups: view.coordinator.history.toolGroups } : {}),

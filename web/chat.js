@@ -22,61 +22,66 @@ let live = null,
   reads = 0, // transcript reads started so far; a pending send's refusal is only proven by a read that starts after it
   held = null; // live text and thinking of a step the host just committed, shown until a transcript read that includes it renders
 const pendingSends = []; // owner messages sent from this page that the transcript does not show yet, oldest first
-// The recovery handle of an unsettled send survives a reload: its id, chat and exact text, so Retry sends the same message under the same id.
-const HANDLES_KEY = "pi-pending-sends",
+// The recovery handle of an unsettled send survives a reload: its id, project, chat and exact text, so Retry sends the same message under the same id.
+// One storage key per attempt, so tabs never overwrite each other's handles.
+const HANDLE_PREFIX = "pi-pending-send:",
   MAX_HANDLES = 20;
-let savedHandles = "";
+const savedHandles = new Map(); // attempt id → the stored text of its handle
 function loadHandles() {
+  const found = [];
   try {
-    const list = JSON.parse(localStorage.getItem(HANDLES_KEY) ?? "[]");
-    return (Array.isArray(list) ? list : []).flatMap((item) =>
-      typeof item?.id === "string" &&
-      /^[0-9a-f-]{36}$/.test(item.id) &&
-      typeof item.projectId === "string" &&
-      typeof item.chatId === "string" &&
-      typeof item.text === "string" &&
-      item.text &&
-      (item.retryOf === undefined || typeof item.retryOf === "string") &&
-      (item.attachments === undefined || (Array.isArray(item.attachments) && item.attachments.every((id) => typeof id === "string")))
-        ? [
-            {
-              id: item.id,
-              projectId: item.projectId,
-              chatId: item.chatId,
-              text: item.text,
-              ...(item.retryOf ? { retryOf: item.retryOf } : {}),
-              ...(item.attachments ? { attachments: item.attachments } : {}),
-              state: "unconfirmed",
-              error: "This page was reloaded before the host confirmed the message.",
-              restored: false,
-              refused: false,
-              failedRead: 0,
-            },
-          ]
-        : [],
-    );
-  } catch {
-    return [];
-  }
+    for (let index = 0; index < localStorage.length; index++) {
+      const key = localStorage.key(index);
+      if (!key?.startsWith(HANDLE_PREFIX)) continue;
+      const item = JSON.parse(localStorage.getItem(key) ?? "null");
+      if (
+        typeof item?.id === "string" &&
+        key === HANDLE_PREFIX + item.id &&
+        /^[0-9a-f-]{36}$/.test(item.id) &&
+        typeof item.projectId === "string" &&
+        typeof item.chatId === "string" &&
+        typeof item.text === "string" &&
+        item.text &&
+        (item.retryOf === undefined || typeof item.retryOf === "string") &&
+        (item.attachments === undefined || (Array.isArray(item.attachments) && item.attachments.every((id) => typeof id === "string")))
+      ) {
+        savedHandles.set(item.id, localStorage.getItem(key));
+        found.push({
+          id: item.id,
+          projectId: item.projectId,
+          chatId: item.chatId,
+          text: item.text,
+          ...(item.retryOf ? { retryOf: item.retryOf } : {}),
+          ...(item.attachments ? { attachments: item.attachments } : {}),
+          state: "unconfirmed",
+          error: "This page was reloaded before the host confirmed the message.",
+          restored: false,
+          refused: false,
+          failedRead: 0,
+        });
+      }
+    }
+  } catch {}
+  return found.slice(-MAX_HANDLES);
 }
 function saveHandles() {
-  const open = pendingSends
-    .filter((send) => send.state !== "failed" || !send.restored)
-    .slice(-MAX_HANDLES)
-    .map(({ id, projectId, chatId, text, attachments, retryOf }) => ({
-      id,
-      projectId,
-      chatId,
-      text,
-      ...(retryOf ? { retryOf } : {}),
-      ...(attachments ? { attachments } : {}),
-    }));
-  const next = JSON.stringify(open);
-  if (next === savedHandles) return;
-  savedHandles = next;
   try {
-    if (open.length) localStorage.setItem(HANDLES_KEY, next);
-    else localStorage.removeItem(HANDLES_KEY);
+    const open = new Set();
+    for (const send of pendingSends) {
+      if (send.state === "failed" && send.restored) continue;
+      open.add(send.id);
+      const { id, projectId, chatId, text, attachments, retryOf } = send,
+        stored = JSON.stringify({ id, projectId, chatId, text, ...(retryOf ? { retryOf } : {}), ...(attachments ? { attachments } : {}) });
+      if (savedHandles.get(id) !== stored) {
+        localStorage.setItem(HANDLE_PREFIX + id, stored);
+        savedHandles.set(id, stored);
+      }
+    }
+    for (const id of [...savedHandles.keys()])
+      if (!open.has(id)) {
+        localStorage.removeItem(HANDLE_PREFIX + id);
+        savedHandles.delete(id);
+      }
   } catch {}
 }
 pendingSends.push(...loadHandles());
@@ -148,37 +153,36 @@ export async function loadChat() {
   })();
   return run.promise;
 }
-// A draft restored after a refusal, and whatever the owner makes of it, belongs to the chat it was sent from (`draft`): the composer gives it up
-// when another chat opens and takes it back when its chat returns. An edit makes it a different message than the failed bubble's, so the bubble gets its own Retry.
+// A draft restored after a refusal, and whatever the owner makes of it, belongs to the chat it was sent from: the composer gives it up when another
+// chat opens and takes it back when its chat returns. An edit makes it a different message than the failed bubble's, so that bubble gets its own Retry.
+let draft = null; // { projectId, chatId, text, original, sendId }
+const inDraftChat = () => draft && draft.projectId === state.projectId && draft.chatId === state.chatId;
+const forgetRestored = (sendId) => {
+  const send = pendingSends.find((item) => item.id === sendId);
+  if (send?.restored) send.restored = false;
+};
 input.addEventListener("input", () => {
-  let changed = false;
-  for (const send of pendingSends)
-    if (send.draft !== undefined && inCurrentChat(send)) {
-      send.draft = input.value;
-      if (send.restored && input.value !== send.text) {
-        send.restored = false;
-        changed = true;
-      }
-    }
-  if (changed) renderFeed();
+  if (!inDraftChat()) return;
+  draft.text = input.value;
+  if (input.value !== draft.original) {
+    forgetRestored(draft.sendId);
+    renderFeed();
+  }
 });
 on("select", () => {
-  for (const send of pendingSends) {
-    if (send.draft === undefined) continue;
-    if (!inCurrentChat(send)) {
-      if (input.value === send.draft) {
-        input.value = "";
-        grow();
-      }
-      // An unedited restored draft goes back to the bubble's own Retry; an edited one waits for its chat.
-      if (send.draft === send.text) {
-        delete send.draft;
-        send.restored = false;
-      }
-    } else if (!input.value) {
-      input.value = send.draft;
+  if (draft && !inDraftChat()) {
+    if (input.value === draft.text) {
+      input.value = "";
       grow();
     }
+    // An unedited restored draft goes back to the bubble's own Retry; an edited one waits for its chat.
+    if (draft.text === draft.original) {
+      forgetRestored(draft.sendId);
+      draft = null;
+    }
+  } else if (draft && !input.value) {
+    input.value = draft.text;
+    grow();
   }
   older = [];
   olderGroups = null;
@@ -319,7 +323,7 @@ function failSend(send) {
   if (inCurrentChat(send) && !input.value) {
     input.value = send.text;
     send.restored = true;
-    send.draft = send.text;
+    draft = { projectId: send.projectId, chatId: send.chatId, text: send.text, original: send.text, sendId: send.id };
     grow();
   }
 }
@@ -371,7 +375,7 @@ async function deliver(send) {
   }
   // Only an ack that says the host admitted the message is delivery; any other answer waits for the ledger.
   if (pendingSends.includes(send) && send.state === "sending") {
-    if (job?.admitted) send.state = "sent";
+    if (job?.admitted && job.id === send.id) send.state = "sent";
     else {
       send.state = "unconfirmed";
       send.refused = false;
@@ -815,7 +819,7 @@ form.addEventListener("submit", async (event) => {
   const text = input.value.trim();
   if (!text || !state.projectId) return;
   const gen = state.generation;
-  for (const send of pendingSends) if (inCurrentChat(send)) delete send.draft;
+  if (inDraftChat()) draft = null;
   input.value = "";
   grow();
   follow.follow();
@@ -982,16 +986,18 @@ feed.addEventListener("click", async (event) => {
     if (!send) return;
     if (pendingDismiss) {
       pendingSends.splice(pendingSends.indexOf(send), 1);
-      if (send.draft !== undefined && input.value === send.draft) {
-        input.value = "";
-        grow();
+      if (draft?.sendId === send.id) {
+        if (input.value === draft.text) {
+          input.value = "";
+          grow();
+        }
+        draft = null;
       }
     }
     follow.follow();
     if (pendingRetry) {
       send.state = "sending";
       send.restored = false;
-      delete send.draft;
     }
     renderFeed();
     if (pendingRetry) await deliver(send);

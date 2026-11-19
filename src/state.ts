@@ -257,7 +257,16 @@ export const Job = Type.Object(
     /** Where the message came from; a repeat of its request id must carry the same origin. */
     origin: Type.Optional(Type.Union([Type.Literal("telegram"), Type.Literal("owner")])),
     /** The exact content handed to the runtime (skills and references expanded, attachment block added), kept until the runtime holds the message so a restart delivers this, not a rebuilt prompt. */
-    delivery: Type.Optional(Type.Object({ content: Type.String({ minLength: 1, maxLength: 130_000 }) }, { additionalProperties: false })),
+    delivery: Type.Optional(
+      Type.Object(
+        {
+          content: Type.String({ minLength: 1, maxLength: 130_000 }),
+          /** Uploads whose reduced image copies went in with the content; recovery needs every one of them. */
+          images: Type.Optional(Type.Array(Id, { maxItems: 10 })),
+        },
+        { additionalProperties: false },
+      ),
+    ),
     /** Set once the runtime holds the message's submission; a ledger record without it was recorded but not necessarily admitted. */
     admitted: Type.Optional(Type.Literal(true)),
     /** Transcript entry the message became, once the runtime placed it. */
@@ -1563,7 +1572,9 @@ export function jobs(id: string): Job[] {
       stat = statSync(path, { bigint: true }),
       stamp = `${stat.ino}:${stat.size}:${stat.mtimeNs}`,
       hit = known?.get(name);
-    current.set(name, hit?.stamp === stamp ? hit : { stamp, job: parse(Job, readJson(path)) });
+    const entry = hit?.stamp === stamp ? hit : { stamp, job: parse(Job, readJson(path)) };
+    // A record whose embedded id is not its file's name is not that message.
+    if (`${entry.job.id}.json` === name) current.set(name, entry);
   }
   jobCache.delete(dir);
   jobCache.set(dir, current);
@@ -1577,7 +1588,9 @@ export function jobs(id: string): Job[] {
 /** One job by its id: a single file read, so a lookup does not scan the folder that holds every message ever sent. */
 export function jobById(id: string, jobId: string): Job | undefined {
   try {
-    return parse(Job, readJson(join(projectDir(id), "inbox", `${parse(Id, jobId)}.json`)));
+    const job = parse(Job, readJson(join(projectDir(id), "inbox", `${parse(Id, jobId)}.json`)));
+    if (job.id !== jobId) throw new Error("A saved message record does not carry the id of its file");
+    return job;
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
     throw error;

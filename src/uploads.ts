@@ -225,4 +225,7 @@ export function attachmentImages(dir: string, ids: readonly string[] | undefined
     return copy ? [copy] : [];
   });
 }
+/** The attachments whose reduced image copies `attachmentContent` puts inline. */
+export const inlineImageIds = (dir: string, ids: readonly string[] | undefined, acceptsImages: boolean): string[] =>
+  (ids ?? []).filter((id) => attachmentImages(dir, [id], acceptsImages).length);
 export const ATTACHMENT_HEADER = "[Attached files: project uploads; read with projects_upload_read, find with projects_search]";

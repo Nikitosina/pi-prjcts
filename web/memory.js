@@ -46,16 +46,20 @@ export const memoryEntry = (path) => (cache.projectId === state.projectId ? cach
 // Host-owned Undo state, including writes made and undone before this page loaded. It belongs to a project, not to a chat, and the host
 // computes it with a knowledge scan, so it loads on project selection and knowledge changes, never with a transcript read.
 let recent = { projectId: null, writes: new Map(), ready: false };
-let recentLoad = null;
+let recentLoad = null,
+  epoch = 0; // bumped when the held Undo state is withdrawn: an answer to a read that began before it is not trusted
 
 /** Reads `memory-recent` for the selected project. A call while one is in flight joins it, or with `again` runs once more after it.
  * `invalidate` (after a reconnect) withdraws the Undo state held so far: events may have been missed, so it is not offered until a read that starts now answers. */
 export function refreshRecentMemory({ again = false, invalidate = false } = {}) {
   const projectId = state.projectId;
   if (!projectId) return null;
-  if (invalidate && recent.projectId === projectId && recent.ready) {
-    recent = { ...recent, ready: false };
-    emit("memory-recent", projectId);
+  if (invalidate && recent.projectId === projectId) {
+    epoch++;
+    if (recent.ready) {
+      recent = { ...recent, ready: false };
+      emit("memory-recent", projectId);
+    }
     again = true;
   }
   if (recentLoad?.projectId === projectId) {
@@ -69,7 +73,9 @@ export function refreshRecentMemory({ again = false, invalidate = false } = {}) 
       do {
         run.again = false;
         try {
-          const read = await call("memory-recent", { projectId });
+          const began = epoch,
+            read = await call("memory-recent", { projectId });
+          if (began !== epoch) continue;
           // Another project was selected meanwhile, or a newer load took over: this answer is not for the page any more.
           if (recentLoad !== run || projectId !== state.projectId) return;
           recent = { projectId, writes: new Map(read.writes.map((write) => [`${write.path}@${write.revision}`, write])), ready: true };

@@ -71,6 +71,7 @@ async function select(projectId, chatId = "main", { keepFocus = false } = {}) {
   if (!sameProject) {
     changes?.stop();
     const gen = state.generation;
+    let connected = false; // the first sync of a stream is the opening read; a later one is a reconnect, after which missed changes are possible
     changes = stream(
       `/changes?project=${encodeURIComponent(projectId)}`,
       (change) => {
@@ -78,7 +79,8 @@ async function select(projectId, chatId = "main", { keepFocus = false } = {}) {
         if (change.t === "sync") {
           emit("plugins-changed");
           void refreshAll();
-          void refreshRecentMemory({ invalidate: true });
+          if (connected) void refreshRecentMemory({ invalidate: true });
+          connected = true;
         } else if (change.t === "topic") onTopic(change, gen);
       },
       (up) => {

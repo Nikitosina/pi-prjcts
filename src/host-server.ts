@@ -110,7 +110,16 @@ import {
 } from "./github-authorization.ts";
 import { settingsApplication } from "./settings-application.ts";
 import { libraryImport, libraryList, libraryRead } from "./project-library.ts";
-import { attachmentContent, attachmentImages, deleteUpload, listUploads, saveUpload, uploadRecord, uploadText } from "./uploads.ts";
+import {
+  attachmentContent,
+  attachmentImages,
+  inlineImageIds,
+  deleteUpload,
+  listUploads,
+  saveUpload,
+  uploadRecord,
+  uploadText,
+} from "./uploads.ts";
 import { createModelRuntime, loadProviderExtensions } from "./provider-extensions.ts";
 import { openToolSummaries } from "./tool-summaries.ts";
 import { projectModelCatalog, projectModelPicker } from "./project-models.ts";
@@ -1722,29 +1731,36 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
             // The saved content is the message; only a record without it (legacy) or a new message is built from the text.
             // The job keeps what the owner typed; the coordinator receives the expanded skill.
             // `/skill:<name>` anywhere: skill blocks precede the owner's words. `@issue:/@doc:/@upload:/@file:` and `#123` / `PR #123`: compact untrusted blocks follow them.
-            const text =
-              job.delivery?.content ??
-              (skillNames(job.text).length ? await expandSkillCommand(await configuredSkills(input.id), job.text) : job.text) +
-                (await referencedItemsBlock(loadProject(input.id), ownedProjectDir(input.id), job.text)) +
-                (await referencedPrBlock(loadProject(input.id), job.text));
-            if (text.length > 120_000)
-              throw new Error(`Message with its skills and references is too large to send (${text.length} characters; limit 120000)`);
+            const dir = ownedProjectDir(input.id);
+            const saved = job.delivery;
+            const content =
+              saved?.content ??
+              attachmentText(
+                dir,
+                (skillNames(job.text).length ? await expandSkillCommand(await configuredSkills(input.id), job.text) : job.text) +
+                  (await referencedItemsBlock(loadProject(input.id), dir, job.text)) +
+                  (await referencedPrBlock(loadProject(input.id), job.text)),
+                job,
+                owner.acceptsImages,
+              );
+            // The limit applies to what the runtime receives, attachment block included, so a skill is never granted for a message it would refuse.
+            if (content.length > 120_000)
+              throw new Error(`Message with its skills and references is too large to send (${content.length} characters; limit 120000)`);
+            const images = saved ? (saved.images ?? []) : inlineImageIds(dir, job.attachments, owner.acceptsImages);
+            if (attachmentImages(dir, images, true).length !== images.length)
+              throw new Error("An image attached to the saved message is no longer available; send it again as a new message");
             if ((await owner.jobs()).paused) throw new Error("Project plan is paused; admission is denied");
             // Validate the chat before recording the job, so an unknown or archived chat leaves no ledger entry.
             const chat = (await owner.chats()).find((item) => item.id === chatId);
             if (!chat) throw new Error("Unknown chat for this project");
             if (chat.archived) throw new Error("Chat is archived; restore it before sending");
-            return {
-              ...job,
-              origin,
-              delivery: { content: job.delivery?.content ?? attachmentText(ownedProjectDir(input.id), text, job, owner.acceptsImages) },
-            };
+            return { ...job, origin, delivery: { content, ...(images.length ? { images } : {}) } };
           });
           for (const invoked of skillNames(job.text)) recordInvokedSkill(ownedProjectDir(input.id), invoked);
           saveJob(input.id, job);
           const dir = ownedProjectDir(input.id),
             effective = job.delivery!.content,
-            images = attachmentImages(dir, job.attachments, owner.acceptsImages);
+            images = attachmentImages(dir, job.delivery!.images, true);
           await owner.admit(images.length ? [{ type: "text", text: effective }, ...images] : effective, {
             requestId: job.id,
             origin: job.origin === "telegram" ? "telegram" : undefined,
