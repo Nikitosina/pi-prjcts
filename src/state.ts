@@ -1603,6 +1603,9 @@ export function saveJob(id: string, job: Job): void {
   jobCache.get(dir)?.delete(`${job.id}.json`);
 }
 
+/** An error raised before anything was recorded or changed: a client may treat the request as not sent. */
+export class Refused extends Error {}
+
 export function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }

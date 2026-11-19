@@ -25,6 +25,7 @@ import {
   socketPath,
   Request,
   Project,
+  Refused,
   errorText,
   jobById,
   jobs,
@@ -235,8 +236,6 @@ async function withProjectLock<T>(id: string, operation: () => Promise<T>, durin
   }
 }
 
-/** An error raised before the host recorded or changed anything: the client may treat the request as not sent. */
-class Refused extends Error {}
 async function refusing<T>(operation: () => Promise<T>): Promise<T> {
   try {
     return await operation();
@@ -1723,9 +1722,9 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
             throw new Refused("This request id belongs to a different message; nothing was changed");
           if (prior?.admitted) return prior;
           if (prior && (await owner.ledgerSubmissions(chatId, [prior.id])).length) return markAdmitted(prior);
-          // A record without saved content proves neither where it came from nor what it said: only the owner's own retry may deliver it.
-          if (prior && !prior.delivery && origin !== "owner" && (prior.state === "queued" || prior.state === "running"))
-            throw new Refused("This saved message does not prove where it came from; send it again as a new message");
+          // A record without saved content proves neither where it came from nor what it said, and no runtime receipt was found: nobody's repeat rebuilds it.
+          if (prior && !prior.delivery && (prior.state === "queued" || prior.state === "running"))
+            throw new Refused("This saved message does not prove what it said or where it came from; send it again as a new message");
           // A settled record the runtime has no submission for is history, not a message waiting to be sent.
           if (prior && prior.state !== "queued" && prior.state !== "running") return prior;
           // Everything that can refuse runs before anything is recorded or granted.

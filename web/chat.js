@@ -1014,7 +1014,8 @@ feed.addEventListener("click", async (event) => {
     if (pendingDismiss) {
       pendingSends.splice(pendingSends.indexOf(send), 1);
       const held = drafts.get(draftKey(send.projectId, send.chatId));
-      if (held?.sendId === send.id) {
+      // Only a draft the owner has not touched goes with its bubble; an edited one is a new, unsent message.
+      if (held?.sendId === send.id && held.text === held.original) {
         if (input.value === held.text) {
           input.value = "";
           grow();

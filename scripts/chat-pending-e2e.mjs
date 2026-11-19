@@ -45,6 +45,12 @@ writeFileSync(
   "---\nname: pend-skill-denied\ndescription: Pending-send fixture skill for denied recovery.\n---\n\nBODY-pend-skill-denied\n",
 );
 
+mkdirSync(join(kit.agentDir, "skills", "pend-skill-crash"), { recursive: true });
+writeFileSync(
+  join(kit.agentDir, "skills", "pend-skill-crash", "SKILL.md"),
+  "---\nname: pend-skill-crash\ndescription: Pending-send fixture skill for a crash before the grant.\n---\n\nBODY-pend-skill-crash\n",
+);
+
 const wrapFetch = `(() => {
   window.__calls = [];
   window.__rules = {};
@@ -62,9 +68,11 @@ const wrapFetch = `(() => {
     if (rule.delay) await sleep(rule.delay);
     if (rule.gate) await rule.gate;
     if (rule.fail === "json") {
+      // A real refusal: the host answers the same message addressed to a chat it does not know, through the browser endpoint.
       delete rule.fail;
+      const response = await real(url, { ...init, body: JSON.stringify({ ...body, chatId: crypto.randomUUID() }) });
       entry.end = performance.now();
-      return new Response(JSON.stringify({ ok: false, refused: true, error: "Not admitted: simulated refusal" }), { status: 400, headers: { "content-type": "application/json" } });
+      return response;
     }
     if (rule.fail === "gateway") {
       delete rule.fail;
@@ -310,6 +318,15 @@ await kit.run(async () => {
   check("P6 no automatic retry", (await countCalls("message")) === 1, await calls("message"));
   await ev(`document.querySelector('#feed [data-pending-dismiss]').click()`);
   check("P9 Dismiss removes the failed bubble", (await owners("MARK-P6")).length === 0);
+  check("R34 Dismiss keeps the edited, unsent draft", (await composer()) === "refused MARK-P6 edited", await composer());
+  await select(chatButton(A, other));
+  await page.waitFor(
+    `document.querySelector(${JSON.stringify(chatButton(A, other))}).getAttribute("aria-current") === "true"`,
+    "other selected after dismiss",
+  );
+  await select(chatButton(A, "main"));
+  await page.waitFor(`document.querySelector('#feed').innerText.includes("seed A MARK-SEED-A")`, "main after dismiss");
+  check("R34 the edited draft is still the chat's draft after a switch", (await composer()) === "refused MARK-P6 edited", await composer());
   await ev(`(() => { const box = document.querySelector('#composer-input'); box.value = ""; box.dispatchEvent(new Event("input")); })()`);
 
   // P6b: a refusal that arrives after the owner left and came back updates the bubble; its draft stays with its own chat.
@@ -430,21 +447,20 @@ await kit.run(async () => {
   check("P10 it never says Sent", !unadmitted.some((item) => /\bSent\b/.test(item.text)), unadmitted);
   check("P10 nothing was sent on its own", (await countCalls("message")) === 1);
   await page.shot("03-unadmitted", { force: true });
+  // R31: the record has no saved content and no runtime receipt: nothing proves what it said, so Retry never rebuilds it under its id.
   await ev(`document.querySelector('#feed [data-pending-retry]').click()`);
-  await page.waitFor(
-    `[...document.querySelectorAll('#feed .msg.owner')].filter((n) => n.innerText.includes("MARK-STRAND") && !n.classList.contains("pending")).length === 3`,
-    "three canonical messages after Retry",
-  );
-  await kit.delay(400);
-  const admittedNow = await owners("MARK-STRAND");
+  await kit.eventually(async () => (await countCalls("message")) === 2, "P10 Retry reached the host");
+  await kit.delay(600);
+  const stillUnproven = await owners("MARK-STRAND");
   check(
-    "P10 Retry delivers once: three canonical messages, no pending",
-    admittedNow.length === 3 && admittedNow.every((item) => !item.pending),
-    admittedNow,
+    "R31 Retry of a record without evidence is refused and the bubble stays unconfirmed",
+    stillUnproven.length === 3 && stillUnproven.filter((item) => item.delivery === "unconfirmed").length === 1,
+    stillUnproven,
   );
   const retriedStranded = await calls("message");
   check("P10 Retry reused the request id", retriedStranded.length === 2 && retriedStranded[0].requestId === retriedStranded[1].requestId);
-  check("P10 the host stored three", (await hostCount(A, undefined, "MARK-STRAND")) === 3);
+  check("R31 the host stored two, not a rebuilt third", (await hostCount(A, undefined, "MARK-STRAND")) === 2);
+  await ev(`document.querySelector('#feed [data-pending-dismiss]').click()`);
 
   const ledgerPath = (id) => join(kit.home, A, "inbox", `${id}.json`);
   const ledgerText = (id) => readFileSync(ledgerPath(id), "utf8");
@@ -793,11 +809,11 @@ await kit.run(async () => {
     });
     check("R12 a Telegram replay cannot deliver a record that proves no origin", /does not prove/.test(unproven ?? ""), unproven);
     check("R12 nothing was delivered", (await hostCount(A, undefined, "MARK-R12")) === 0);
-    const replayed = await send({ text: "older MARK-R12", requestId: olderThanOrigins });
+    const ownerRepeat = await kit.rejects({ action: "message", id: A, text: "older MARK-R12", requestId: olderThanOrigins });
+    check("R31 not even the owner's repeat rebuilds a record that proves nothing", /does not prove/.test(ownerRepeat ?? ""), ownerRepeat);
     check(
-      "R12 the owner's own retry delivers it once",
-      replayed.admitted === true && (await hostCount(A, undefined, "MARK-R12")) === 1,
-      replayed,
+      "R31 it stays undelivered and untouched",
+      (await hostCount(A, undefined, "MARK-R12")) === 0 && !JSON.parse(ledgerText(olderThanOrigins)).admitted,
     );
     const legacyAdmitted = randomUUID();
     await send({ text: "legacy receipt MARK-R12R", requestId: legacyAdmitted, origin: "telegram" });
@@ -815,6 +831,117 @@ await kit.run(async () => {
     await send({ text: "web MARK-R12W", requestId: webRecord });
     const forged = await kit.rejects({ action: "message", id: A, text: "web MARK-R12W", requestId: webRecord, origin: "telegram" });
     check("R12 a web message is not claimed by a Telegram replay", /different message/.test(forged ?? ""), forged);
+  });
+
+  // R30: the page's own request to the browser endpoint tells a proven refusal from an unknown error.
+  await section("R30", async () => {
+    const viaEndpoint = (action, input) =>
+      ev(
+        `(async () => { const api = await import("/api.js"); try { await api.call(${JSON.stringify(action)}, ${JSON.stringify(input)}); return { ok: true }; } catch (error) { return { ok: false, refused: error.refused, message: error.message }; } })()`,
+      );
+    const refused = await viaEndpoint("message", { id: A, text: "refused MARK-R30", requestId: randomUUID(), chatId: randomUUID() });
+    check("R30 a refusal before admission carries the host's marker through the browser endpoint", refused.refused === true, refused);
+    const unknown = await viaEndpoint("message", { id: randomUUID(), text: "unknown MARK-R30", requestId: randomUUID() });
+    check("R30 an error that is not a proven refusal carries no marker", unknown.ok === false && unknown.refused === false, unknown);
+    check("R30 neither stored a message", (await hostCount(A, undefined, "MARK-R30")) === 0);
+  });
+  // R32: a crash after the runtime took the message and before the skill grant finishes the original grant from the receipt, without sending again.
+  await section("R32", async () => {
+    const id = randomUUID(),
+      crashSkills = () => invokedSkills().split("\n");
+    await send({ text: "/skill:pend-skill-crash granted MARK-R32", requestId: id });
+    await kit.eventually(async () => JSON.parse(ledgerText(id)).state === "done", "R32 settled");
+    const record = JSON.parse(ledgerText(id));
+    delete record.admitted;
+    delete record.entry;
+    writeFileSync(ledgerPath(id), JSON.stringify({ ...record, state: "queued", delivery: { content: "expanded MARK-R32" } }));
+    writeFileSync(join(kit.home, A, "invoked-skills.txt"), crashSkills().filter((name) => name && name !== "pend-skill-crash").join("\n") + "\n");
+    check("R32 the grant is missing before the restart", !crashSkills().includes("pend-skill-crash"), invokedSkills());
+    await kit.restartHost();
+    await kit.eventually(async () => crashSkills().includes("pend-skill-crash"), "R32 grant finished after the restart");
+    await kit.delay(600);
+    const healed = JSON.parse(ledgerText(id));
+    check("R32 the record is admitted and drops its saved content", healed.admitted === true && !("delivery" in healed), healed);
+    check("R32 nothing was submitted again", (await hostCount(A, undefined, "MARK-R32")) === 1);
+    const refusedSkill = await kit.rejects({
+      action: "message",
+      id: A,
+      text: "/skill:pend-skill-denied nothing MARK-R32B",
+      requestId: randomUUID(),
+      chatId: randomUUID(),
+    });
+    check("R32 a refused send is refused", /Unknown chat/.test(refusedSkill ?? ""), refusedSkill);
+    check("R32 a refused send grants nothing", !invokedSkills().includes("pend-skill-denied"), invokedSkills());
+  });
+  // R33: no recoverable handle, no send: the draft stays in the composer and the host never hears of the message.
+  await section("R33", async () => {
+    await clearComposer();
+    await reset();
+    await ev(
+      `(() => { window.__realSet = Storage.prototype.setItem; Storage.prototype.setItem = function (key, value) { if (String(key).startsWith("pi-pending-send:")) throw new DOMException("full", "QuotaExceededError"); return window.__realSet.call(this, key, value); }; })()`,
+    );
+    await typeAndSend("unstorable MARK-R33");
+    await kit.delay(900);
+    check("R33 nothing was sent", (await countCalls("message")) === 0 && (await hostCount(A, undefined, "MARK-R33")) === 0, await calls("message"));
+    check("R33 the draft stays in the composer", (await composer()) === "unstorable MARK-R33", await composer());
+    check("R33 no bubble claims it was sent", (await owners("MARK-R33")).length === 0, await owners("MARK-R33"));
+    check("R33 the owner is told", await ev(`document.querySelector("#toasts").innerText.includes("recovery")`));
+    await ev(`(Storage.prototype.setItem = window.__realSet, true)`);
+    await ev(`document.querySelector('#composer').requestSubmit()`);
+    await page.waitFor(`document.querySelector('#feed').innerText.includes("ACK unstorable MARK-R33")`, "R33 sent once storage works");
+    check("R33 then it is sent once", (await hostCount(A, undefined, "MARK-R33")) === 1 && (await countCalls("message")) === 1);
+  });
+  // R34: dismissing a failed bubble clears only a draft the owner has not touched.
+  await section("R34", async () => {
+    await clearComposer();
+    await reset();
+    await ev(`__rule("message", { fail: "json" })`);
+    await typeAndSend("untouched MARK-R34");
+    await page.waitFor(`[...document.querySelectorAll('#feed .msg.owner')].some((n) => n.dataset.delivery === "failed")`, "R34 failed");
+    check("R34 a real refusal restores the draft", (await composer()) === "untouched MARK-R34", await composer());
+    await ev(`document.querySelector('#feed [data-pending-dismiss]').click()`);
+    check("R34 dismissing the unedited restore clears it", (await composer()) === "" && (await owners("MARK-R34")).length === 0, await composer());
+  });
+  // R35: only a write the host proves is offered Undo; an old, still current write keeps its Undo.
+  await section("R35", async () => {
+    await clearComposer();
+    for (const suffix of ["D", "E", "F"]) {
+      await typeAndSend(`MARK-REMEMBER${suffix} write`);
+      await page.waitFor(`!!document.querySelector('[data-memory-undo="decisions/undo-me${suffix}.md"]')`, `R35 Undo for ${suffix}`);
+    }
+    await ev(`document.querySelector('[data-memory-undo="decisions/undo-meE.md"]').click()`);
+    await page.waitFor(`!document.querySelector('[data-memory-undo="decisions/undo-meE.md"]')`, "R35 E undone");
+    const changedDoc = await rpc({ action: "knowledge-read", id: A, path: "decisions/undo-meD.md" });
+    await rpc({ action: "knowledge-write", id: A, path: "decisions/undo-meD.md", text: "# Undo me\n\nchanged", expectedRevision: changedDoc.revision });
+    for (let index = 0; index < 55; index++)
+      await rpc({ action: "knowledge-write", id: A, path: `decisions/fill-${index}.md`, text: `# Fill ${index}\n\nbody`, expectedRevision: null });
+    await ev(`delete window.__calls`);
+    await page.reload();
+    await page.waitFor(`!window.__calls && document.body.dataset.ready === "1" && !!document.querySelector('#composer-input')`, "R35 reloaded");
+    await ev(wrapFetch);
+    await page.waitFor(`document.querySelector('#feed').innerText.includes("ACK MARK-REMEMBERF")  || document.querySelector('[data-memory="decisions/undo-meF.md"]')`, "R35 transcript");
+    await kit.delay(1500);
+    const rowOf = (path) =>
+      ev(
+        `(() => { const row = [...document.querySelectorAll('.memory-row[data-tool="projects_knowledge_write"]')].find((n) => n.querySelector('[data-memory="${path}"]')); return row ? { undo: !!row.querySelector("[data-memory-undo]"), text: row.innerText } : null; })()`,
+      );
+    const changed = await rowOf("decisions/undo-meD.md"),
+      undone = await rowOf("decisions/undo-meE.md"),
+      current = await rowOf("decisions/undo-meF.md");
+    check("R35 an old write changed since is not offered Undo", changed && !changed.undo && /Changed since/.test(changed.text), changed);
+    check("R35 an old undone write is not offered Undo", undone && !undone.undo && /Undone/.test(undone.text), undone);
+    check("R35 an old write that is still current keeps its Undo", current?.undo === true, current);
+    await reset();
+    await typeAndSend("plain after reload MARK-R35");
+    await page.waitFor(`document.querySelector('#feed').innerText.includes("ACK plain after reload MARK-R35")`, "R35 reply");
+    check(
+      "R35 a send asks for no memory state",
+      (await countCalls("memory-recent")) === 0 && (await countCalls("memory-writes")) === 0,
+      await calls("memory-recent"),
+    );
+    await ev(`document.querySelector('[data-memory-undo="decisions/undo-meF.md"]').click()`);
+    await page.waitFor(`!document.querySelector('[data-memory-undo="decisions/undo-meF.md"]')`, "R35 undone");
+    check("R35 the legitimate old Undo ran", (await countCalls("memory-undo")) === 1);
   });
   // R1-R6: records the host saved before admitting (the CLI and the web page supply no id the host could not make up itself).
   await section("R1-R6", async () => {

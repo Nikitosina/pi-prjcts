@@ -65,3 +65,14 @@ Written before the code. The saved request is the intent: a restart continues it
 - R27 A turn-card Retry in a second tab, or after a reload, gets a new request id; an edited draft in one chat is replaced by another chat's draft.
 - R28 Turn-card Retry reads the recipient after an await, so a chat switch sends it to the new chat; two projects with one failed job id share a retry id and handle.
 - R29 A Telegram replay rebuilds a record that has an origin but no saved content; skill access is granted before the request is saved or admitted.
+
+## Review round 4 (PR 63, six findings)
+
+Written before the code. Each case runs through the page and the private browser endpoint (`src/web.ts`), never through a field the test invents.
+
+- R30 The browser endpoint answers a host refusal without the host's refusal marker, so the page shows an unconfirmed bubble and no restored draft for a message the host never touched. An error that is not a proven pre-admission refusal must still read as unknown.
+- R31 A repeat of a record without saved content (legacy, queued or running, no runtime receipt) is rebuilt from the text under its original id when the repeat comes from the owner; only the saved content or a runtime receipt is evidence.
+- R32 A crash between the runtime taking the message and the skill grant loses the grant (the restart finds the receipt and only marks the record admitted), or a restart grants the skill again by resubmitting; a refused send grants a skill.
+- R33 The page cannot store the recovery handle (storage full, denied) and sends anyway, so a reload loses the message with no trace; or the draft is cleared and the message is dropped.
+- R34 Dismissing the failed bubble of a restored draft the owner already edited clears the edited, unsent draft.
+- R35 A memory write older than the 50 most recent is offered Undo because it is absent from the recent list; an undone or changed write shows an Undo that fails. A legitimate old Undo must still work, checked only for the writes on screen and never with a send.
