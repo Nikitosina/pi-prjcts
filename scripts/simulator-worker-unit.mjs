@@ -217,6 +217,32 @@ try {
     deletes().every(([, id]) => id === stray),
     "X4 simslim deletes only the stray",
   );
+  // Y1 a persisted uncertain outcome or an interrupted pending write refuses the lifecycle pause (so a plugin disable) until it is resolved.
+  {
+    const saved = readFileSync(join(projectDir, "simulator.json"), "utf8");
+    const stored = JSON.parse(saved);
+    simulators.pause(projectId)();
+    writeFileSync(join(projectDir, "simulator.json"), JSON.stringify({ ...stored, uncertain: "Simulator boot outcome is unknown." }));
+    assert.throws(() => simulators.pause(projectId), /unknown|uncertain|inspect/i, "Y1 an uncertain outcome refuses the pause");
+    writeFileSync(
+      join(projectDir, "simulator.json"),
+      JSON.stringify({ ...stored, pending: { requestId: randomUUID(), operation: "boot", udid, sourceUdid: null } }),
+    );
+    assert.throws(() => simulators.pause(projectId), /unknown|uncertain|inspect|interrupted/i, "Y1 an interrupted write refuses the pause");
+    writeFileSync(join(projectDir, "simulator.json"), saved);
+    simulators.pause(projectId)();
+  }
+  // Y2 a pause held by a plugin disable survives another lifecycle pause being taken and resumed (and a resume called twice).
+  {
+    const held = simulators.pause(projectId);
+    const other = simulators.pause(projectId);
+    other();
+    other();
+    const configure = () => simulators.configure(projectId, { enabled: true, requestId: randomUUID() });
+    await assert.rejects(configure, /lifecycle is changing/, "Y2 the held pause stays");
+    held();
+    await configure();
+  }
   console.log("simulator-worker-unit: ok");
 } finally {
   rmSync(base, { recursive: true, force: true });

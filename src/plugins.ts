@@ -94,7 +94,6 @@ usePluginPromptBlocks(() =>
   }),
 );
 const disabledIn = (project: Pick<Project, "disabledPlugins">, plugin: string) => project.disabledPlugins?.includes(plugin) ?? false;
-/** Every entry of a plugin into a project runs through this gate: a plugin the project turned off refuses, and work in flight is counted. */
 const release = (resume: (() => void) | undefined) => {
   try {
     resume?.();
@@ -104,6 +103,7 @@ const release = (resume: (() => void) | undefined) => {
 };
 /** Lifecycle pauses taken by a disable: held while the plugin is off, released by the enable. */
 const heldPauses = new Map<string, () => void>();
+/** Every entry of a plugin into a project runs through this gate: a plugin the project turned off refuses, and work in flight is counted. */
 // A project whose stored state cannot be read is not one that has the plugin on: the gate fails closed.
 const gate = createPluginGate((projectId, plugin) => {
   try {
@@ -149,14 +149,15 @@ function pauseOf(project: Project, name: string): (() => void) | undefined {
 }
 
 /** A copy of `provider` whose listed methods run through the project gate; everything else (and `this`) stays the provider's own. */
-const guards = new WeakMap<object, object>();
-/** One stable guarded copy per provider: callers that compare providers across calls keep working. */
-function guarded<T extends object>(provider: T, overrides: Partial<T>): T {
-  const known = guards.get(provider);
-  if (known) return known as T;
-  const made = Object.assign(Object.create(provider) as T, overrides);
-  guards.set(provider, made);
-  return made;
+const guards = new WeakMap<object, Map<string, object>>();
+/** One stable guarded copy per provider, plugin and capability: callers that compare providers across calls keep working, and one object serving two capabilities gets a wrapper for each. */
+function guarded<T extends object>(plugin: string, capability: string, provider: T, overrides: Partial<T>): T {
+  const key = `${plugin}\0${capability}`;
+  const made = guards.get(provider)?.get(key);
+  if (made) return made as T;
+  const fresh = Object.assign(Object.create(provider) as T, overrides);
+  guards.set(provider, (guards.get(provider) ?? new Map()).set(key, fresh));
+  return fresh;
 }
 
 export const plugins = {
@@ -281,7 +282,7 @@ export const plugins = {
       const provider = item.capabilities.workspace;
       if (!provider) return [];
       return [
-        guarded(provider, {
+        guarded(item.plugin, "workspace", provider, {
           quickPreview: (project, walkedRoot) =>
             disabledIn(project, item.plugin)
               ? { available: false, blocker: disabledMessage(item.plugin) }
@@ -300,7 +301,7 @@ export const plugins = {
       if (!provider) return [];
       const run = <R>(project: Project, work: () => Promise<R>) => gate.run(project.id, plugin, work);
       return [
-        guarded(provider, {
+        guarded(item.plugin, "prs", provider, {
           applies: (project) => !disabledIn(project, plugin) && provider.applies(project),
           list: (project, options) => run(project, () => provider.list(project, options)),
           touching: provider.touching ? (project) => run(project, () => provider.touching!(project)) : undefined,
@@ -317,7 +318,7 @@ export const plugins = {
         plugin = item.plugin;
       if (!provider) return [];
       return [
-        guarded(provider, {
+        guarded(item.plugin, "follow", provider, {
           repository: (project) => (disabledIn(project, plugin) ? undefined : provider.repository(project)),
           observe: (input) => gate.settled(input.project.id, plugin, () => provider.observe(input)),
           published: (root, project) => gate.run(project.id, plugin, () => provider.published(root, project)),
@@ -342,7 +343,7 @@ export const plugins = {
     [...builtins(), ...loaded].flatMap((item) => {
       const provider = item.capabilities.coordinatorTools;
       if (!provider) return [];
-      const guard = guarded<CoordinatorToolsProvider>(provider, {
+      const guard = guarded<CoordinatorToolsProvider>(item.plugin, "coordinatorTools", provider, {
         applies: (project) => !disabledIn(project, item.plugin) && provider.applies(project),
         create: (input) => {
           const made = provider.create(input);
@@ -359,7 +360,7 @@ export const plugins = {
       const provider = item.capabilities.workerTools;
       if (!provider) return [];
       return [
-        guarded<WorkerToolsProvider>(provider, {
+        guarded<WorkerToolsProvider>(item.plugin, "workerTools", provider, {
           offered: (projectId: string) => !gate.isOff(projectId, item.plugin) && provider.offered(projectId),
           create: (input) => gate.tools(input.projectId, item.plugin, provider.create(input)),
         }),

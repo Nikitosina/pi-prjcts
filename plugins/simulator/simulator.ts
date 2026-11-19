@@ -130,12 +130,19 @@ export function createSimulators(api: HostPluginApi) {
   const frames = new Map<string, Frame>();
   const captures = new Map<string, Promise<Frame>>();
   const captureControllers = new Set<AbortController>();
-  const transitions = new Set<string>();
+  const transitions = new Map<string, number>();
   function pauseSimulatorManagement(id: string): () => void {
     if (tasks.has(id) || locks.has(id)) throw Error("Wait for simulator management to finish before changing project lifecycle");
-    transitions.add(id);
+    const store = readStore(id);
+    if (store.uncertain) throw Error(`Resolve the simulator outcome first: ${store.uncertain}`);
+    transitions.set(id, (transitions.get(id) ?? 0) + 1);
+    let resumed = false;
     return () => {
-      transitions.delete(id);
+      if (resumed) return;
+      resumed = true;
+      const left = (transitions.get(id) ?? 1) - 1;
+      if (left) transitions.set(id, left);
+      else transitions.delete(id);
     };
   }
   let stopping = false;
