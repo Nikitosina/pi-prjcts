@@ -48,6 +48,7 @@ export async function loadChat() {
       do {
         run.again = false;
         const gen = state.generation,
+          readAt = Date.now(),
           id = state.projectId,
           entries = state.live?.entries ?? 0;
         if (!id) return;
@@ -55,7 +56,7 @@ export async function loadChat() {
         // Another chat or project was selected meanwhile: drop this read, but still run the one that selection queued.
         if (stale(gen)) continue;
         state.view = view;
-        reconcilePending(view);
+        reconcilePending(view, readAt);
         if (held && (entries >= held.entries || committed(view, held))) held = state.liveHeld = null;
         emit("view", view);
         renderFeed();
@@ -71,6 +72,13 @@ export async function loadChat() {
   return run.promise;
 }
 on("select", () => {
+  // A draft restored after a refusal belongs to the chat it was sent from: it goes back to that chat's failed bubble.
+  for (const send of pendingSends)
+    if (send.restored && input.value === send.text && !inCurrentChat(send)) {
+      input.value = "";
+      grow();
+      send.restored = false;
+    }
   older = [];
   olderGroups = null;
   follow.follow();
@@ -161,7 +169,12 @@ const STARTERS = [
   "Plan the next small change, then hand it to a worker.",
 ];
 export function renderFeed() {
-  if (!state.view) return;
+  if (!state.view) {
+    // A message sent before the first read of a chat still shows at once.
+    const sends = pendingSends.filter(inCurrentChat);
+    if (sends.length) follow.render(() => morph(feed, sends.map(pendingHtml).join("")));
+    return;
+  }
   const all = turns(messages()),
     busy = !!state.live?.running || !!currentChat()?.busy;
   const html = [];
@@ -182,31 +195,43 @@ export function renderFeed() {
 }
 const inCurrentChat = (send) => send.projectId === state.projectId && send.chatId === state.chatId;
 const entryTime = (at) => (typeof at === "number" ? at : Date.parse(at));
-/** Drops the pending sends the transcript now shows. Each takes the oldest unclaimed owner message newer than what the chat held when it was sent. */
-function reconcilePending(view) {
-  const ledger = view.jobs ?? [];
+/** Settles the pending sends of the open chat against a read that started at `readAt`. The host records a message's job before it admits it,
+ * so only a recorded job can be matched to a transcript message, and only a read after a refusal without that job proves the refusal. */
+function reconcilePending(view, readAt) {
+  const ledger = view.jobs ?? [],
+    scope = `${state.projectId}:${state.chatId}:`;
   for (const send of pendingSends.filter(inCurrentChat)) {
-    if (send.state !== "failed") {
-      const claim = (item) => `${send.projectId}:${send.chatId}:${item.entryId}`;
-      const match = (view.messages ?? []).find(
-        (item) =>
-          item.kind === "message" &&
-          item.role === "user" &&
-          item.origin === "owner" &&
-          !claimedEntries.has(claim(item)) &&
-          (send.baseline === null ? entryTime(item.at) >= send.sentAt - 5000 : item.entryId > send.baseline) &&
-          item.text?.includes(send.text),
-      );
-      if (match) {
-        claimedEntries.add(claim(match));
-        pendingSends.splice(pendingSends.indexOf(send), 1);
-        continue;
-      }
-      const job = ledger.find((item) => item.id === send.id);
-      if (job) send.state = "sent";
-      // A settled job whose message never reached the transcript leaves its outcome in the turn card; the bubble must not outlive it.
-      if (job && ["done", "failed", "interrupted"].includes(job.state)) pendingSends.splice(pendingSends.indexOf(send), 1);
+    const job = ledger.find((item) => item.id === send.id);
+    if (!job) {
+      if (send.state === "unconfirmed" && send.answered && readAt >= send.failedAt) failSend(send);
+      continue;
     }
+    if (send.state === "sending") send.state = "sent";
+    const owner = (view.messages ?? []).filter(
+      (item) =>
+        item.kind === "message" &&
+        item.role === "user" &&
+        item.origin === "owner" &&
+        !claimedEntries.has(scope + item.entryId) &&
+        (send.baseline === null ? entryTime(item.at) >= send.sentAt : item.entryId > send.baseline),
+    );
+    // Exact text first: the host may have added skill or reference blocks around what the owner typed.
+    const match = owner.find((item) => item.text?.trim() === send.text) ?? owner.find((item) => item.text?.includes(send.text));
+    // A settled job whose message never reached the transcript leaves its outcome in the turn card; the bubble must not outlive it.
+    if (match || ["done", "failed", "interrupted"].includes(job.state)) {
+      if (match) claimedEntries.add(scope + match.entryId);
+      pendingSends.splice(pendingSends.indexOf(send), 1);
+    }
+  }
+  if (!pendingSends.some(inCurrentChat)) for (const key of claimedEntries) if (key.startsWith(scope)) claimedEntries.delete(key);
+}
+/** A refusal the host reported and recorded no job for: the message was not sent, and its text goes back to an empty composer of the same chat. */
+function failSend(send) {
+  send.state = "failed";
+  if (inCurrentChat(send) && !input.value) {
+    input.value = send.text;
+    send.restored = true;
+    grow();
   }
 }
 const DELIVERY = { sending: "Sending…", sent: "Sent", failed: "Not sent", unconfirmed: "Delivery not confirmed" };
@@ -215,7 +240,7 @@ function pendingHtml(send) {
     send.state === "failed"
       ? `${esc(clip(oneLine(send.error), 300))}${send.restored ? " The text is back in the composer." : ""}`
       : send.state === "unconfirmed"
-        ? "The host did not answer, so the message may or may not have arrived. It is not sent again on its own."
+        ? `${esc(clip(oneLine(send.error), 200))} The message may or may not have arrived; it is not sent again on its own.`
         : "";
   const retry = send.state === "unconfirmed" || (send.state === "failed" && !send.restored);
   const actions =
@@ -225,8 +250,8 @@ function pendingHtml(send) {
   const sig = hash(`${send.state}|${send.error}|${send.restored}`);
   return `<section class="turn" data-key="p${esc(send.id)}" data-sig="${sig}"><article class="msg owner pending" data-delivery="${send.state}"><div class="msg-meta"><span class="who">You</span><span class="delivery">${DELIVERY[send.state]}</span></div><div class="bubble">${markdown(send.text)}</div>${actions}</article></section>`;
 }
-/** Sends one pending message. A refusal is shown as not sent; an answer that may never have come is shown as unconfirmed. Neither sends again on its own. */
-async function deliver(send, gen) {
+/** Sends one pending message under its own request id (the host returns the job it already holds for a repeated id). A failure never sends again on its own. */
+async function deliver(send) {
   send.state = "sending";
   send.error = "";
   try {
@@ -238,25 +263,21 @@ async function deliver(send, gen) {
     });
   } catch (error) {
     if (!pendingSends.includes(send)) return; // the transcript already shows it
-    const unconfirmed = !(error instanceof HostError) || error.answered === false;
-    send.state = unconfirmed ? "unconfirmed" : "failed";
+    send.state = "unconfirmed";
+    send.answered = error instanceof HostError && error.answered;
     send.error = error.message;
-    if (unconfirmed) toast(`Delivery not confirmed: ${error.message}`, { error: true, ms: 8000 });
-    else {
-      if (!stale(gen) && !input.value) {
-        input.value = send.text;
-        send.restored = true;
-        grow();
-      }
-      fail(error);
+    send.failedAt = Date.now();
+    const where = inCurrentChat(send) ? "" : "In another chat: ";
+    toast(`${where}${send.answered ? error.message : `Delivery not confirmed: ${error.message}`}`, { error: true, ms: 8000 });
+    // The next read decides: a recorded job means the host may have the message, none after a refusal means it was not sent.
+    if (inCurrentChat(send)) {
+      renderFeed();
+      await loadChat();
     }
-    if (stale(gen)) return;
-    renderFeed();
-    if (unconfirmed) await loadChat();
     return;
   }
-  if (pendingSends.includes(send)) send.state = "sent";
-  if (stale(gen)) return;
+  if (pendingSends.includes(send) && send.state === "sending") send.state = "sent";
+  if (!inCurrentChat(send)) return;
   renderFeed();
   await loadChat();
 }
@@ -717,10 +738,12 @@ form.addEventListener("submit", async (event) => {
     state: "sending",
     error: "",
     restored: false,
+    answered: false,
+    failedAt: 0,
   };
   pendingSends.push(send);
   renderFeed();
-  await deliver(send, gen);
+  await deliver(send);
 });
 export async function stopTurn() {
   if (!state.live?.running) return;
@@ -859,7 +882,7 @@ feed.addEventListener("click", async (event) => {
       send.restored = false;
     }
     renderFeed();
-    if (pendingRetry) await deliver(send, state.generation);
+    if (pendingRetry) await deliver(send);
     return;
   }
   const retry = event.target.closest("[data-retry-job]");

@@ -23,3 +23,6 @@ Written before the code. Each case names how the page can go wrong; `scripts/cha
 - P7 A lost response (the host may have admitted the message) is shown as success or as a plain failure, or is sent again on its own.
 - P8 A slash command, a draft typed after the send, or the existing draft restore on failure changes behavior.
 - P9 A failed bubble never goes away, or its Retry sends under a new request id after an ambiguous delivery.
+- P4b A refused short text is matched to a longer message that contains it, so the refusal disappears.
+- P6b A refusal that arrives after the owner left the chat and came back leaves the bubble on Sending, or restores the draft into another chat.
+- P7b The host recorded the job and then reported an error: the bubble says Not sent and the restored draft invites a second send.

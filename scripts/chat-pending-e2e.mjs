@@ -6,8 +6,13 @@ import { createKit, call, say } from "./lib/e2e-kit.mjs";
 const kit = await createKit("chat-pending", {
   handler: ({ role, user, results }) => {
     if (role !== "coordinator" || user.startsWith("[Durable work")) return undefined;
-    if (/MARK-REMEMBER/.test(user) && !results.length)
-      return call("projects_knowledge_write", { path: "decisions/undo-me.md", text: "# Undo me\n\nbody", expectedRevision: null });
+    const remember = /MARK-REMEMBER(\w*)/.exec(user);
+    if (remember && !results.length)
+      return call("projects_knowledge_write", {
+        path: `decisions/undo-me${remember[1]}.md`,
+        text: "# Undo me\n\nbody",
+        expectedRevision: null,
+      });
     return say(`ACK ${user.replace(/\s+/g, " ").slice(0, 120)}`);
   },
 });
@@ -34,6 +39,12 @@ const wrapFetch = `(() => {
       delete rule.fail;
       entry.end = performance.now();
       return new Response(JSON.stringify({ ok: false, error: "Not admitted: simulated refusal" }), { status: 500, headers: { "content-type": "application/json" } });
+    }
+    if (rule.fail === "recorded") {
+      delete rule.fail;
+      await real(url, init);
+      entry.end = performance.now();
+      return new Response(JSON.stringify({ ok: false, error: "Admission failed after recording: simulated" }), { status: 500, headers: { "content-type": "application/json" } });
     }
     if (rule.fail === "network") {
       delete rule.fail;
@@ -93,7 +104,6 @@ await kit.run(async () => {
 
   // M1/M7: Undo state is loaded for the opening project; an Undo row works.
   await page.waitFor(`!!document.querySelector('[data-memory-undo]')`, "Undo button for the coordinator's write");
-  check("M7 Undo works", true);
 
   // M1: ordinary chat switch and send never ask for memory-recent.
   await reset();
@@ -127,7 +137,10 @@ await kit.run(async () => {
     recentCalls.some((c) => c.project === B),
     recentCalls,
   );
-  check("M4 no Undo state of B is applied to A", await ev(`!document.querySelector('[data-memory-undo][data-revision=""]')`));
+  check(
+    "M4 the delayed answer of B did not replace A's Undo state",
+    await ev(`!!document.querySelector('[data-memory-undo="decisions/undo-me.md"]')`),
+  );
   await ev(`__rule("memory-recent", { delay: 0 })`);
 
   // M5/M6: a knowledge change refreshes Undo state; a burst coalesces.
@@ -150,6 +163,14 @@ await kit.run(async () => {
   check("M5 knowledge changes refresh memory-recent", burst >= 1, burst);
   check("M6 four quick writes coalesce", burst <= 3, burst);
 
+  // M7: Undo still works from the refreshed state.
+  await reset();
+  await typeAndSend("MARK-REMEMBERB second");
+  await page.waitFor(`!!document.querySelector('[data-memory-undo="decisions/undo-meB.md"]')`, "Undo for the second write");
+  await ev(`document.querySelector('[data-memory-undo="decisions/undo-meB.md"]').click()`);
+  await page.waitFor(`document.querySelector('#feed').innerText.includes("Undone")`, "Undone");
+  check("M7 Undo ran once and the row says Undone", (await countCalls("memory-undo")) === 1);
+
   // P1/P2: pending before the ack, one canonical message after it.
   await reset();
   await ev(`__hold("message")`);
@@ -163,7 +184,7 @@ await kit.run(async () => {
   const pendingMs = (await ev(`performance.now()`)) - sendAt;
   const shown = await owners("MARK-P1");
   check("P1 the pending message shows before the ack", shown.length === 1 && shown[0].delivery === "sending", shown);
-  check("P1 the ack is still outstanding", (await hostCount(A, undefined, "MARK-P1")) === 0 || true);
+  check("P1 the ack is still outstanding", (await calls("message"))[0]?.end === undefined);
   check("P8 the composer is cleared on send", (await composer()) === "");
   await page.shot("01-pending", { force: true });
   await ev(`__release("message")`);
@@ -239,6 +260,64 @@ await kit.run(async () => {
   await ev(`document.querySelector('#feed [data-pending-dismiss]').click()`);
   check("P9 Dismiss removes the failed bubble", (await owners("MARK-P6")).length === 0);
   await ev(`(() => { const box = document.querySelector('#composer-input'); box.value = ""; box.dispatchEvent(new Event("input")); })()`);
+
+  // P6b: a refusal that arrives after the owner left and came back updates the bubble; its draft stays with its own chat.
+  await reset();
+  await ev(`__hold("message")`);
+  await ev(`__rule("message", { fail: "json" })`);
+  await typeAndSend("late refusal MARK-LATEREFUSAL");
+  await page.waitFor(`document.querySelectorAll('#feed .msg.owner.pending').length === 1`, "pending before leaving");
+  await select(chatButton(A, other));
+  await page.waitFor(
+    `document.querySelector(${JSON.stringify(chatButton(A, other))}).getAttribute("aria-current") === "true"`,
+    "other selected for P6b",
+  );
+  await select(chatButton(A, "main"));
+  await page.waitFor(`document.querySelectorAll('#feed .msg.owner.pending').length === 1`, "pending after coming back");
+  await ev(`__release("message")`);
+  await page.waitFor(
+    `[...document.querySelectorAll('#feed .msg.owner')].some((n) => n.dataset.delivery === "failed")`,
+    "bubble updated to failed",
+  );
+  check("P6b the bubble shows the refusal without another repaint", (await owners("MARK-LATEREFUSAL")).length === 1);
+  await select(chatButton(A, other));
+  await page.waitFor(
+    `document.querySelector(${JSON.stringify(chatButton(A, other))}).getAttribute("aria-current") === "true"`,
+    "other selected after refusal",
+  );
+  check("P6b the refused draft does not follow the owner into another chat", (await composer()) === "", await composer());
+  await select(chatButton(A, "main"));
+  await page.waitFor(`!!document.querySelector('#feed [data-pending-retry]')`, "Retry on the bubble once the draft left the composer");
+  await ev(`document.querySelector('#feed [data-pending-dismiss]').click()`);
+
+  // P7b: the host recorded the message and then reported an error: not "Not sent", no restored draft.
+  await reset();
+  await ev(`__rule("message", { fail: "recorded" })`);
+  await typeAndSend("recorded then error MARK-RECORDED");
+  await page.waitFor(
+    `document.querySelector('#feed').innerText.includes("ACK recorded then error MARK-RECORDED")`,
+    "reply after recorded error",
+  );
+  await kit.delay(400);
+  const recorded = await owners("MARK-RECORDED");
+  check("P7b a recorded message reconciles to one canonical message", recorded.length === 1 && !recorded[0].pending, recorded);
+  check("P7b the draft was not restored", (await composer()) === "");
+  check("P7b not sent again", (await countCalls("message")) === 1 && (await hostCount(A, undefined, "MARK-RECORDED")) === 1);
+
+  // P4b: a refused short text is not claimed by a longer message that contains it.
+  await reset();
+  await ev(`__rule("message", { fail: "json" })`);
+  await typeAndSend("yes");
+  await page.waitFor(`[...document.querySelectorAll('#feed .msg.owner')].some((n) => n.dataset.delivery === "failed")`, "yes refused");
+  await ev(`(() => { const box = document.querySelector('#composer-input'); box.value = ""; box.dispatchEvent(new Event("input")); })()`);
+  await typeAndSend("yes please MARK-LONGER");
+  await page.waitFor(`document.querySelector('#feed').innerText.includes("ACK yes please MARK-LONGER")`, "longer message answered");
+  await kit.delay(300);
+  check(
+    "P4b the refused 'yes' stays a failed bubble",
+    (await ev(`document.querySelectorAll('#feed .msg.owner[data-delivery="failed"]').length`)) === 1,
+  );
+  await ev(`document.querySelector('#feed [data-pending-dismiss]').click()`);
 
   // P7: a network failure before the host answered is unconfirmed, never success and never retried alone.
   await reset();

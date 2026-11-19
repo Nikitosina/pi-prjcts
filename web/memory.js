@@ -62,14 +62,16 @@ export function refreshRecentMemory({ again = false } = {}) {
     try {
       do {
         run.again = false;
-        const read = await call("memory-recent", { projectId });
-        // Another project was selected meanwhile, or a newer load took over: this answer is not for the page any more.
-        if (recentLoad !== run || projectId !== state.projectId) return;
-        recent = { projectId, writes: new Map(read.writes.map((write) => [`${write.path}@${write.revision}`, write])), ready: true };
-        emit("memory-recent", projectId);
-      } while (run.again);
-    } catch (error) {
-      fail(error);
+        try {
+          const read = await call("memory-recent", { projectId });
+          // Another project was selected meanwhile, or a newer load took over: this answer is not for the page any more.
+          if (recentLoad !== run || projectId !== state.projectId) return;
+          recent = { projectId, writes: new Map(read.writes.map((write) => [`${write.path}@${write.revision}`, write])), ready: true };
+          emit("memory-recent", projectId);
+        } catch (error) {
+          fail(error);
+        }
+      } while (run.again && recentLoad === run);
     } finally {
       if (recentLoad === run) recentLoad = null;
     }
