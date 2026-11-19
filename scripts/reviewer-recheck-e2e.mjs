@@ -54,14 +54,24 @@ const ROUND = [
   () => recheck("RECHECK-FAIL round."),
   () => call("subagent", { role: "reviewer", kind: "full", task: "REVIEW-ROUND second." }),
 ];
+// A fourth Job: the checkout moved off the recorded candidate, so a fresh full review and a fresh re-check are refused without spending budget.
+const MISMATCH = [
+  () => call("bash", { command: commit("M1") }),
+  (r) => call("job", { action: "candidate", sha: shaOf(r, 0) }),
+  () => call("bash", { command: commit("M2") }),
+  () => call("subagent", { role: "reviewer", kind: "full", task: "REVIEW-MISMATCH full." }),
+  () => call("subagent", { role: "reviewer", kind: "recheck", task: "REVIEW-MISMATCH recheck." }),
+  (r) => call("job", { action: "candidate", sha: shaOf(r, 2) }),
+  () => call("subagent", { role: "reviewer", kind: "full", task: "REVIEW-MISMATCH corrected." }),
+];
 const kit = await createKit("reviewer-recheck", {
   handler: ({ role, user, results }) => {
     if (role === "reviewer") {
       if (user.includes("RECHECK-FAIL")) return failed;
       return results.length ? say(`SAW[${results[0].trim()}]`) : call("code_read", { path: "proof.txt" });
     }
-    if (role !== "worker" || !/RECHK|GONE|ROUND/.test(user)) return undefined;
-    const step = (user.includes("RECHK") ? STEPS : user.includes("GONE") ? GONE : ROUND)[results.length];
+    if (role !== "worker" || !/RECHK|GONE|ROUND|MISMATCH/.test(user)) return undefined;
+    const step = (user.includes("RECHK") ? STEPS : user.includes("GONE") ? GONE : user.includes("MISMATCH") ? MISMATCH : ROUND)[results.length];
     return step ? step(results) : say("Finished the scripted re-checks.");
   },
 });
@@ -126,6 +136,39 @@ await kit.run(async () => {
     "E2 a failed re-check is given back without reopening the full round: a second full review is refused",
     /full review already ran/i.test(round.results[6] ?? "") && !reviewerRuns("REVIEW-ROUND second").length,
     round.results,
+  );
+
+  const mismatchId = (
+    await kit.rpc({
+      action: "work-submit",
+      id,
+      threadId: randomUUID(),
+      requestId: randomUUID(),
+      workspaceScopeId: scopeId,
+      text: "MISMATCH go",
+    })
+  ).id;
+  await kit.eventually(
+    async () => (await kit.jobs(id)).find((item) => item.id === mismatchId)?.status !== "running",
+    "mismatch worker finished",
+    1200,
+  );
+  const mismatch = kit.result.calls.filter((item) => item.role === "worker" && item.user.includes("MISMATCH")).at(-1);
+  const mismatchJob = (await kit.jobs(id)).find((item) => item.id === mismatchId);
+  check(
+    "G1 a fresh full review of a checkout that is not the recorded candidate is refused; no reviewer starts",
+    /recorded candidate/.test(mismatch.results[3] ?? "") && !reviewerRuns("REVIEW-MISMATCH full").length,
+    mismatch.results[3],
+  );
+  check(
+    "G2 a fresh re-check of a checkout that is not the recorded candidate is refused; no reviewer starts",
+    /recorded candidate/.test(mismatch.results[4] ?? "") && !reviewerRuns("REVIEW-MISMATCH recheck").length,
+    mismatch.results[4],
+  );
+  check(
+    "G3 after the candidate is corrected the untouched budget serves a full review, and only that is spent",
+    /CONTENT-M2/.test(read("REVIEW-MISMATCH corrected")) && mismatchJob.reviews.full === 1 && mismatchJob.reviews.rechecks === 0,
+    mismatchJob.reviews,
   );
 
   check(
