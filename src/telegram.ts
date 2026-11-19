@@ -32,6 +32,10 @@ type Target = { projectId: string; chatId: string; entryId?: string };
 type DeliveryError = { at: number; method: string; description: string } & (
   { kind: "api"; httpStatus: number; code: number; descriptionProvided: boolean } | { kind: "network" | "not-sent" | "incomplete-response" }
 );
+export type HeldOutcome = "resend" | "delivered";
+type SentPart = { seq: number; chatId?: number; parts: number; plan?: TelegramPart[]; pendingMedia?: boolean; anchorMessageId?: number };
+/** A notice whose attachment upload may or may not have reached Telegram. It no longer blocks later notices; the owner resolves it. */
+type HeldNotice = { seq: number; at: number; ownerChatId: number; sentPart: SentPart; notice?: Notice };
 type State = {
   version: 1;
   token: string | null;
@@ -41,7 +45,8 @@ type State = {
   /** `sentPart`: parts of notice `seq` already sent, so a retry after a mid-way failure does not repeat them. */
   offset: number;
   sentSeq: number;
-  sentPart?: { seq: number; parts: number; plan?: TelegramPart[]; pendingMedia?: boolean; anchorMessageId?: number };
+  sentPart?: SentPart;
+  held?: HeldNotice[];
   route: { projectId: string; chatId: string } | null;
   /** Inline-button payloads by short key (callback_data is capped at 64 bytes) and sent messages by id, both bounded. */
   keys: Record<string, Action>;
@@ -50,7 +55,7 @@ type State = {
   lastPollAt: number | null;
   deliveryErrors?: DeliveryError[];
   /** One progress message per Job, edited in place; `text` is what it shows now. */
-  progress?: Record<string, { messageId: number; text: string }>;
+  progress?: Record<string, { messageId: number; text: string; chatId?: number }>;
 };
 /** A Job's plan as the progress message shows it. `etaMin` is the caller's estimate; without it the remaining estimates are summed. */
 export type JobProgress = {
@@ -162,7 +167,7 @@ const BOT_COMMANDS = [
 const COMMANDS_RETRY_MS = [1000, 5000, 30_000, 120_000];
 
 const UNCERTAIN_MEDIA =
-  "Telegram attachment delivery is uncertain. Automatic resend blocked to avoid duplicates; verify in Telegram before resolving the outbox.";
+  "Telegram attachment delivery is uncertain. It is held without automatic resend to avoid duplicates; later notices continue. Verify in Telegram, then resend or mark it delivered.";
 const PAIR_MS = 10 * 60_000,
   PAIR_TRIES = 5,
   KEEP = 500,
@@ -694,6 +699,10 @@ export function startTelegram(options: {
         if (!state.pairing) options.changed?.();
         return;
       }
+      if (state.owner?.chatId !== chat.id) {
+        state.messages = {};
+        state.progress = {};
+      }
       state.owner = {
         chatId: chat.id,
         name:
@@ -829,6 +838,7 @@ export function startTelegram(options: {
   /** Caption-first media/album delivery; only text exceeding caption capacity spills over. Every returned message routes replies. */
   async function sendNotice(notice: Notice) {
     if (!state.owner) return;
+    const startOwner = state.owner.chatId;
     const extracted = extractTelegramMedia(notice.text);
     const formatted = format({ ...notice, text: extracted.markdown });
     const buttons = formatted.buttons;
@@ -866,29 +876,38 @@ export function startTelegram(options: {
       }
       for (const chunk of overflow) plan.push({ kind: "text", text: chunk });
     }
+    if (state.owner?.chatId !== startOwner) throw new Error("Telegram recipient changed during delivery");
     if (extracted.media.length && state.sentPart?.seq === notice.seq && !state.sentPart.plan && state.sentPart.parts > 0) {
       // A pre-media release checkpointed text chunks, not caption parts. Never guess which content to replay.
       state.sentPart.pendingMedia = true;
       persist();
       throw new Error(UNCERTAIN_MEDIA);
     }
-    if (state.sentPart?.seq !== notice.seq) state.sentPart = { seq: notice.seq, parts: 0, plan };
-    const parts = state.sentPart.plan ?? plan;
-    state.sentPart.plan = parts;
+    if (state.sentPart?.seq !== notice.seq) state.sentPart = { seq: notice.seq, chatId: startOwner, parts: 0, plan };
+    const sentPart = state.sentPart;
+    const chatId = (sentPart.chatId ??= startOwner);
+    // Every part goes to the chat the notice was bound to; an owner replaced mid-delivery never receives the rest.
+    const bound = () => {
+      if (state.owner?.chatId !== chatId) throw new Error("Telegram recipient changed during delivery");
+    };
+    const parts = sentPart.plan ?? plan;
+    sentPart.plan = parts;
     persist();
-    if (state.sentPart.pendingMedia) throw new Error(UNCERTAIN_MEDIA);
+    bound();
+    if (sentPart.pendingMedia) throw new Error(UNCERTAIN_MEDIA);
     const hasMedia = parts.some((part) => part.kind !== "text");
     const target: Target = {
       projectId: notice.projectId,
       chatId: notice.chatId,
       ...(notice.kind === "question" ? { entryId: notice.entryId } : {}),
     };
-    for (let index = state.sentPart?.seq === notice.seq ? state.sentPart.parts : 0; index < parts.length; index++) {
+    for (let index = sentPart.parts; index < parts.length; index++) {
+      bound();
       const markup = index === parts.length - 1 && buttons.length ? { reply_markup: { inline_keyboard: buttons } } : {};
       // Only spillover or ungrouped items reply to the first media message.
       const reply =
-        hasMedia && state.sentPart.anchorMessageId
-          ? { reply_parameters: { message_id: state.sentPart.anchorMessageId, allow_sending_without_reply: true } }
+        hasMedia && sentPart.anchorMessageId
+          ? { reply_parameters: { message_id: sentPart.anchorMessageId, allow_sending_without_reply: true } }
           : {};
       let sent: { message_id: number }[];
       const part = parts[index];
@@ -916,7 +935,7 @@ export function startTelegram(options: {
             1,
             ...refs.map((ref, item): TelegramPart => ({ kind: "media", ref, caption: item === 0 ? part.caption : "" })),
           );
-          state.sentPart.plan = parts;
+          sentPart.plan = parts;
           persist();
           index--;
           continue;
@@ -924,25 +943,20 @@ export function startTelegram(options: {
         if (!media.length) {
           sent = [
             await call("sendMessage", {
-              chat_id: state.owner.chatId,
+              chat_id: chatId,
               text: `${htmlToPlain(part.caption)}\n[Attachment unavailable, unauthorized, or exceeds upload limits]`,
               ...markup,
               ...reply,
             }),
           ];
         } else {
-          state.sentPart.pendingMedia = true;
+          sentPart.pendingMedia = true;
           persist();
           const upload = async (document = false): Promise<{ message_id: number }[]> => {
             const form =
               part.kind === "album"
-                ? telegramAlbumForm(
-                    media,
-                    state.owner!.chatId,
-                    part.caption,
-                    document || media.some((file) => file.method === "sendDocument"),
-                  )
-                : telegramMediaForm(media[0], state.owner!.chatId, part.caption, document);
+                ? telegramAlbumForm(media, chatId, part.caption, document || media.some((file) => file.method === "sendDocument"))
+                : telegramMediaForm(media[0], chatId, part.caption, document);
             if ("reply_markup" in markup) form.body.set("reply_markup", JSON.stringify(markup.reply_markup));
             if ("reply_parameters" in reply) form.body.set("reply_parameters", JSON.stringify(reply.reply_parameters));
             const result = await call<{ message_id: number } | { message_id: number }[]>(form.method, form.body);
@@ -968,18 +982,18 @@ export function startTelegram(options: {
             }
           } catch (error) {
             if (error instanceof TelegramRequestNotSentError) {
-              delete state.sentPart.pendingMedia;
+              delete sentPart.pendingMedia;
               persist();
               throw error;
             }
             // Only explicit rejection proves Telegram did not create a message or album.
             if (error instanceof TelegramError && error.code >= 400 && error.code < 500) {
-              delete state.sentPart.pendingMedia;
+              delete sentPart.pendingMedia;
               persist();
               if (error.code === 400 || error.code === 413) {
                 sent = [
                   await call("sendMessage", {
-                    chat_id: state.owner.chatId,
+                    chat_id: chatId,
                     text: `${htmlToPlain(part.caption)}\n[Telegram rejected this attachment]`,
                     ...markup,
                     ...reply,
@@ -988,21 +1002,22 @@ export function startTelegram(options: {
               } else throw error;
             } else throw error;
           }
-          delete state.sentPart.pendingMedia;
+          delete sentPart.pendingMedia;
         }
       } else {
         try {
-          sent = [await call("sendMessage", { chat_id: state.owner.chatId, text: part.text, parse_mode: "HTML", ...markup, ...reply })];
+          sent = [await call("sendMessage", { chat_id: chatId, text: part.text, parse_mode: "HTML", ...markup, ...reply })];
         } catch (error) {
           if (!(error instanceof TelegramError && error.code === 400 && /can't parse entities/i.test(error.message))) throw error;
-          sent = [await call("sendMessage", { chat_id: state.owner.chatId, text: htmlToPlain(part.text), ...markup, ...reply })];
+          sent = [await call("sendMessage", { chat_id: chatId, text: htmlToPlain(part.text), ...markup, ...reply })];
         }
       }
+      const routed = state.owner?.chatId === chatId;
       for (const message of sent) {
-        state.messages[String(message.message_id)] = target;
-        state.sentPart.anchorMessageId ??= message.message_id;
+        if (routed) state.messages[String(message.message_id)] = target;
+        sentPart.anchorMessageId ??= message.message_id;
       }
-      state.sentPart.parts = index + 1;
+      sentPart.parts = index + 1;
       persist();
     }
   }
@@ -1012,10 +1027,11 @@ export function startTelegram(options: {
       flushAgain = true;
       return flushing;
     }
-    flushing = (async () => {
+    const current = (flushing = (async () => {
       do {
         flushAgain = false;
         while (!closed && state.token && state.owner && !rejected) {
+          hold();
           const next = options.notifier.feed(state.sentSeq).items[0];
           if (!next) break;
           try {
@@ -1023,23 +1039,102 @@ export function startTelegram(options: {
             sendFailures = 0;
           } catch (error) {
             sendFailures++;
-            state.lastError = state.sentPart?.pendingMedia ? UNCERTAIN_MEDIA : redact(errorText(error));
+            if (hold()) {
+              sendFailures = 0;
+              continue;
+            }
+            state.lastError = redact(errorText(error));
             persist();
-            if (state.sentPart?.pendingMedia || error instanceof TelegramRequestNotSentError) return;
+            if (error instanceof TelegramRequestNotSentError) return;
             clearTimeout(retry);
             retry = setTimeout(() => void flush(), Math.min(60_000, backoffMs * 2 ** Math.min(sendFailures - 1, 10)));
             retry.unref();
             return;
           }
-          state.sentSeq = next.seq;
+          state.sentSeq = Math.max(state.sentSeq, next.seq);
           delete state.sentPart;
           persist();
         }
       } while (flushAgain && !closed);
     })().finally(() => {
-      flushing = null;
-    });
-    return flushing;
+      if (flushing === current) flushing = null;
+    }));
+    return current;
+  }
+  /** Moves an upload that may have reached Telegram out of the outbox cursor, so later notices go on; its parts, plan and notice stay recoverable.
+   *  A cursor behind `sentSeq` is a recovery the host left half done: its progress replaces the older held record. */
+  function hold(): boolean {
+    const part = state.sentPart;
+    const chatId = part?.chatId ?? (part && (state.held ?? []).find((item) => item.seq === part.seq)?.ownerChatId) ?? state.owner?.chatId;
+    if (!part || chatId === undefined || (!part.pendingMedia && part.seq > state.sentSeq)) return false;
+    const notice = options.notifier.feed(part.seq - 1).items.find((item) => item.seq === part.seq);
+    const previous = (state.held ?? []).find((item) => item.seq === part.seq);
+    state.held = [
+      ...(state.held ?? []).filter((item) => item.seq !== part.seq),
+      { seq: part.seq, at: Date.now(), ownerChatId: chatId, sentPart: part, notice: notice ?? previous?.notice },
+    ];
+    state.sentSeq = Math.max(state.sentSeq, part.seq);
+    delete state.sentPart;
+    if (part.pendingMedia) state.lastError = UNCERTAIN_MEDIA;
+    persist();
+    return true;
+  }
+  /** Runs after any flush in progress, so it never shares the outbox cursor with one. */
+  async function resolveHeld(seq: number, outcome: HeldOutcome) {
+    const run = async () => {
+      hold();
+      const held = (state.held ?? []).find((item) => item.seq === seq);
+      if (!held) throw new Error(`No held notice ${seq}`);
+      const remove = () => {
+        state.held = state.held!.filter((item) => item !== held);
+        if (!state.held.some((item) => item.sentPart.pendingMedia)) state.lastError = null;
+        persist();
+      };
+      const plan = held.sentPart.plan;
+      const notice = held.notice ?? options.notifier.feed(seq - 1).items.find((item) => item.seq === seq);
+      const sameOwner = state.owner?.chatId === held.ownerChatId;
+      if (outcome === "delivered" && !sameOwner) return remove();
+      if (outcome === "delivered" && !held.sentPart.pendingMedia) throw new Error("Nothing is uncertain in this held notice; resend it");
+      // Delivered confirms only the part that was in flight; parts after it were never attempted, if they can still be sent.
+      const confirmed = held.sentPart.parts + (outcome === "delivered" ? 1 : 0);
+      if (outcome === "delivered" && (!plan || confirmed >= plan.length || !sameOwner || !notice)) return remove();
+      if (!state.owner) throw new Error("Telegram is not paired");
+      if (!sameOwner) throw new Error("Held notice was for a different Telegram account; mark it delivered to drop it");
+      if (!plan) throw new Error("Held notice has no saved plan, so what was sent is unknown; verify in Telegram and mark it delivered");
+      if (state.sentPart) throw new Error("A notice is being delivered; retry shortly");
+      if (!notice) throw new Error("Held notice has left the notification feed; verify in Telegram and mark it delivered");
+      const { pendingMedia: _, ...resumed } = held.sentPart;
+      state.sentPart = { ...resumed, chatId: held.ownerChatId, parts: confirmed };
+      try {
+        await sendNotice(notice);
+      } catch (error) {
+        held.sentPart = state.sentPart!;
+        held.at = Date.now();
+        delete state.sentPart;
+        persist();
+        throw error;
+      }
+      delete state.sentPart;
+      remove();
+    };
+    const previous = flushing ?? Promise.resolve();
+    const done = previous.then(run);
+    const gate: Promise<void> = done
+      .then(
+        () => {},
+        () => {},
+      )
+      .finally(() => {
+        if (flushing === gate) flushing = null;
+      });
+    flushing = gate;
+    try {
+      await done;
+    } finally {
+      await gate;
+      void flush();
+    }
+    return snapshot();
   }
 
   const progressLocks = new Map<string, Promise<unknown>>();
@@ -1065,11 +1160,13 @@ export function startTelegram(options: {
       if (!state.owner || !view.steps.length) return;
       const text = renderProgress(view),
         chat_id = state.owner.chatId,
-        prior = (state.progress ??= {})[view.jobId];
+        stored = (state.progress ??= {})[view.jobId],
+        prior = stored?.chatId === chat_id ? stored : undefined;
       if (prior?.text === text) return;
       if (prior) {
         try {
           await call("editMessageText", { chat_id, message_id: prior.messageId, text, parse_mode: "HTML" });
+          if (state.progress?.[view.jobId] !== prior) return;
           prior.text = text;
           return persist();
         } catch (error) {
@@ -1082,7 +1179,8 @@ export function startTelegram(options: {
         }
       }
       const sent = await call<{ message_id: number }>("sendMessage", { chat_id, text, parse_mode: "HTML" });
-      state.progress![view.jobId] = { messageId: sent.message_id, text };
+      if (state.owner?.chatId !== chat_id) return;
+      state.progress![view.jobId] = { messageId: sent.message_id, text, chatId: chat_id };
       state.messages[String(sent.message_id)] = { projectId: view.projectId, chatId: view.chatId };
       persist();
     };
@@ -1106,6 +1204,14 @@ export function startTelegram(options: {
         state.pairing && state.pairing.expiresAt > Date.now() ? { code: state.pairing.code, expiresAt: state.pairing.expiresAt } : null,
       route,
       lastError: state.lastError,
+      held: (state.held ?? []).map((item) => ({
+        seq: item.seq,
+        at: item.at,
+        uncertain: item.sentPart.pendingMedia === true,
+        resendable: item.sentPart.plan !== undefined,
+        confirmedParts: item.sentPart.parts,
+        remainingParts: item.sentPart.plan ? item.sentPart.plan.length - item.sentPart.parts : null,
+      })),
       deliveryErrors: state.deliveryErrors ?? [],
       lastPollAt: state.lastPollAt,
       polling: polling && !rejected,
@@ -1118,6 +1224,7 @@ export function startTelegram(options: {
   return {
     snapshot,
     flush,
+    resolveHeld,
     progress,
     async setToken(token: string) {
       let bot: { id: number; username: string };
@@ -1134,7 +1241,7 @@ export function startTelegram(options: {
       Object.assign(
         state,
         { token, bot: { id: bot.id, username: bot.username }, lastError: null },
-        same ? {} : { owner: null, pairing: null, offset: 0, route: null, keys: {}, messages: {}, deliveryErrors: [] },
+        same ? {} : { owner: null, pairing: null, offset: 0, route: null, keys: {}, messages: {}, deliveryErrors: [], held: [] },
       );
       rejected = false;
       persist();
@@ -1167,6 +1274,7 @@ export function startTelegram(options: {
         messages: {},
         lastError: null,
         deliveryErrors: [],
+        held: [],
       });
       persist();
       restart();

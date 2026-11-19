@@ -1762,6 +1762,12 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "telegram-pair":
       recordHostEvent("telegram", "pairing code issued");
       return telegram.pair().finally(() => publishHost("telegram"));
+    case "telegram-resolve-held": {
+      const snapshot = await telegram.resolveHeld(input.seq, input.outcome);
+      recordHostEvent("telegram", `held notice ${input.seq}: ${input.outcome}`);
+      publishHost("telegram");
+      return snapshot;
+    }
     case "telegram-unpair":
       recordHostEvent("telegram", "unpaired");
       return telegram.unpair().finally(() => publishHost("telegram"));

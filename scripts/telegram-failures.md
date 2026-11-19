@@ -84,3 +84,16 @@ Telegram shows a command menu only when the bot registers one. The list must be 
 49. One failed `setMyCommands` (502, 429 with retry_after, dropped connection) is never retried, or retrying blocks `getUpdates`, or its error stops the host.
 50. After a success the call repeats on every poll or restart of the loop instead of once per bot, or a changed bot is not registered again.
 51. Registering messages a chat, changes pairing, or the Bot API error leaks the token.
+
+## One uncertain attachment must not stop the outbox, added before the change (2026-11-19)
+Incident on the deployed host: `sentSeq` 1119, `sentPart` for seq 1120 had `parts: 0`, `pendingMedia: true` (one album of two images, never delivered), and 57 later notices were never sent. `flush` and `sendNotice` returned on `pendingMedia`, so the cursor never moved. Proof: `scripts/telegram-media-unit.mjs` (fake Bot API; red before, green after).
+52. A lost response (dropped connection, 200 with an incomplete result) for one media or album blocks every later notice, in the same run or after a restart.
+53. State persisted by the old release (`sentPart.pendingMedia`, with or without a plan) still blocks the feed after upgrade.
+54. The uncertain notice is dropped or marked delivered without the owner saying so, so the attachment is lost without trace; or it is sent again automatically (duplicate).
+55. The record of the held notice loses its plan, the count of confirmed parts or the anchor message, so a recovery resends confirmed parts or breaks reply routing.
+56. A recovery resends the backlog, or a held notice after the bot or paired account changed (isolation), or runs while a flush is sending, sharing its cursor.
+57. A recovery that is lost again leaves no record (it must stay held), or one that fails cleanly (429) loses its progress.
+58. A legacy record without a plan is resent by guessing; it must only be markable delivered.
+
+59. The owner is replaced (unpair and pair another chat) while a held notice resends: a later part, caption or follow-up goes to the replacement, or the part that reached the old chat is routed for the new account or not counted as confirmed. Proof: `scripts/telegram-media-unit.mjs` (red before, green after).
+60. A progress message of the old account is edited in the new chat, or a progress or message record is written for the new owner by a send that began for the old one. Proof: `scripts/telegram-jobs-unit.mjs`.

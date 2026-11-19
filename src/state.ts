@@ -1396,6 +1396,14 @@ export const Request = Type.Union([
   ),
   Type.Object({ action: Type.Literal("telegram-pair") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("telegram-unpair") }, { additionalProperties: false }),
+  Type.Object(
+    {
+      action: Type.Literal("telegram-resolve-held"),
+      seq: Type.Integer({ minimum: 1 }),
+      outcome: Type.Union([Type.Literal("resend"), Type.Literal("delivered")]),
+    },
+    { additionalProperties: false },
+  ),
   Type.Object({ action: Type.Literal("telegram-remove"), confirm: Type.Literal("remove") }, { additionalProperties: false }),
   Type.Object(
     { action: Type.Literal("host-agent-history"), before: Type.Optional(Type.Integer({ minimum: 1 })) },

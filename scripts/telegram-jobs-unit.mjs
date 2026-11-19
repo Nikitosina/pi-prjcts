@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -17,6 +17,7 @@ let calls = [],
   updates = [],
   nextId = 100,
   editFault = null,
+  gate = null,
   commandFaults = ["502", "429", "network"];
 const server = createServer(async (req, res) => {
   const chunks = [];
@@ -29,7 +30,8 @@ const server = createServer(async (req, res) => {
     const batch = updates.splice(0);
     return reply({ ok: true, result: batch });
   }
-  calls.push({ method, input });
+  const entry = { method, input };
+  calls.push(entry);
   if (method === "setMyCommands" && commandFaults.length) {
     const fault = commandFaults.shift();
     if (fault === "network") return req.socket.destroy();
@@ -49,7 +51,13 @@ const server = createServer(async (req, res) => {
     editFault = null;
     return reply({ ok: false, error_code: 400, description }, 400);
   }
-  reply({ ok: true, result: method === "sendMessage" ? { message_id: ++nextId } : true });
+  if (gate?.method === method) {
+    const { run } = gate;
+    gate = null;
+    await run();
+  }
+  entry.id = method === "sendMessage" ? ++nextId : undefined;
+  reply({ ok: true, result: method === "sendMessage" ? { message_id: entry.id } : true });
 });
 await new Promise((done) => server.listen(0, "127.0.0.1", done));
 process.env.PI_PROJECTS_TELEGRAM_API = `http://127.0.0.1:${server.address().port}`;
@@ -198,6 +206,58 @@ try {
     ["editMessageText", "editMessageText"],
   );
   assert.equal((await bridge.snapshot()).deliveryErrors.at(-1)?.method, "editMessageText");
+  // A replaced owner never gets an edit of the old account's progress message, and a send in flight for the old owner is not attributed to the new one.
+  let pairingUpdate = 10;
+  const repair = async (chatId, name) => {
+    bridge.unpair();
+    const { code } = (await bridge.pair()).pairing;
+    updates.push({
+      update_id: ++pairingUpdate,
+      message: {
+        message_id: pairingUpdate,
+        chat: { id: chatId, type: "private", first_name: name },
+        from: { id: chatId },
+        text: `/start ${code}`,
+      },
+    });
+    await until(() => JSON.parse(readFileSync(join(root, "telegram.json"))).owner?.chatId === chatId);
+    await until(() => calls.some((c) => c.input.chat_id === chatId && String(c.input.text).startsWith("Paired")));
+  };
+  const progressFor = (jobId, title) => ({
+    projectId: "p",
+    chatId: "main",
+    jobId,
+    title,
+    steps: [{ title: "Step", status: "doing", estimateMin: 5 }],
+  });
+  calls = [];
+  const idBeforePairing = nextId;
+  await repair(77, "Second");
+  const routedAfterPairing = JSON.parse(readFileSync(join(root, "telegram.json"))).messages;
+  assert(
+    Object.keys(routedAfterPairing).every((id) => Number(id) > idBeforePairing),
+    "old account routes are dropped on a new pairing",
+  );
+  calls = [];
+  await bridge.progress(plan(["done", "done", "todo", "todo"]));
+  assert.deepEqual(
+    calls.map((c) => [c.method, c.input.chat_id]),
+    [["sendMessage", 77]],
+    "the old account's message id is never edited in the new chat",
+  );
+  const progressed = JSON.parse(readFileSync(join(root, "telegram.json")));
+  assert.equal(progressed.progress.j1.chatId, 77);
+  gate = { method: "sendMessage", run: () => repair(88, "Third") };
+  calls = [];
+  await bridge.progress(progressFor("j2", "Stale job"));
+  const afterStale = JSON.parse(readFileSync(join(root, "telegram.json")));
+  assert.equal(afterStale.owner.chatId, 88);
+  assert.equal(afterStale.progress.j2, undefined, "a completion for the old owner records no progress for the new one");
+  const staleId = calls.find((c) => c.method === "sendMessage" && c.input.text.includes("Stale job"));
+  assert.equal(staleId.input.chat_id, 77);
+  assert.equal(afterStale.messages[String(staleId.id)], undefined, "its message id is not routed for the new account");
+  await repair(OWNER, "Owner");
+  calls = [];
   // Mixed-origin batches keep a Telegram reply even when an event is the last input sharing its answer.
   const { saveProject } = await import("../src/state.ts");
   const { startNotifier } = await import("../src/notify.ts");
