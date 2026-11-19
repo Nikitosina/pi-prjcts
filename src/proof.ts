@@ -9,6 +9,7 @@ import { Jobs, type Job } from "./jobs.ts";
 import type { ResourceLeases } from "./resource-leases.ts";
 import { missingLease } from "./verification-resources.ts";
 import { workerEnvironmentTools } from "./worker-environment-tools.ts";
+import { loadProject } from "./state.ts";
 import { readHead } from "./vcs.ts";
 import { CACHE_VARIABLE, type WorkspaceCaches } from "./workspace-cache.ts";
 
@@ -126,7 +127,7 @@ export function proofTools(deps: ProofDeps) {
             : 'Not run: the Job has no candidate yet. Commit your work, push the branch, record it with job {action:"candidate", sha, branch, pr}, then retry.',
           true,
         );
-      const read = await readHead(cwd);
+      const read = await readHead(cwd, loadProject(deps.projectId));
       if (read.kind === "unreadable") return text(`Not run: cannot read HEAD: ${read.reason}`, true);
       const head = read.sha;
       if (head !== job.candidate)

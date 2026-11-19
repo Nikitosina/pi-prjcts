@@ -6,6 +6,7 @@ import { defineExtension, defineTool, type ToolExecutionApi, type ToolRegistrati
 import { createReadOnlyTools } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { codeDiff, DiffModeSchema } from "./code-diff.ts";
+import type { Project } from "./state.ts";
 import { clipLines, RESPONSE_LIMIT } from "./response-limit.ts";
 
 // Not pi's plain names: a scout or reviewer composes every installed extension but the coordinator's, and the coordinator and worker execution tools already own read.
@@ -45,6 +46,7 @@ function clipped<Result extends { content: { type: string; text?: string }[] }>(
 export function readOnlyCodeTools(
   cwd: string,
   resolveRoot?: (api: ToolExecutionApi, context: Context) => Promise<string | undefined>,
+  project?: () => Pick<Project, "id" | "disabledPlugins">,
 ): { tools: ToolRegistration[]; extension: ReturnType<typeof defineExtension> } {
   const fallback = realpathSync(cwd);
   const byRoot = new Map<string, Built>();
@@ -112,7 +114,12 @@ export function readOnlyCodeTools(
           output: [
             {
               type: "text",
-              text: await codeDiff(await rootOf(api, context), args.base, { path: args.path, offset: args.offset, mode: args.mode }),
+              text: await codeDiff(await rootOf(api, context), args.base, {
+                path: args.path,
+                offset: args.offset,
+                mode: args.mode,
+                project: project?.(),
+              }),
             },
           ],
           details: undefined,

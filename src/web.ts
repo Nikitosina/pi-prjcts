@@ -244,7 +244,7 @@ export async function startWeb(
         if (!/^[a-f0-9-]{36}$/.test(id)) throw new Error("Invalid project ID");
         loadProject(id);
         status = 409;
-        const result = await route({ projectId: id, query: url.searchParams });
+        const result = await plugins.gate.run(id, pluginRoute![1]!, () => route({ projectId: id, query: url.searchParams }));
         if (!/^[a-z]+\/[a-z0-9.+-]+$/.test(result.mime)) throw new Error("Plugin returned an invalid content type");
         response.writeHead(200, { ...headers, "content-type": result.mime, "content-length": result.bytes.length }).end(result.bytes);
         return;

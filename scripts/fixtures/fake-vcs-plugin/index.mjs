@@ -306,7 +306,11 @@ export default {
             ? { repositoryId: "fake-repo" }
             : undefined;
         },
-        published: async () => (data().published ?? []).map((item) => ({ number: item.number, conversationId: item.conversationId ?? 0 })),
+        published: async () => {
+          if (data().holdPublished) writeFileSync(dataFile(), JSON.stringify({ ...data(), publishedHeld: true }));
+          while (data().holdPublished) await new Promise((resolve) => setTimeout(resolve, 50));
+          return (data().published ?? []).map((item) => ({ number: item.number, conversationId: item.conversationId ?? 0 }));
+        },
         observe: async ({ repositoryId, prior }) => {
           const baselined = prior?.baselined === true,
             prs = { ...(prior?.prs ?? {}) },

@@ -130,13 +130,23 @@ export function createSimulators(api: HostPluginApi) {
   const frames = new Map<string, Frame>();
   const captures = new Map<string, Promise<Frame>>();
   const captureControllers = new Set<AbortController>();
-  const transitions = new Set<string>();
+  const transitions = new Map<string, number>();
   function pauseSimulatorManagement(id: string): () => void {
     if (tasks.has(id) || locks.has(id)) throw Error("Wait for simulator management to finish before changing project lifecycle");
-    transitions.add(id);
+    transitions.set(id, (transitions.get(id) ?? 0) + 1);
+    let resumed = false;
     return () => {
-      transitions.delete(id);
+      if (resumed) return;
+      resumed = true;
+      const left = (transitions.get(id) ?? 1) - 1;
+      if (left) transitions.set(id, left);
+      else transitions.delete(id);
     };
+  }
+  /** The persisted outcome the owner has not resolved (a disable of the plugin is refused on it; restoring or recovering is not), or null. */
+  function unresolvedSimulatorOutcome(id: string): string | null {
+    const store = readStore(id);
+    return store.uncertain ? `Resolve the simulator outcome first: ${store.uncertain}` : null;
   }
   let stopping = false;
   const simslim = () => process.env.PI_PROJECTS_SIMSLIM || "/opt/homebrew/bin/simslim";
@@ -766,6 +776,7 @@ export function createSimulators(api: HostPluginApi) {
     snapshot: simulatorSnapshot,
     frame: simulatorFrame,
     pause: pauseSimulatorManagement,
+    unresolved: unresolvedSimulatorOutcome,
     close: closeSimulators,
     eraseIdle: eraseIdleSimulators,
     usage: simulatorUsage,

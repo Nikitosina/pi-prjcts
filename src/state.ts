@@ -4,6 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { Type, type Static, type TSchema } from "typebox";
 import { Value } from "typebox/value";
+import { BUNDLED_PLUGIN_IDS } from "./bundled-plugins.ts";
 import { CommandProfile, CommandProfileInput } from "./command-profile-types.ts";
 import { SkillProfiles } from "./skill-profiles.ts";
 import { MessageText } from "./transcript-reader.ts";
@@ -188,6 +189,8 @@ export const Project = Type.Object(
     decisionAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])),
     /** Coordinator gh access; absent means full. */
     githubCli: Type.Optional(Type.Union([Type.Literal("full"), Type.Literal("none")])),
+    /** Plugins this project turned off (src/plugin-gate.ts); absent = all on. Their stored data stays. */
+    disabledPlugins: Type.Optional(Type.Array(Type.String({ pattern: "^[a-z][a-z0-9-]{0,39}$" }), { maxItems: 64, uniqueItems: true })),
     /** Optional host-only workspace grant. Projects without it receive no workspace scope. */
     workspaceAuthorization: Type.Optional(WorkspaceAuthorization),
     workspaceAuthorizationHistory: Type.Optional(WorkspaceAuthorizationHistory),
@@ -1377,6 +1380,15 @@ export const Request = Type.Union([
     { additionalProperties: false },
   ),
   Type.Object({ action: Type.Literal("plugins"), id: Type.Optional(Id) }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("plugin-catalog") }, { additionalProperties: false }),
+  Type.Object(
+    { action: Type.Literal("plugin-activate"), plugin: Type.Union(BUNDLED_PLUGIN_IDS.map((id) => Type.Literal(id))) },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { action: Type.Literal("project-plugin"), id: Id, plugin: Type.String({ pattern: "^[a-z][a-z0-9-]{0,39}$" }), enabled: Type.Boolean() },
+    { additionalProperties: false },
+  ),
   Type.Object(
     {
       action: Type.Literal("plugin"),
@@ -1485,6 +1497,11 @@ export function socketPath(): string {
 
 export function projectDir(id: string): string {
   return join(home(), parse(Id, id));
+}
+
+/** Worker worktrees for one-click grants live with the project data, outside the owner checkout. */
+export function workerWorktreeRoot(id: string): string {
+  return join(projectDir(id), "worktrees");
 }
 
 export function saveJson(path: string, value: unknown): void {

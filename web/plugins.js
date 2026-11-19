@@ -79,13 +79,20 @@ function load({ plugin, script, style }) {
   return entry.ready;
 }
 
+/** The project's on/off switch of a loaded plugin; a locked one stays on and says why (the host refuses the change as well). */
+function switchOf(plugin) {
+  if (plugin.state !== "loaded" || plugin.enabled === undefined) return "";
+  const locked = plugin.enabled && plugin.lock;
+  return `<label class="switch" aria-label="${esc(plugin.name)} in this project"><input type="checkbox" data-plugin-toggle="${esc(plugin.name)}" ${plugin.enabled ? "checked" : ""} ${locked ? "disabled" : ""} /><span class="track" aria-hidden="true"></span></label>`;
+}
+
 /** What the host loaded at its start: a change on disk shows here only after the next restart. */
 export function pluginRow(plugin) {
   const loaded = plugin.state === "loaded";
   const detail = loaded
     ? `<p class="small muted">${esc(plugin.provides.join(", ") || "no capabilities")}</p>`
     : `<p class="small plugin-error">${esc(clip(plugin.error ?? "failed", 300))}</p>${plugin.error?.includes(plugin.source) ? "" : `<p class="small muted mono">${esc(clip(plugin.source, 160))}</p>`}`;
-  return `<div class="plugin-row" data-plugin="${esc(plugin.name ?? "")}" data-state="${esc(plugin.state)}" title="${esc(plugin.source)}"><div class="plugin-head"><span class="mono">${esc(plugin.name ?? "unnamed")}</span>${plugin.version ? `<span class="muted small mono">${esc(plugin.version)}</span>` : ""}<span class="badge"${loaded ? "" : ' data-tone="bad"'}>${loaded ? "loaded" : "failed"}</span></div>${detail}</div>`;
+  return `<div class="plugin-row" data-plugin="${esc(plugin.name ?? "")}" data-state="${esc(plugin.state)}" title="${esc(plugin.source)}"><div class="plugin-head"><span class="mono">${esc(plugin.name ?? "unnamed")}</span>${plugin.version ? `<span class="muted small mono">${esc(plugin.version)}</span>` : ""}<span class="badge"${loaded ? "" : ' data-tone="bad"'}>${loaded ? "loaded" : "failed"}</span>${switchOf(plugin)}</div>${detail}${plugin.lock ? `<p class="small muted" data-plugin-lock>Cannot be turned off: ${esc(plugin.lock)}.</p>` : ""}</div>`;
 }
 
 /** One card per plugin of the `plugins` RPC: its status row and, for a loaded plugin with a script, an empty panel. */
@@ -94,7 +101,7 @@ export function pluginCards({ plugins, web }) {
   return plugins
     .map((plugin) => {
       const panel =
-        plugin.state === "loaded" && panels.has(plugin.name)
+        plugin.state === "loaded" && plugin.enabled !== false && panels.has(plugin.name)
           ? `<section class="plugin-panel" data-plugin="${esc(plugin.name)}" data-state="loading" aria-label="${esc(plugin.name)} panel"><p class="plugin-error small" role="alert" hidden></p><div class="plugin-slot"></div></section>`
           : "";
       return `<div class="plugin-card" data-plugin="${esc(plugin.name ?? "")}" data-state="${esc(plugin.state)}">${pluginRow(plugin)}${panel}</div>`;
@@ -212,4 +219,59 @@ async function mountOne(node, item, { projectId, chatId }, signal, kind) {
   } catch (mountError) {
     fail(mountError);
   }
+}
+
+const CATALOG_STATES = {
+  available: { label: "available", tone: "" },
+  configured: { label: "configured · restart needed", tone: "t-needs" },
+  loaded: { label: "loaded", tone: "t-ready" },
+  failed: { label: "failed", tone: "bad" },
+};
+
+/** The plugins shipped with pi-prjcts and what this host does with each; the loaded plugins' cards stay below it. */
+const catalogAlert = (error) => `<p class="plugin-error small" role="alert">${esc(error)}</p>`;
+export function catalogBlock(entries, error = "") {
+  const rows = entries
+    .map((entry) => {
+      const state = CATALOG_STATES[entry.state];
+      const action =
+        entry.state === "available"
+          ? `<button type="button" class="ghost-btn small" data-catalog-activate="${esc(entry.id)}">Add to host config</button>`
+          : entry.state === "configured"
+            ? `<button type="button" class="ghost-btn small" data-catalog-deploy>Deploy settings</button>`
+            : "";
+      const note =
+        entry.state === "configured"
+          ? `<p class="small muted">Configured on this host. It loads at the next host restart: run <code>npm run projects -- deploy</code>.</p>`
+          : entry.state === "failed"
+            ? `<p class="small plugin-error">${esc(clip(entry.error ?? "failed", 300))}</p>`
+            : "";
+      return `<div class="catalog-row" data-catalog="${esc(entry.id)}" data-state="${esc(entry.state)}"><div class="plugin-head"><span class="mono">${esc(entry.name)}</span>${entry.version ? `<span class="muted small mono">${esc(entry.version)}</span>` : ""}<span class="badge ${state.tone}"${entry.state === "failed" ? ' data-tone="bad"' : ""}>${state.label}</span>${action}</div><p class="small muted">${esc(entry.description)}</p>${note}</div>`;
+    })
+    .join("");
+  return `<section class="plugin-catalog" aria-label="Plugins shipped with pi-prjcts"><h2 class="small">Shipped with pi-prjcts</h2><p class="small muted">Adding one writes it to this host's plugins.json for every project. Nothing restarts; the plugin loads at the next host restart.</p>${error ? catalogAlert(error) : ""}${rows}</section>`;
+}
+
+/**
+ * Wires the catalog block inside `container`: one request per click, the block redrawn with the host's answer (`onEntries` gets it).
+ * A refused request keeps the rows and shows its error above them. `openDeploy` shows Settings → Deploy.
+ */
+export function wireCatalog(container, openDeploy, onEntries = () => {}) {
+  container.addEventListener("click", async (event) => {
+    if (event.target.closest("[data-catalog-deploy]")) return openDeploy();
+    const button = event.target.closest("[data-catalog-activate]");
+    if (!button || button.disabled) return;
+    button.disabled = true;
+    try {
+      const { entries } = await call("plugin-activate", { plugin: button.dataset.catalogActivate });
+      onEntries(entries);
+      const block = container.querySelector(".plugin-catalog");
+      if (block) block.outerHTML = catalogBlock(entries);
+    } catch (error) {
+      button.disabled = false;
+      const block = container.querySelector(".plugin-catalog");
+      block?.querySelector("[role=alert]")?.remove();
+      block?.querySelector("h2 + p")?.insertAdjacentHTML("afterend", catalogAlert(messageOf(error)));
+    }
+  });
 }

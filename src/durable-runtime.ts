@@ -439,6 +439,8 @@ export type DurableProjectRuntime = {
    * History, permissions and every existing worker thread are untouched; nothing changes when the rebuild fails. Refused while the chat is working or compacting.
    */
   reload(chatId?: string): Promise<{ chatId: string; skills: number; changed: boolean }>;
+  /** Marks every chat's prompt and tools stale after a project setting changed them (a plugin toggle): each is rebuilt before its next message. History is untouched. */
+  refreshPrompts(): Promise<void>;
   cleanupWorktrees(): Promise<Awaited<ReturnType<typeof cleanupWorktrees>>>;
   snapshot(chatId?: string, messageText?: MessageText): Promise<DurableProjectSnapshot>;
   /** Context use of each listed worker thread (`null` for an unknown one); the window is the worker model's catalog window or null. */
@@ -1151,13 +1153,17 @@ export async function openDurableProject(input: {
     });
     stopTaskWorkspaces = taskWorkspaces.close;
     // Scouts and reviewers read the cwd they were configured with: their own worktree at a commit, a worker's worktree or the checkout.
-    const readOnlyCode = readOnlyCodeTools(project.cwd, async (api, context) => {
-      const cwd = (await api.agent(context)).cwd;
-      const ofWorker = (await api.snapshot(Jobs, ROOT_CONVERSATION_ID, context))?.subagents[String(api.conversationId)] !== undefined;
-      if ((ofWorker && !cwd) || (cwd && !existsSync(cwd)))
-        throw new Error(`This thread's checkout ${cwd || "(none)"} is missing; it is not read from the project checkout instead.`);
-      return cwd;
-    });
+    const readOnlyCode = readOnlyCodeTools(
+      project.cwd,
+      async (api, context) => {
+        const cwd = (await api.agent(context)).cwd;
+        const ofWorker = (await api.snapshot(Jobs, ROOT_CONVERSATION_ID, context))?.subagents[String(api.conversationId)] !== undefined;
+        if ((ofWorker && !cwd) || (cwd && !existsSync(cwd)))
+          throw new Error(`This thread's checkout ${cwd || "(none)"} is missing; it is not read from the project checkout instead.`);
+        return cwd;
+      },
+      () => loadProject(project.id),
+    );
     /** The safe worktree rule and the cache sweep; caches the sweep could not remove are listed. */
     type WorktreeCleanup = Awaited<ReturnType<typeof cleanupWorktrees>> & { unremovedCaches: string[] };
     let cleanup: (onProgress?: (done: number, total: number) => void) => Promise<WorktreeCleanup> = async () => {
@@ -1303,7 +1309,10 @@ export async function openDurableProject(input: {
       readDrift: async (agent) => {
         const target = (await harness?.snapshot(Jobs, ROOT_CONVERSATION_ID, context))?.agents[agent.readRef ?? ""];
         const cwd = target ? await conversationCwd(target.conversationId) : undefined;
-        const [head, dirty] = cwd && existsSync(cwd) ? await Promise.all([headCommit(cwd), changedFiles(cwd)]) : [null, null];
+        const [head, dirty] =
+          cwd && existsSync(cwd)
+            ? await Promise.all([headCommit(cwd, loadProject(project.id)), changedFiles(cwd, loadProject(project.id))])
+            : [null, null];
         if (head === agent.readHead && dirty?.length === 0) return null;
         const what =
           head === null
@@ -1332,7 +1341,7 @@ export async function openDurableProject(input: {
             const cwd = await conversationCwd(target.conversationId);
             if (!cwd || !existsSync(cwd))
               throw new Error(`Agent ${agent.readRef} has no worktree to read (it never started or was cleaned up)`);
-            const [dirty, head] = await Promise.all([changedFiles(cwd), headCommit(cwd)]);
+            const [dirty, head] = await Promise.all([changedFiles(cwd, loadProject(project.id)), headCommit(cwd, loadProject(project.id))]);
             if (dirty === null || dirty.length || !head)
               throw new Error(
                 `Agent ${agent.readRef}'s worktree ${dirty?.length ? "has uncommitted changes" : "status is unreadable"}. Ask it to commit, then spawn the reader with that full commit SHA.`,
@@ -1452,10 +1461,10 @@ export async function openDurableProject(input: {
               taskText: "",
             })
           : undefined;
-        if (!held) return confirmCheckout(cwd);
+        if (!held) return confirmCheckout(cwd, loadProject(project.id));
         if (!existsSync(cwd) || realpathSync(held.cwd) !== realpathSync(cwd))
           return { refusal: "The directory is not the checkout this task helper owns" };
-        if (!held.state) return confirmCheckout(cwd);
+        if (!held.state) return confirmCheckout(cwd, loadProject(project.id));
         if (!FULL_COMMIT.test(held.state.revision)) return { refusal: "The task checkout's provider reported no commit" };
         return held.state.clean
           ? { sha: held.state.revision }
@@ -1469,7 +1478,10 @@ export async function openDurableProject(input: {
           const scope = authorization?.scopes.find((item) => item.id === record?.scopeId),
             repository = authorization?.repositories.find((item) => item.repositoryId === scope?.repositoryId);
           if (!authorization || !repository) throw new Error("The Job's workspace scope is no longer authorized");
-          const provider = authorization.provider === "github" ? githubMergeProvider() : plugins.mergeProvider(authorization.provider);
+          const provider =
+            authorization.provider === "github"
+              ? plugins.gatedMerge(project.id, "github", githubMergeProvider())
+              : plugins.mergeProvider(project.id, authorization.provider);
           if (!provider)
             throw new Error(`The ${authorization.provider} plugin has no merge capability, so this Job cannot be approved here`);
           assertOpen();
@@ -1759,11 +1771,16 @@ export async function openDurableProject(input: {
           return agent ? (agent.working ? "running" : agent.endedAt === null ? "running" : "completed") : null;
         },
         target: eventTarget,
-        pullMain: async ({ repositoryId, pr, base, signal }) => {
+        pullMain: async ({ provider: followed, repositoryId, pr, base, signal }) => {
           const authorization = loadProject(project.id).workspaceAuthorization,
             repository = authorization?.repositories.find((item) => item.repositoryId === repositoryId);
           if (!authorization || !repository) return { pulled: false, reason: `${repositoryId} has no authorized main checkout` };
-          const provider = authorization.provider === "github" ? githubMergeProvider() : plugins.mergeProvider(authorization.provider);
+          if (authorization.provider !== followed)
+            return { pulled: false, reason: `${repositoryId} is checked out through ${authorization.provider}, not ${followed}` };
+          const provider =
+            authorization.provider === "github"
+              ? plugins.gatedMerge(project.id, "github", githubMergeProvider())
+              : plugins.mergeProvider(project.id, authorization.provider);
           if (!provider) return { pulled: false, reason: `the ${authorization.provider} plugin has no merge capability` };
           return pullMainCheckout({ provider, checkout: repository.ownerCheckout, base, pr: String(pr), signal });
         },
@@ -1924,7 +1941,7 @@ export async function openDurableProject(input: {
         `Removed ${worktrees.removed.length} worktree(s), ${trimmed.length} cache(s), ${disposable.length} disposable path(s) and ${videos.length} old Job video(s).`,
       ];
       const failures = [...worktrees.unremovedCaches, ...removal.failed].map((failure) => `could not remove ${failure}`);
-      const pluginSteps = plugins.cleanupSteps();
+      const pluginSteps = plugins.cleanupSteps(project.id);
       for (const [index, step] of pluginSteps.entries()) {
         at("plugins", index, pluginSteps.length);
         if (closed) break;
@@ -2028,7 +2045,7 @@ export async function openDurableProject(input: {
             return { count: all.length, bytes: sum(all), reclaimableBytes: sum(old) };
           },
         },
-        ...plugins.usageSources().map((source) => ({
+        ...plugins.usageSources(project.id).map((source) => ({
           id: `plugin:${source.plugin}`,
           kind: "plugin" as const,
           label: source.plugin,
@@ -2566,7 +2583,7 @@ export async function openDurableProject(input: {
       },
       workerDiff: async (threadId, base, page) => {
         assertOpen();
-        return workerChanges(await agentCwd(threadId), base, page);
+        return workerChanges(await agentCwd(threadId), base, { ...page, project: loadProject(project.id) });
       },
       workerRead: async (threadId, options = {}) => {
         assertOpen();
@@ -2820,6 +2837,10 @@ export async function openDurableProject(input: {
           modelUpdate.commit();
           return { chatId: chat.id, ...result };
         });
+      },
+      refreshPrompts: async () => {
+        assertOpen();
+        for (const chat of await chatList()) staleChats.add(chat.conversationId);
       },
       profileTools: async (profile) => {
         const current = loadProject(project.id);
@@ -3909,9 +3930,9 @@ const rolePromptSection = (project: Project, role: ProfileId) => {
     behavior.text,
   );
 };
-const workRules = () =>
+const workRules = (project: Project) =>
   `${plugins
-    .workerRules()
+    .workerRules(project)
     .map((rule) => `${rule} `)
     .join("")}`;
 const AGENT_NAMES = { worker: "worker", scout: "scout", reviewer: "reviewer" } as const;
@@ -3933,7 +3954,7 @@ function workerPromptSections(
       true,
       hostContract(project, `You are a ${helper ? "task helper" : AGENT_NAMES[role]} for ${project.name}.`, [
         knowledgeAccess === "maintain" ? "You may write revision-checked knowledge topics with projects_knowledge_write." : "",
-        workRules().trim(),
+        workRules(project).trim(),
         verification,
       ]),
     ),

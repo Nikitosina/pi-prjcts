@@ -1818,7 +1818,11 @@ pre.code,
   fill: none;
   stroke-width: 3;
 }
-.ctx-ring .track {
+.ctx-ring .switch input:disabled + .track {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.track {
   stroke: color-mix(in srgb, var(--faint) 45%, transparent);
 }
 .ctx-ring[data-state="unknown"] .track {
@@ -1882,6 +1886,30 @@ a.pr-link:hover .pr-title {
 .badge[data-tone="bad"],
 .plugin-error {
   color: var(--bad);
+}
+/* Settings → Plugins: the bundled plugin catalog above the cards. */
+.plugin-catalog {
+  margin-bottom: 14px;
+}
+.plugin-catalog h2 {
+  margin: 0 0 4px;
+}
+.catalog-row {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 12.5px;
+}
+.catalog-row .plugin-head {
+  flex-wrap: wrap;
+}
+.catalog-row .plugin-head .badge {
+  margin-left: auto;
+}
+.catalog-row p {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
 }
 /* Settings → Plugins: one card per plugin; a panel's slot belongs to the plugin. */
 .plugin-card {
@@ -2488,7 +2516,8 @@ dialog:focus-visible {
 .switch input[type="checkbox"] {
   accent-color: var(--accent);
 }
-.auto-card .switch input {
+.auto-card .switch input,
+.plugin-head .switch input {
   position: absolute;
   opacity: 0;
   width: 1px;

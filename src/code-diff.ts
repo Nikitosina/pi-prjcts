@@ -3,6 +3,7 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import { Type } from "typebox";
 import { findVcsRoot, cli, runCli, type CliResult } from "./vcs.ts";
 import { plugins } from "./plugins.ts";
+import type { Project } from "./state.ts";
 import { RESPONSE_LIMIT, bytes, ellipsize, fitPrefix } from "./response-limit.ts";
 
 /** How much diff text is collected before paging; a page is at most RESPONSE_LIMIT bytes, so the rest is reached with offset or narrowed with path. */
@@ -29,6 +30,8 @@ export type DiffPage = {
   mode?: DiffMode;
   /** Bytes already spent on text placed before this page. */
   reserve?: number;
+  /** The project reading: a checkout kind of a plugin it turned off is not looked for. */
+  project?: Pick<Project, "id" | "disabledPlugins">;
 };
 /** One changed file of a diff; paths are relative to the checkout root until a page shows them. */
 export type FileStat =
@@ -71,7 +74,7 @@ export async function codeDiff(root: string, base?: string, page: DiffPage = {})
   )
     throw new Error(`Invalid path ${JSON.stringify(path)}: use a path inside the project directory, relative to it`);
   if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("Invalid offset");
-  const found = await collect(root, base, path);
+  const found = await collect(root, base, path, page.project);
   const { kind, mergeBase, revision, diff, untracked } = found;
   const where = found.dir === found.root ? "" : relative(found.root, found.dir);
   const head = ellipsize(
@@ -107,8 +110,8 @@ export async function codeDiff(root: string, base?: string, page: DiffPage = {})
 }
 
 /** Runs the checkout kind's diff once: git here, a plugin kind through its provider. `path` reaches the provider relative to its checkout root. */
-async function collect(root: string, base: string | undefined, path: string | undefined): Promise<Collected> {
-  const vcs = findVcsRoot(root);
+async function collect(root: string, base: string | undefined, path: string | undefined, project: DiffPage["project"]): Promise<Collected> {
+  const vcs = findVcsRoot(root, project);
   if (!vcs) throw new Error(`${root} is not a git checkout (or a plugin checkout kind that is loaded); no diff is available`);
   const dir = realpathSync(root);
   const only = path === undefined ? undefined : relative(vcs.root, resolve(dir, path)) || ".";
@@ -118,7 +121,7 @@ async function collect(root: string, base: string | undefined, path: string | un
     return out.stdout;
   };
   if (vcs.kind !== "git") {
-    const provider = plugins.vcsProvider(vcs.kind);
+    const provider = plugins.vcsProvider(vcs.kind, project);
     if (!provider) throw new Error(`No plugin for ${vcs.kind} checkouts is loaded; no diff is available`);
     const narrows = provider.codeDiffPath === true;
     if (only !== undefined && !narrows)
@@ -288,7 +291,7 @@ function shortList(list: string): string {
 /** Coordinator view of a worker's worktree: branch, head and status list (staged, unstaged, untracked), then one page of the diff or of the file counts. Page 0 carries the header; later pages are the bare continuation. Read-only like codeDiff. */
 export async function workerChanges(root: string, base?: string, page: DiffPage = {}): Promise<string> {
   if (page.offset) return codeDiff(root, base, page);
-  const vcs = findVcsRoot(root);
+  const vcs = findVcsRoot(root, page.project);
   if (!vcs) throw new Error(`${root} is not a git checkout (or a plugin checkout kind that is loaded); no diff is available`);
   let branch = "",
     head = "",
@@ -301,7 +304,7 @@ export async function workerChanges(root: string, base?: string, page: DiffPage 
       await git("status", "--porcelain=v1", "--untracked-files=all"),
     ];
   } else {
-    const provider = plugins.vcsProvider(vcs.kind);
+    const provider = plugins.vcsProvider(vcs.kind, page.project);
     if (!provider) throw new Error(`No plugin for ${vcs.kind} checkouts is loaded; no diff is available`);
     ({ branch, head, status } = await provider.workerState(vcs.root));
   }

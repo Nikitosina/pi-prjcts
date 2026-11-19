@@ -35,6 +35,7 @@ import {
   notes,
   parse,
   projectDir,
+  workerWorktreeRoot,
   saveJob,
   saveProject,
   type GithubAuthorization,
@@ -44,6 +45,7 @@ import { ensureKnowledge, historyKnowledge, listKnowledge, readKnowledge, writeK
 import { searchProject } from "./knowledge-search.ts";
 import { loadProjectResourceLoader } from "./project-resources.ts";
 import { referencedPrBlock } from "./pr-monitor.ts";
+import { pluginCatalog } from "./plugin-catalog.ts";
 import { plugins } from "./plugins.ts";
 import { expandSkillCommand, listSkills, skillNames, skillPreview } from "./coordinator-skills.ts";
 import { refCandidates, referencedItemsBlock, refPreview } from "./inline-refs.ts";
@@ -227,6 +229,12 @@ async function withProjectLock<T>(id: string, operation: () => Promise<T>, durin
   }
 }
 
+/** The disable refusal for a project's plugin that needs no lock to decide (its checkout needs it, or its work is in flight), or null. */
+function loadedPluginBlock(projectId: string, plugin: string): string | null {
+  ownedProjectDir(projectId);
+  return plugins.disableBlock(loadProject(projectId), plugin);
+}
+
 async function refusing<T>(operation: () => Promise<T>): Promise<T> {
   try {
     return await operation();
@@ -234,6 +242,7 @@ async function refusing<T>(operation: () => Promise<T>): Promise<T> {
     throw error instanceof Refused ? error : new Refused(errorText(error));
   }
 }
+
 async function withDurableOwner<T>({
   id,
   validate,
@@ -394,10 +403,6 @@ const rebindAuthorizations = (project: ReturnType<typeof loadProject>) =>
   plugins
     .workspaceProviders()
     .reduce((current, provider) => (provider.rebind ? provider.rebind(current) : current), rebindOneClickGithub(project));
-/** Worker worktrees for one-click grants live with the project data, outside the owner checkout. */
-function workerWorktreeRoot(id: string): string {
-  return join(projectDir(id), "worktrees");
-}
 
 async function persistWorkspaceGrant<T>(
   before: ReturnType<typeof loadProject>,
@@ -1257,38 +1262,81 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       });
     }
     case "plugins":
-      return { plugins: plugins.status(), labels: plugins.labels(), web: plugins.web() };
+      return {
+        plugins: input.id ? plugins.forProject(loadProject(input.id)) : plugins.status(),
+        labels: plugins.labels(),
+        web: plugins.web(),
+      };
+    case "project-plugin": {
+      // Work in flight refuses the disable at once; it does not queue behind a project lock the work itself holds.
+      if (!input.enabled) {
+        const early = loadedPluginBlock(input.id, input.plugin);
+        if (early) throw new Error(early);
+      }
+      return withProjectLock(input.id, async () => {
+        const inactive = loadProject(input.id);
+        if (inactive.deleted || inactive.archived) throw new Error("Inactive project settings cannot be changed");
+        // Opening the runtime may save a default workspace grant, so the project is read after it. The disable also reads the plugin's own
+        // unresolved writes, holds the plugin's pause meanwhile and saves in one synchronous step with its last work check.
+        if (input.enabled || inactive.disabledPlugins?.includes(input.plugin))
+          plugins.setEnabled(inactive, input.plugin, input.enabled, saveProject);
+        else {
+          const runtime = await durable(input.id);
+          await runtime.withRoot((root) => plugins.disable(() => loadProject(input.id), input.plugin, root, saveProject));
+        }
+        await (await durable(input.id)).refreshPrompts();
+        feed.publish(input.id, { topic: "settings" });
+        return { plugin: input.plugin, enabled: input.enabled };
+      });
+    }
+    case "plugin-catalog":
+      return { entries: pluginCatalog.list() };
+    case "plugin-activate": {
+      const before = pluginCatalog.list().find((entry) => entry.id === input.plugin)?.state;
+      const entries = pluginCatalog.activate(input.plugin);
+      if (before === "available")
+        recordHostEvent("plugins", `${input.plugin} added to plugins.json by the owner; it loads at the next restart`);
+      return { entries };
+    }
     case "plugin": {
       const handler = plugins.rpc(input.plugin, input.method);
       if (!handler)
         throw new Error(`Plugin RPC ${input.plugin}.${input.method} is unavailable: the plugin is not loaded or has no such method`);
-      return handler({
-        params: input.params,
-        projectId: input.id,
-        withRoot: (id, fn) => withDurableOwner({ id, operation: (owner) => owner.withRoot(fn) }),
-        mutateIdle: (id, change) =>
-          lifecycle(id, change.validate, async (owner) => {
-            const view = await owner.snapshot(),
-              plan = await owner.jobs();
-            if (
-              view.chats.some((chat) => chat.busy) ||
-              view.coordinator.busy ||
-              view.coordinator.submissions.some((item) => item.status === "queued" || item.status === "placed") ||
-              workBusy(plan)
-            )
-              throw new Error("This change requires no active project work");
-            await closeLifecycleOwner(id, owner);
-            return withProjectLock(
-              id,
-              async () => {
-                const project = loadProject(id);
-                change.validate(project);
-                saveProject(change.apply(project));
-              },
-              true,
-            );
-          }),
-      });
+      const run = <T>(work: () => Promise<T>) => (input.id ? plugins.gate.run(input.id, input.plugin, work) : work());
+      return run(() =>
+        handler({
+          params: input.params,
+          projectId: input.id,
+          // An RPC without a project id reaches a project only through these two: each counts as the plugin's work in that project, from before the
+          // project is opened or locked until its effects are done, and is refused once the project turned the plugin off.
+          withRoot: (id, fn) =>
+            plugins.gate.run(id, input.plugin, () => withDurableOwner({ id, operation: (owner) => owner.withRoot(fn) })),
+          mutateIdle: (id, change) =>
+            plugins.gate.run(id, input.plugin, () =>
+              lifecycle(id, change.validate, async (owner) => {
+                const view = await owner.snapshot(),
+                  plan = await owner.jobs();
+                if (
+                  view.chats.some((chat) => chat.busy) ||
+                  view.coordinator.busy ||
+                  view.coordinator.submissions.some((item) => item.status === "queued" || item.status === "placed") ||
+                  workBusy(plan)
+                )
+                  throw new Error("This change requires no active project work");
+                await closeLifecycleOwner(id, owner);
+                return withProjectLock(
+                  id,
+                  async () => {
+                    const project = loadProject(id);
+                    change.validate(project);
+                    saveProject(change.apply(project));
+                  },
+                  true,
+                );
+              }),
+            ),
+        }),
+      );
     }
     case "provider-pr-inspect":
     case "provider-ci-inspect":

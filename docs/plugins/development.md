@@ -69,6 +69,8 @@ Activation makes a plugin version run on a host. It is always explicit.
 
 A running host keeps the plugins it loaded at its start: editing a plugin's source, its browser files or `plugins.json` changes nothing until the restart. On the owner's host, editing `plugins.json` changes the owner's configuration and needs the owner's go-ahead; the restart is the normal Deploy (`npm run projects -- deploy`), not a manual restart.
 
+Settings → Plugins also lists the plugins shipped with pi-prjcts (`tasks`, `simulator`) before they are loaded, from static metadata in `src/bundled-plugins.ts`; nothing is imported to list them. Each shows one of four states: `available` (not configured), `configured` (in `plugins.json` or `PI_PROJECTS_PLUGINS`, awaiting a restart), `loaded` or `failed` (with the loader's error). **Add to host config** appends the absolute path of that shipped directory to `plugins.json` by catalog id only, keeps every other entry and key as it was, does nothing when the directory is already configured, and refuses an unreadable `plugins.json` or a name an external plugin already loaded. It loads and restarts nothing: the card names the normal Deploy (`npm run projects -- deploy`). The Host agent can read the catalog (`plugin-catalog`) but not activate (`plugin-activate`). There is no remote catalog, URL install or path input in this interface; external plugins are still configured by hand as above.
+
 To deactivate, remove the entry and restart. The plugin's files in `api.stateDir` and in project directories stay on disk.
 
 ## Troubleshooting

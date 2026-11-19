@@ -562,7 +562,7 @@ await kit.run(async () => {
   const follow = (await rpc({ action: "automation-snapshot", id })).follow;
   check(
     "15 the attempt is recorded under the provider repository",
-    follow.fixes.some((item) => item.pr === "fake-repo#21" && item.attempts.length === 1) &&
+    follow.fixes.some((item) => item.pr === "fake:fake-repo#21" && item.attempts.length === 1) &&
       follow.repos.some((item) => item.repositoryId === "fake-repo"),
     follow.fixes,
   );
