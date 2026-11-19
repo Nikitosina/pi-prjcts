@@ -699,6 +699,10 @@ export function startTelegram(options: {
         if (!state.pairing) options.changed?.();
         return;
       }
+      if (state.owner?.chatId !== chat.id) {
+        state.messages = {};
+        state.progress = {};
+      }
       state.owner = {
         chatId: chat.id,
         name:
@@ -834,6 +838,7 @@ export function startTelegram(options: {
   /** Caption-first media/album delivery; only text exceeding caption capacity spills over. Every returned message routes replies. */
   async function sendNotice(notice: Notice) {
     if (!state.owner) return;
+    const startOwner = state.owner.chatId;
     const extracted = extractTelegramMedia(notice.text);
     const formatted = format({ ...notice, text: extracted.markdown });
     const buttons = formatted.buttons;
@@ -871,15 +876,16 @@ export function startTelegram(options: {
       }
       for (const chunk of overflow) plan.push({ kind: "text", text: chunk });
     }
+    if (state.owner?.chatId !== startOwner) throw new Error("Telegram recipient changed during delivery");
     if (extracted.media.length && state.sentPart?.seq === notice.seq && !state.sentPart.plan && state.sentPart.parts > 0) {
       // A pre-media release checkpointed text chunks, not caption parts. Never guess which content to replay.
       state.sentPart.pendingMedia = true;
       persist();
       throw new Error(UNCERTAIN_MEDIA);
     }
-    if (state.sentPart?.seq !== notice.seq) state.sentPart = { seq: notice.seq, chatId: state.owner.chatId, parts: 0, plan };
+    if (state.sentPart?.seq !== notice.seq) state.sentPart = { seq: notice.seq, chatId: startOwner, parts: 0, plan };
     const sentPart = state.sentPart;
-    const chatId = (sentPart.chatId ??= state.owner.chatId);
+    const chatId = (sentPart.chatId ??= startOwner);
     // Every part goes to the chat the notice was bound to; an owner replaced mid-delivery never receives the rest.
     const bound = () => {
       if (state.owner?.chatId !== chatId) throw new Error("Telegram recipient changed during delivery");
@@ -1045,7 +1051,7 @@ export function startTelegram(options: {
             retry.unref();
             return;
           }
-          state.sentSeq = next.seq;
+          state.sentSeq = Math.max(state.sentSeq, next.seq);
           delete state.sentPart;
           persist();
         }
@@ -1059,7 +1065,7 @@ export function startTelegram(options: {
    *  A cursor behind `sentSeq` is a recovery the host left half done: its progress replaces the older held record. */
   function hold(): boolean {
     const part = state.sentPart;
-    const chatId = part?.chatId ?? state.owner?.chatId;
+    const chatId = part?.chatId ?? (part && (state.held ?? []).find((item) => item.seq === part.seq)?.ownerChatId) ?? state.owner?.chatId;
     if (!part || chatId === undefined || (!part.pendingMedia && part.seq > state.sentSeq)) return false;
     const notice = options.notifier.feed(part.seq - 1).items.find((item) => item.seq === part.seq);
     const previous = (state.held ?? []).find((item) => item.seq === part.seq);
@@ -1155,7 +1161,7 @@ export function startTelegram(options: {
       const text = renderProgress(view),
         chat_id = state.owner.chatId,
         stored = (state.progress ??= {})[view.jobId],
-        prior = stored && (stored.chatId ?? chat_id) === chat_id ? stored : undefined;
+        prior = stored?.chatId === chat_id ? stored : undefined;
       if (prior?.text === text) return;
       if (prior) {
         try {

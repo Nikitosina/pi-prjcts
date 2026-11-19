@@ -30,7 +30,8 @@ const server = createServer(async (req, res) => {
     const batch = updates.splice(0);
     return reply({ ok: true, result: batch });
   }
-  calls.push({ method, input, id: method === "sendMessage" ? nextId + 1 : undefined });
+  const entry = { method, input };
+  calls.push(entry);
   if (method === "setMyCommands" && commandFaults.length) {
     const fault = commandFaults.shift();
     if (fault === "network") return req.socket.destroy();
@@ -55,7 +56,8 @@ const server = createServer(async (req, res) => {
     gate = null;
     await run();
   }
-  reply({ ok: true, result: method === "sendMessage" ? { message_id: ++nextId } : true });
+  entry.id = method === "sendMessage" ? ++nextId : undefined;
+  reply({ ok: true, result: method === "sendMessage" ? { message_id: entry.id } : true });
 });
 await new Promise((done) => server.listen(0, "127.0.0.1", done));
 process.env.PI_PROJECTS_TELEGRAM_API = `http://127.0.0.1:${server.address().port}`;
@@ -229,7 +231,13 @@ try {
     steps: [{ title: "Step", status: "doing", estimateMin: 5 }],
   });
   calls = [];
+  const idBeforePairing = nextId;
   await repair(77, "Second");
+  const routedAfterPairing = JSON.parse(readFileSync(join(root, "telegram.json"))).messages;
+  assert(
+    Object.keys(routedAfterPairing).every((id) => Number(id) > idBeforePairing),
+    "old account routes are dropped on a new pairing",
+  );
   calls = [];
   await bridge.progress(plan(["done", "done", "todo", "todo"]));
   assert.deepEqual(
