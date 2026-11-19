@@ -558,6 +558,8 @@ export async function renderWorker(root, id, { steer = false } = {}) {
     });
     if (focused && !node.contains(document.activeElement)) node.querySelector(focused)?.focus({ preventScroll: true });
   };
+  // Undo state arriving or being withdrawn repaints this feed too, as it does the chat.
+  const offMemory = on("memory-recent", () => (alive() ? paint() : offMemory()));
   const load = async () => {
     const page = await call("thread-history", { id: state.projectId, threadId: id, limit: 200, messageText: "full" }).catch((error) => {
       if (alive()) node.innerHTML = `<p class="muted">${esc(error.message)}</p>`;

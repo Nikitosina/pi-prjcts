@@ -4214,3 +4214,25 @@ table.hotkeys tr.clash td {
     display: none;
   }
 }
+.msg.owner.pending .bubble {
+  opacity: 0.75;
+}
+.msg.owner.pending[data-delivery="failed"] .bubble,
+.msg.owner.pending[data-delivery="unconfirmed"] .bubble {
+  opacity: 1;
+  border-color: var(--bad);
+}
+.msg-meta .delivery {
+  color: var(--faint);
+}
+.msg.owner.pending[data-delivery="failed"] .delivery,
+.msg.owner.pending[data-delivery="unconfirmed"] .delivery {
+  color: var(--bad);
+}
+.pending-note {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--muted);
+  text-align: right;
+  overflow-wrap: anywhere;
+}

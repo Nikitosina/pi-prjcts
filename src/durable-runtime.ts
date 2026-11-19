@@ -285,6 +285,8 @@ export type DurableSubmissionState = {
   origin?: "telegram";
   status: "queued" | "placed" | "done" | "unanswered";
   answerId: number | null;
+  /** The transcript entry the input was placed at; null while it is still queued. */
+  entry: number | null;
   reason: string | null;
   /** Provider/runtime error text for unanswered input, when Durable recorded one. */
   detail?: string | null;
@@ -3480,6 +3482,7 @@ async function normalizeSubmission(root: Conversation, submission: Submission): 
     requestId: state.requestId ?? null,
     status: state.status,
     answerId: state.type === "input" && state.status === "done" ? Number(state.answer) : null,
+    entry: state.type === "input" && state.entry !== undefined ? Number(state.entry) : null,
     reason: state.type === "input" && state.status === "unanswered" ? state.reason : null,
     detail:
       state.type === "input" && state.status === "unanswered" && typeof state.detail === "string" ? state.detail.slice(0, 2000) : null,

@@ -25,7 +25,9 @@ import {
   socketPath,
   Request,
   Project,
+  Refused,
   errorText,
+  jobById,
   jobs,
   legacyProjectIds,
   listProjects,
@@ -45,7 +47,6 @@ import { referencedPrBlock } from "./pr-monitor.ts";
 import { plugins } from "./plugins.ts";
 import { expandSkillCommand, listSkills, skillNames, skillPreview } from "./coordinator-skills.ts";
 import { refCandidates, referencedItemsBlock, refPreview } from "./inline-refs.ts";
-import { recordInvokedSkill } from "./skill-profiles.ts";
 import { mcpCatalog, mcpPool } from "./mcp-servers.ts";
 import { resolveEntry, inbox } from "./inbox.ts";
 import { body } from "./http.ts";
@@ -54,7 +55,7 @@ import { feed, HOST_FEED, publishHost } from "./change-feed.ts";
 import { approvals } from "./approvals.ts";
 import { openHostAgent, type HostAgent } from "./host-agent.ts";
 import { profilesSnapshot, readStorage, readUi, setStorage, setTiers, setUi, tiersFor, tiersSnapshot } from "./host-documents.ts";
-import { memoryIndex, memoryRecent, undoMemory } from "./memory.ts";
+import { memoryIndex, memoryRecent, memoryWrites, undoMemory } from "./memory.ts";
 import { splitSkillToggles } from "./profiles.ts";
 import { createRemote, type RemoteAccess } from "./remote.ts";
 import { startWebhooks } from "./webhook.ts";
@@ -80,7 +81,7 @@ import { sendOwnerMessage, startTelegram } from "./telegram.ts";
 import type { JobsSnapshot } from "./jobs.ts";
 import { loadAutomations, rotateWebhookSecret, updateAutomations } from "./project-automations.ts";
 import { listArtifacts } from "./artifacts.ts";
-import { openDurableHost, durableHostSnapshot, durableHostActivity, type ProjectActivity } from "./durable-host.ts";
+import { openDurableHost, durableHostSnapshot, durableHostActivity, finishGrant, type ProjectActivity } from "./durable-host.ts";
 import {
   archiveConfig,
   archiveHistory,
@@ -109,7 +110,7 @@ import {
 } from "./github-authorization.ts";
 import { settingsApplication } from "./settings-application.ts";
 import { libraryImport, libraryList, libraryRead } from "./project-library.ts";
-import { attachmentContent, deleteUpload, listUploads, saveUpload, uploadRecord, uploadText } from "./uploads.ts";
+import { attachmentImageCopies, attachmentMessage, deleteUpload, listUploads, saveUpload, uploadRecord, uploadText } from "./uploads.ts";
 import { createModelRuntime, loadProviderExtensions } from "./provider-extensions.ts";
 import { openToolSummaries } from "./tool-summaries.ts";
 import { projectModelCatalog, projectModelPicker } from "./project-models.ts";
@@ -226,6 +227,13 @@ async function withProjectLock<T>(id: string, operation: () => Promise<T>, durin
   }
 }
 
+async function refusing<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    throw error instanceof Refused ? error : new Refused(errorText(error));
+  }
+}
 async function withDurableOwner<T>({
   id,
   validate,
@@ -838,6 +846,8 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return memoryIndex(await knowledgeDir(input.projectId), { includeArchive: input.includeArchive });
     case "memory-recent":
       return memoryRecent(await knowledgeDir(input.projectId));
+    case "memory-writes":
+      return memoryWrites(await knowledgeDir(input.projectId), input.writes);
     case "chat-stop": {
       const project = loadProject(input.projectId);
       if (project.deleted || project.archived) throw new Error("Inactive project has no running turn to stop");
@@ -1654,7 +1664,9 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         },
       });
     case "message": {
-      const prepareJob = () => {
+      const origin: "telegram" | "owner" = input.origin ?? "owner",
+        chatId = input.chatId ?? "main";
+      const prepareJob = (): import("./state.ts").Job => {
         const project = loadProject(input.id);
         if (project.deleted) throw new Error("Project is deleted; admission is denied");
         if (project.archived) throw new Error("Project is archived; admission is denied");
@@ -1665,44 +1677,94 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           at: new Date().toISOString(),
           state: "queued",
           error: null,
+          origin,
           ...(input.chatId && input.chatId !== "main" ? { chatId: input.chatId } : {}),
           ...(input.attachments ? { attachments: input.attachments } : {}),
-        } satisfies import("./state.ts").Job;
+        };
+      };
+      // The runtime may have settled the job while it was being admitted, so the saved record is the base. Once the runtime holds the message, its
+      // skill grant is finished (a crash may have cut it off) and its saved content is dropped.
+      const markAdmitted = (job: import("./state.ts").Job) => {
+        const base = jobById(input.id, job.id) ?? job;
+        finishGrant(ownedProjectDir(input.id), base);
+        const { delivery: _saved, ...held } = { ...base, admitted: true as const };
+        saveJob(input.id, held);
+        return held;
       };
       return withDurableOwner({
         id: input.id,
         validate: (project) => {
-          if (project.deleted) throw new Error("Project is deleted; admission is denied");
-          if (project.archived) throw new Error("Project is archived; admission is denied");
+          if (!project.deleted && !project.archived) return;
+          // A repeat of a message the host already holds may have been admitted before the project went inactive, so only a first send is proven refused.
+          const text = `Project is ${project.deleted ? "deleted" : "archived"}; admission is denied`;
+          throw input.requestId && jobById(input.id, input.requestId) ? new Error(text) : new Refused(text);
         },
         operation: async (owner) => {
-          // A repeated request ID (Telegram update replay) returns the job it already admitted.
-          const prior = input.requestId ? jobs(input.id).find((job) => job.id === input.requestId) : undefined;
-          if (prior) return prior;
-          const job = prepareJob();
-          // The job keeps what the owner typed; the coordinator receives the expanded skill.
-          // `/skill:<name>` anywhere: skill blocks precede the owner's words. `@issue:/@doc:/@upload:/@file:` and `#123` / `PR #123`: compact untrusted blocks follow them.
-          const text =
-            (skillNames(job.text).length ? await expandSkillCommand(await configuredSkills(input.id), job.text) : job.text) +
-            (await referencedItemsBlock(loadProject(input.id), ownedProjectDir(input.id), job.text)) +
-            (await referencedPrBlock(loadProject(input.id), job.text));
-          if (text.length > 120_000)
-            throw new Error(`Message with its skills and references is too large to send (${text.length} characters; limit 120000)`);
-          for (const invoked of skillNames(job.text)) recordInvokedSkill(ownedProjectDir(input.id), invoked);
-          const plan = await owner.jobs();
-          if (plan.paused) throw new Error("Project plan is paused; admission is denied");
-          // Validate the chat before recording the job, so an unknown or archived chat leaves no ledger entry.
-          const chat = (await owner.chats()).find((item) => item.id === (input.chatId ?? "main"));
-          if (!chat) throw new Error("Unknown chat for this project");
-          if (chat.archived) throw new Error("Chat is archived; restore it before sending");
+          // A request ID names one message: a repeat must carry the same chat, text, attachments and origin, or it is refused before anything is touched.
+          // A record from before origins were stored has none and takes a repeat from any origin.
+          const prior = input.requestId ? jobById(input.id, input.requestId) : undefined;
+          if (
+            prior &&
+            ((prior.chatId ?? "main") !== chatId ||
+              prior.text !== input.text ||
+              JSON.stringify(prior.attachments ?? []) !== JSON.stringify(input.attachments ?? []) ||
+              (prior.origin !== undefined && prior.origin !== origin))
+          )
+            throw new Refused("This request id belongs to a different message; nothing was changed");
+          if (prior?.admitted) return prior;
+          if (prior && (await owner.ledgerSubmissions(chatId, [prior.id])).length) return markAdmitted(prior);
+          // A record without saved content proves neither where it came from nor what it said, and no runtime receipt was found: nobody's repeat rebuilds it.
+          if (prior && !prior.delivery && (prior.state === "queued" || prior.state === "running"))
+            throw new Refused("This saved message does not prove what it said or where it came from; send it again as a new message");
+          // A settled record the runtime has no submission for is history, not a message waiting to be sent.
+          if (prior && prior.state !== "queued" && prior.state !== "running") return prior;
+          // Everything that can refuse runs before anything is recorded or granted.
+          const { job, parts } = await refusing(async () => {
+            const job = prior ?? prepareJob();
+            // The saved content is the message; only a new message is built from the text (a legacy record without it never reaches here).
+            // The job keeps what the owner typed; the coordinator receives the expanded skill.
+            // `/skill:<name>` anywhere: skill blocks precede the owner's words. `@issue:/@doc:/@upload:/@file:` and `#123` / `PR #123`: compact untrusted blocks follow them.
+            const dir = ownedProjectDir(input.id);
+            const saved = job.delivery;
+            // The uploads are read once: the same reduced copies are checked here and handed to the runtime below.
+            const built = saved
+              ? undefined
+              : attachmentMessage(
+                  dir,
+                  (skillNames(job.text).length ? await expandSkillCommand(await configuredSkills(input.id), job.text) : job.text) +
+                    (await referencedItemsBlock(loadProject(input.id), dir, job.text)) +
+                    (await referencedPrBlock(loadProject(input.id), job.text)),
+                  job.attachments,
+                  owner.acceptsImages,
+                );
+            const content = saved?.content ?? built!.content;
+            // The limit applies to what the runtime receives, attachment block included, so a skill is never granted for a message it would refuse.
+            if (content.length > 120_000)
+              throw new Error(`Message with its skills and references is too large to send (${content.length} characters; limit 120000)`);
+            if (saved && saved.images === undefined && job.attachments?.length)
+              throw new Error("The saved message does not say which images went with it; send it again as a new message");
+            const images = built?.images ?? attachmentImageCopies(dir, saved!.images, true);
+            if (images.length !== (saved?.images?.length ?? images.length))
+              throw new Error("An image attached to the saved message is no longer available; send it again as a new message");
+            if ((await owner.jobs()).paused) throw new Error("Project plan is paused; admission is denied");
+            // Validate the chat before recording the job, so an unknown or archived chat leaves no ledger entry.
+            const chat = (await owner.chats()).find((item) => item.id === chatId);
+            if (!chat) throw new Error("Unknown chat for this project");
+            if (chat.archived) throw new Error("Chat is archived; restore it before sending");
+            return {
+              job: { ...job, origin, delivery: { content, images: images.map(({ id }) => id) } },
+              parts: images.map(({ part }) => part),
+            };
+          });
           saveJob(input.id, job);
-          await owner.admit(attachmentContent(ownedProjectDir(input.id), text, job.attachments, owner.acceptsImages), {
+          const effective = job.delivery!.content;
+          await owner.admit(parts.length ? [{ type: "text", text: effective }, ...parts] : effective, {
             requestId: job.id,
-            origin: input.origin,
+            origin: job.origin === "telegram" ? "telegram" : undefined,
             chatId: input.chatId,
             title: job.text,
           });
-          return job;
+          return markAdmitted(job);
         },
       });
     }
@@ -2058,7 +2120,9 @@ const server = createServer(async (request, response) => {
     const data = await dispatch(input);
     response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, data }));
   } catch (error) {
-    response.writeHead(400, { "content-type": "application/json" }).end(JSON.stringify({ ok: false, error: errorText(error) }));
+    response
+      .writeHead(400, { "content-type": "application/json" })
+      .end(JSON.stringify({ ok: false, error: errorText(error), ...(error instanceof Refused ? { refused: true } : {}) }));
   }
 });
 server.requestTimeout = 120000;
