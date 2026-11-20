@@ -327,7 +327,7 @@ await kit.run(async () => {
   await select(alpha);
   await kit.delay(1000);
   check("C12 selecting projects with Settings open does not read the catalog again", (await page.evaluate("window.__catalogCalls")) === 0);
-  check("C12 the catalog rows stay drawn", (await rowState("tasks")) === "loaded" && (await rowState("simulator")) === "configured");
+  check("C12 the catalog rows stay drawn", (await rowState("tasks")) === "loaded" && (await rowState("simulator")) === "loaded");
 
   // C13: the answer of a switch clicked in one project says nothing in another project after a selection.
   await page.evaluate(
