@@ -41,3 +41,4 @@ Combined with the per-project switches (plugin-enable-failures.md); e2e checks C
 24. A refused activation redraws the block from an empty list, so every catalog row disappears and nothing can be retried. The error shows above the existing rows and the button is usable again. e2e C14.
 25. A switch answer for a project that is no longer selected toasts or says "on/off in this project" in the new project. The answer is shown only while the clicked project is still selected. e2e C13.
 26. Selecting a project with Settings open reads the catalog again. The host-wide catalog is read once per opening of Settings and again after the connection dropped; activations update it. e2e C12.
+27. Escape closes all Settings instead of only the restart confirmation. The confirmation closes first, Settings stays open and focus returns to Restart; the same layout keeps its actions reachable at 390 px and in the light theme.

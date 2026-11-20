@@ -32,6 +32,15 @@ await kit.run(async () => {
     for (const type of ["mousePressed", "mouseReleased"])
       await page.cdp("Input.dispatchMouseEvent", { type, x: point.x, y: point.y, button: "left", clickCount: 1 });
   };
+  const escape = async () => {
+    for (const type of ["keyDown", "keyUp"])
+      await page.cdp("Input.dispatchKeyEvent", { type, key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+  };
+  const setTheme = async (theme) => {
+    const ui = await rpc({ action: "ui-get" });
+    await rpc({ action: "ui-set", revision: ui.revision, patch: { theme } });
+    await page.waitFor(`document.documentElement.dataset.theme === ${js(theme)}`, `${theme} theme`);
+  };
   const row = (id) => `#settings .catalog-row[data-catalog="${id}"]`;
   const rowState = (id) => page.evaluate(`document.querySelector(${js(row(id))})?.dataset.state ?? null`);
   const config = () => JSON.parse(readFileSync(configFile, "utf8"));
@@ -104,11 +113,31 @@ await kit.run(async () => {
     await page.evaluate(`/interrupt/i.test(document.querySelector(${js(row("tasks"))}).innerText)`),
   );
   await shot("03-confirm-restart");
-  await click(`${row("tasks")} [data-cancel-restart]`);
+  check(
+    "27 confirmation explains the interruption and result",
+    await page.evaluate(
+      `/interrupt/i.test(document.querySelector(${js(row("tasks"))}).innerText) && /same code version/i.test(document.querySelector(${js(row("tasks"))}).innerText) && /loads? Tasks/i.test(document.querySelector(${js(row("tasks"))}).innerText)`,
+    ),
+  );
+  check(
+    "27 keyboard focus starts on Cancel",
+    await page.evaluate(`document.activeElement === document.querySelector(${js(`${row("tasks")} [data-cancel-restart]`)})`),
+  );
+  await setTheme("light");
+  await shot("03b-confirm-restart-light");
+  await setTheme("claude");
+  await escape();
+  await page.waitFor(`!document.querySelector(${js(`${row("tasks")} [data-confirmation]`)})`, "Escape cancels restart confirmation");
+  check(
+    "27 Escape keeps Settings open and returns focus to Restart",
+    await page.evaluate(`document.querySelector("#settings").open && document.activeElement === document.querySelector(${js(restart)})`),
+  );
   check(
     "cancel kept the instance and config",
     (await rpc({ action: "plugin-catalog" })).instance === before.instance && readFileSync(configFile, "utf8") === afterClick,
   );
+  await click(restart);
+  await click(`${row("tasks")} [data-cancel-restart]`);
   const replay = { action: "plugin-restart", plugin: "tasks", instance: before.instance };
   check("arbitrary command refused", !!(await kit.rejects({ ...replay, command: "invalid" })));
   // 18: phone width.
@@ -119,6 +148,15 @@ await kit.run(async () => {
   );
   check("18 rows and buttons fit a 390 px phone", fits);
   await shot("04-catalog-mobile-configured");
+  await click(restart);
+  await page.waitFor(`!!document.querySelector(${js(`${row("tasks")} [data-confirmation]`)})`, "mobile confirmation");
+  const confirmationFits = await page.evaluate(
+    `(() => { const row = document.querySelector(${js(row("tasks"))}); const actions = [...row.querySelectorAll("[data-cancel-restart], [data-confirm-restart]")]; return row.getBoundingClientRect().right <= innerWidth && actions.every((button) => { const box = button.getBoundingClientRect(); return box.left >= 0 && box.right <= innerWidth && box.bottom <= innerHeight; }) && document.documentElement.scrollWidth <= innerWidth; })()`,
+  );
+  check("27 mobile confirmation and both actions fit a 390 px phone", confirmationFits);
+  await shot("04b-catalog-mobile-confirmation");
+  await escape();
+  await page.waitFor(`!document.querySelector(${js(`${row("tasks")} [data-confirmation]`)})`, "mobile Escape cancellation");
   await page.viewport(1440, 1000);
 
   // The original tab confirms, reconnects and shows the loader’s result without navigating.
