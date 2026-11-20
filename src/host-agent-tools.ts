@@ -160,8 +160,9 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
   "plugin-catalog": allow(
     "Plugins shipped with pi-prjcts and their state on this host: available, configured (restart needed), loaded or failed.",
   ),
+  "plugin-restart": exclude("Only the owner can confirm interrupting the host to load a configured plugin."),
   "plugin-activate": exclude(
-    "Adds a bundled plugin to the host's plugins.json; the owner does it in Settings → Plugins, and a restart (Deploy) loads it.",
+    "Adds a bundled plugin to the host's plugins.json; the owner does it in Settings → Plugins, and a separate restart loads it.",
   ),
   plugin: allow("Call a plugin method; methods the plugin does not declare as reads or safe writes need the owner's approval."),
   "work-submit": exclude("Worker-scoped admission path; the Host agent sends with message."),

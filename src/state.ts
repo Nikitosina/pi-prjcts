@@ -1382,6 +1382,10 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("plugins"), id: Type.Optional(Id) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("plugin-catalog") }, { additionalProperties: false }),
   Type.Object(
+    { action: Type.Literal("plugin-restart"), instance: Id, plugin: Type.Union(BUNDLED_PLUGIN_IDS.map((id) => Type.Literal(id))) },
+    { additionalProperties: false },
+  ),
+  Type.Object(
     { action: Type.Literal("plugin-activate"), plugin: Type.Union(BUNDLED_PLUGIN_IDS.map((id) => Type.Literal(id))) },
     { additionalProperties: false },
   ),

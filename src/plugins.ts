@@ -29,6 +29,7 @@ import type {
 } from "./plugin-types.ts";
 import { usePluginPromptBlocks } from "./prompt-blocks.ts";
 import { hostLeases } from "./resource-leases.ts";
+import { readBrowserAsset } from "./host-assets.ts";
 import { webFile, type WebFile } from "./web-file.ts";
 import { home, listProjects, loadProject, projectDir, workerWorktreeRoot, type Project } from "./state.ts";
 import { verifiedWorkspaceRoots } from "./workspace-roots.ts";
@@ -751,7 +752,7 @@ function webFiles(web: WebContribution | undefined): Loaded["web"] {
   const read = (path: string | undefined, mime: string) => {
     if (!path) return undefined;
     try {
-      return webFile(readFileSync(path), mime);
+      return webFile(readBrowserAsset(path), mime);
     } catch {
       return undefined;
     }

@@ -8,9 +8,11 @@ import { createKit } from "./lib/e2e-kit.mjs";
 const kit = await createKit("plugin-catalog");
 const external = join(process.cwd(), "scripts/fixtures/second-plugin");
 const gated = join(process.cwd(), "scripts/fixtures/gated-plugin");
+const slow = join(kit.root, "startup-delay.mjs");
+writeFileSync(slow, 'await new Promise(r => setTimeout(r, 2500)); export default {name:"delay", register(){}};');
 const configFile = join(kit.home, "plugins.json");
 mkdirSync(kit.home, { recursive: true });
-writeFileSync(configFile, JSON.stringify({ plugins: [external, gated], keep: "me" }, null, 2) + "\n");
+writeFileSync(configFile, JSON.stringify({ plugins: [external, gated, slow], keep: "me" }, null, 2) + "\n");
 const tasksDir = join(process.cwd(), "plugins/tasks");
 
 await kit.run(async () => {
@@ -29,6 +31,15 @@ await kit.run(async () => {
     if (!point) throw Error(`nothing to click: ${selector}`);
     for (const type of ["mousePressed", "mouseReleased"])
       await page.cdp("Input.dispatchMouseEvent", { type, x: point.x, y: point.y, button: "left", clickCount: 1 });
+  };
+  const escape = async () => {
+    for (const type of ["keyDown", "keyUp"])
+      await page.cdp("Input.dispatchKeyEvent", { type, key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+  };
+  const setTheme = async (theme) => {
+    const ui = await rpc({ action: "ui-get" });
+    await rpc({ action: "ui-set", revision: ui.revision, patch: { theme } });
+    await page.waitFor(`document.documentElement.dataset.theme === ${js(theme)}`, `${theme} theme`);
   };
   const row = (id) => `#settings .catalog-row[data-catalog="${id}"]`;
   const rowState = (id) => page.evaluate(`document.querySelector(${js(row(id))})?.dataset.state ?? null`);
@@ -65,20 +76,17 @@ await kit.run(async () => {
   await click(`${row("tasks")} [data-catalog-activate]`);
   await page.waitFor(`document.querySelector(${js(row("tasks"))})?.dataset.state === "configured"`, "tasks configured");
   check("16 no activate button after", await page.evaluate(`!document.querySelector(${js(`${row("tasks")} [data-catalog-activate]`)})`));
-  check(
-    "13 the card names the existing deploy command and says a restart is needed",
-    await page.evaluate(
-      `/restart/.test(document.querySelector(${js(row("tasks"))}).innerText) && /npm run projects -- deploy/.test(document.querySelector(${js(row("tasks"))}).innerText) && !!document.querySelector(${js(`${row("tasks")} [data-catalog-deploy]`)})`,
-    ),
-  );
+  const restart = `${row("tasks")} [data-catalog-restart]`;
+  const confirm = `${row("tasks")} [data-confirm-restart]`;
+  check("restart offered", await page.evaluate(`!!document.querySelector(${js(restart)})`));
   const afterClick = readFileSync(configFile, "utf8");
   check(
     "6 the external entry, its order and the extra key are kept",
     config().plugins[0] === external &&
       config().plugins[1] === gated &&
-      config().plugins[2] === tasksDir &&
+      config().plugins[3] === tasksDir &&
       config().keep === "me" &&
-      config().plugins.length === 3,
+      config().plugins.length === 4,
     config(),
   );
   await Promise.all([rpc({ action: "plugin-activate", plugin: "tasks" }), rpc({ action: "plugin-activate", plugin: "tasks" })]);
@@ -98,13 +106,40 @@ await kit.run(async () => {
     check(`3 refused: ${plugin}`, (await kit.rejects({ action: "plugin-activate", plugin })) !== null);
   check("3 the file did not change", readFileSync(configFile, "utf8") === afterClick);
 
-  // 13: the Deploy settings button opens the existing Deploy section.
-  await click(`${row("tasks")} [data-catalog-deploy]`);
-  await page.waitFor(`document.querySelector("#settings").dataset.section === "deploy"`, "deploy section");
-  await shot("03-deploy-pointer");
-  await click(`#settings nav [data-section="plugins"]`);
-  await page.waitFor(`document.querySelector(${js(row("tasks"))})`, "catalog drawn again");
-
+  const before = await rpc({ action: "plugin-catalog" });
+  await click(restart);
+  check(
+    "confirmation warns of interruption",
+    await page.evaluate(`/interrupt/i.test(document.querySelector(${js(row("tasks"))}).innerText)`),
+  );
+  await shot("03-confirm-restart");
+  check(
+    "27 confirmation explains the interruption and result",
+    await page.evaluate(
+      `/interrupt/i.test(document.querySelector(${js(row("tasks"))}).innerText) && /same code version/i.test(document.querySelector(${js(row("tasks"))}).innerText) && /loads? Tasks/i.test(document.querySelector(${js(row("tasks"))}).innerText)`,
+    ),
+  );
+  check(
+    "27 keyboard focus starts on Cancel",
+    await page.evaluate(`document.activeElement === document.querySelector(${js(`${row("tasks")} [data-cancel-restart]`)})`),
+  );
+  await setTheme("light");
+  await shot("03b-confirm-restart-light");
+  await setTheme("claude");
+  await escape();
+  await page.waitFor(`!document.querySelector(${js(`${row("tasks")} [data-confirmation]`)})`, "Escape cancels restart confirmation");
+  check(
+    "27 Escape keeps Settings open and returns focus to Restart",
+    await page.evaluate(`document.querySelector("#settings").open && document.activeElement === document.querySelector(${js(restart)})`),
+  );
+  check(
+    "cancel kept the instance and config",
+    (await rpc({ action: "plugin-catalog" })).instance === before.instance && readFileSync(configFile, "utf8") === afterClick,
+  );
+  await click(restart);
+  await click(`${row("tasks")} [data-cancel-restart]`);
+  const replay = { action: "plugin-restart", plugin: "tasks", instance: before.instance };
+  check("arbitrary command refused", !!(await kit.rejects({ ...replay, command: "invalid" })));
   // 18: phone width.
   await page.viewport(390, 844, true);
   await page.waitFor(`document.querySelector(${js(row("simulator"))})`, "mobile layout");
@@ -113,10 +148,78 @@ await kit.run(async () => {
   );
   check("18 rows and buttons fit a 390 px phone", fits);
   await shot("04-catalog-mobile-configured");
+  await click(restart);
+  await page.waitFor(`!!document.querySelector(${js(`${row("tasks")} [data-confirmation]`)})`, "mobile confirmation");
+  const confirmationFits = await page.evaluate(
+    `(() => { const row = document.querySelector(${js(row("tasks"))}); const actions = [...row.querySelectorAll("[data-cancel-restart], [data-confirm-restart]")]; return row.getBoundingClientRect().right <= innerWidth && actions.length === 2 && actions.every((button) => { const box = button.getBoundingClientRect(); return box.width > 0 && box.height > 0 && box.left >= 0 && box.right <= innerWidth && box.top >= 0 && box.bottom <= innerHeight; }) && document.documentElement.scrollWidth <= innerWidth; })()`,
+  );
+  check("27 mobile confirmation and both actions fit a 390 px phone", confirmationFits);
+  await shot("04b-catalog-mobile-confirmation");
+  await escape();
+  await page.waitFor(`!document.querySelector(${js(`${row("tasks")} [data-confirmation]`)})`, "mobile Escape cancellation");
   await page.viewport(1440, 1000);
 
-  // 12: a separate restart loads it; the external plugin loads too, and the catalog says loaded.
-  await kit.restartHost();
+  // C14: a refused activation keeps every catalog row and the button, so the owner can retry.
+  await page.evaluate(
+    `(() => { const original = window.fetch; window.__fetchOriginal = original; window.fetch = async (input, init) => typeof init?.body === "string" && /"action":"plugin-activate"/.test(init.body) ? new Response(JSON.stringify({ ok: false, error: "disk full" }), { status: 500 }) : original(input, init); })()`,
+  );
+  await click(`${row("simulator")} [data-catalog-activate]`);
+  await page.waitFor(`/disk full/.test(document.querySelector("#settings .plugin-catalog").innerText)`, "activation error shown");
+  check(
+    "C14 both rows stay after the refusal",
+    (await rowState("tasks")) === "configured" && (await rowState("simulator")) === "available",
+  );
+  check(
+    "C14 the button is usable again",
+    await page.evaluate(`document.querySelector(${js(`${row("simulator")} [data-catalog-activate]`)})?.disabled === false`),
+  );
+  await shot("09-activation-refused");
+  await page.evaluate("window.fetch = window.__fetchOriginal");
+  await click(`${row("simulator")} [data-catalog-activate]`);
+  await page.waitFor(`document.querySelector(${js(row("simulator"))})?.dataset.state === "configured"`, "retry configured it");
+  check(
+    "C14 the retry works and clears the error",
+    await page.evaluate(`!/disk full/.test(document.querySelector("#settings .plugin-catalog").innerText)`),
+  );
+
+  // 27: with two cards awaiting restart, Escape dismisses the confirmation that owns focus, not the first one in the list.
+  await click(restart);
+  await click(`${row("simulator")} [data-catalog-restart]`);
+  check(
+    "27 the second confirmation owns focus",
+    await page.evaluate(`document.activeElement === document.querySelector(${js(`${row("simulator")} [data-cancel-restart]`)})`),
+  );
+  await escape();
+  check(
+    "27 Escape cancels the focused confirmation only",
+    await page.evaluate(
+      `!document.querySelector(${js(`${row("simulator")} [data-confirmation]`)}) && !!document.querySelector(${js(`${row("tasks")} [data-confirmation]`)}) && document.activeElement === document.querySelector(${js(`${row("simulator")} [data-catalog-restart]`)})`,
+    ),
+  );
+  await escape();
+  check(
+    "27 the remaining confirmation can cancel too",
+    await page.evaluate(`!document.querySelector("#settings [data-confirmation]") && document.querySelector("#settings").open`),
+  );
+
+  // The original tab confirms, reconnects and shows the loader’s result without navigating.
+  await click(restart);
+  await click(confirm);
+  await page.waitFor(
+    `document.querySelector(${js(row("tasks"))})?.dataset.state === "loaded"`,
+    "same tab reconnected to loaded tasks",
+    600,
+  );
+  const after = await rpc({ action: "plugin-catalog" });
+  const head = kit.git(kit.core, "rev-parse", "HEAD");
+  check(
+    "same revision, replacement instance",
+    before.sha === head && after.sha === head && after.instance !== before.instance && after.previous === before.instance,
+  );
+  check("old confirmation cannot restart the replacement", /instance/i.test(await kit.rejects(replay)));
+  const health = await rpc();
+  check("replacement owns the private home", health.home === kit.home);
+  writeFileSync(join(kit.artifacts, "restart.json"), JSON.stringify({ home: health.home, pid: health.pid, before, after }, null, 2));
   const reloaded = await rpc({ action: "plugins" });
   check(
     "12 after the restart tasks and the external plugin are loaded",
@@ -128,9 +231,10 @@ await kit.run(async () => {
     (await rpc({ action: "plugin-catalog" })).entries[0].state === "loaded" &&
       (await rpc({ action: "plugin-catalog" })).entries[0].version === "1.0.0",
   );
+  const beforeLoadedActivation = readFileSync(configFile, "utf8");
   check(
     "7 activating a loaded plugin changes nothing",
-    (await rpc({ action: "plugin-activate", plugin: "tasks" })) && readFileSync(configFile, "utf8") === afterClick,
+    (await rpc({ action: "plugin-activate", plugin: "tasks" })) && readFileSync(configFile, "utf8") === beforeLoadedActivation,
   );
   await page.navigate(await kit.webUrl(alpha));
   await page.waitFor(`document.body.dataset.ready === "1"`, "inbox ready after restart");
@@ -166,7 +270,7 @@ await kit.run(async () => {
     await page.evaluate(`!document.querySelector(${js(`${row("tasks")} [data-catalog-activate]`)})`),
   );
   await shot("07-combined-tasks-off-in-alpha");
-  check("C6 the project's switch change did not touch plugins.json", readFileSync(configFile, "utf8") === afterClick);
+  check("C6 the project's switch change did not touch plugins.json", readFileSync(configFile, "utf8") === beforeLoadedActivation);
 
   // An unresolved write of a plugin refuses its switch in the UI; the catalog block stays drawn and the plugin stays on.
   await rpc({ action: "plugin", plugin: "gated", method: "mark-uncertain", params: { projectId: alpha, mode: "yes" } });
@@ -223,7 +327,7 @@ await kit.run(async () => {
   await select(alpha);
   await kit.delay(1000);
   check("C12 selecting projects with Settings open does not read the catalog again", (await page.evaluate("window.__catalogCalls")) === 0);
-  check("C12 the catalog rows stay drawn", (await rowState("tasks")) === "loaded" && (await rowState("simulator")) === "available");
+  check("C12 the catalog rows stay drawn", (await rowState("tasks")) === "loaded" && (await rowState("simulator")) === "loaded");
 
   // C13: the answer of a switch clicked in one project says nothing in another project after a selection.
   await page.evaluate(
@@ -244,26 +348,4 @@ await kit.run(async () => {
   check("C13 the project that was selected keeps its own switch", (await entry(beta, "second")).enabled === true);
   await page.evaluate("window.fetch = window.__fetchOriginal");
   await set(alpha, "second", true);
-
-  // C14: a refused activation keeps every catalog row and the button, so the owner can retry.
-  await select(alpha);
-  await page.waitFor(`document.querySelector(${js(row("simulator"))})`, "rows after selection");
-  await page.evaluate(
-    `(() => { const original = window.fetch; window.__fetchOriginal = original; window.fetch = async (input, init) => typeof init?.body === "string" && /"action":"plugin-activate"/.test(init.body) ? new Response(JSON.stringify({ ok: false, error: "disk full" }), { status: 500 }) : original(input, init); })()`,
-  );
-  await click(`${row("simulator")} [data-catalog-activate]`);
-  await page.waitFor(`/disk full/.test(document.querySelector("#settings .plugin-catalog").innerText)`, "activation error shown");
-  check("C14 both rows stay after the refusal", (await rowState("tasks")) === "loaded" && (await rowState("simulator")) === "available");
-  check(
-    "C14 the button is usable again",
-    await page.evaluate(`document.querySelector(${js(`${row("simulator")} [data-catalog-activate]`)})?.disabled === false`),
-  );
-  await shot("09-activation-refused");
-  await page.evaluate("window.fetch = window.__fetchOriginal");
-  await click(`${row("simulator")} [data-catalog-activate]`);
-  await page.waitFor(`document.querySelector(${js(row("simulator"))})?.dataset.state === "configured"`, "retry configured it");
-  check(
-    "C14 the retry works and clears the error",
-    await page.evaluate(`!/disk full/.test(document.querySelector("#settings .plugin-catalog").innerText)`),
-  );
 });

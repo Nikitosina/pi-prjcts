@@ -1889,27 +1889,60 @@ a.pr-link:hover .pr-title {
 }
 /* Settings → Plugins: the bundled plugin catalog above the cards. */
 .plugin-catalog {
-  margin-bottom: 14px;
+  margin-bottom: 20px;
 }
 .plugin-catalog h2 {
   margin: 0 0 4px;
 }
 .catalog-row {
-  margin-top: 8px;
-  padding: 8px 10px;
+  margin-top: 10px;
+  padding: 12px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--r-m);
   font-size: 12.5px;
 }
 .catalog-row .plugin-head {
   flex-wrap: wrap;
+  min-height: 24px;
+}
+.catalog-name {
+  font-weight: 600;
 }
 .catalog-row .plugin-head .badge {
   margin-left: auto;
 }
 .catalog-row p {
-  margin: 4px 0 0;
+  margin: 6px 0 0;
   overflow-wrap: anywhere;
+  line-height: 1.55;
+}
+.catalog-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+.catalog-confirm {
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: var(--r-s);
+  background: var(--raised);
+}
+.catalog-confirm h3 {
+  margin: 0;
+  font: 600 13px/1.5 var(--font);
+}
+.catalog-confirm .catalog-warning {
+  color: var(--accent-ink);
+}
+.catalog-confirm .confirm-actions {
+  margin-top: 12px;
+}
+:root[data-theme="claude"] .catalog-row .primary {
+  color: var(--code-bg);
+}
+:root[data-theme="light"] .catalog-row .primary {
+  background: var(--accent-ink);
+  color: var(--bg);
 }
 /* Settings → Plugins: one card per plugin; a panel's slot belongs to the plugin. */
 .plugin-card {
@@ -4175,6 +4208,24 @@ table.hotkeys tr.clash td {
     max-width: none;
     max-height: none;
     border-radius: 0;
+  }
+  .catalog-actions,
+  .catalog-actions > button {
+    width: 100%;
+  }
+  .catalog-actions > button {
+    justify-content: center;
+    height: 30px;
+  }
+  .catalog-confirm .confirm-actions {
+    flex-wrap: wrap;
+  }
+  .catalog-confirm .confirm-actions > button {
+    justify-content: center;
+  }
+  .catalog-confirm .confirm-actions > .primary {
+    flex: 1;
+    white-space: nowrap;
   }
   .tier-row {
     grid-template-columns: 30px minmax(0, 1fr) 18px;

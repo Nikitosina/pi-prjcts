@@ -33,12 +33,13 @@ export class HostError extends Error {
     this.refused = refused;
   }
 }
-export async function call(action, input = {}) {
+export async function call(action, input = {}, signal) {
   if (!token) throw new HostError("Not signed in", 401);
   const response = await fetch("/api", {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
     body: JSON.stringify({ action, ...input }),
+    signal,
   });
   let body;
   try {

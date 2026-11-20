@@ -21,7 +21,7 @@ Configuration
 
 States
 12. The state is guessed from the file only. Four states are told apart: `available` (not configured), `configured` (in the config, not part of the running host: awaiting restart), `loaded`, `failed` (with the loader's error). A running host never reports `loaded` for a plugin it did not load at its start.
-13. Activation hot-loads the plugin or restarts the host. It does neither; the card says that a restart is needed and names the existing Deploy (`npm run projects -- deploy`), which is the only restart. The nightly window restarts only when new code is pending, so the card does not promise it. A button that claims to restart while Settings has none is a dead end.
+13. Configuring or cancelling restarts the host. Only a separate confirmation may interrupt work. A stale confirmation or duplicate cannot stop a replacement instance. A dirty or moved checkout must not be started. No deploy, branch selection, or client-supplied command. A new catalog read on the original tab must show the loader’s actual outcome.
 14. Activation changes the owner's live host in a test. Tests use a temp `PI_PROJECTS_HOME` and never a live one.
 
 Found in review (red before the fix)
@@ -41,3 +41,4 @@ Combined with the per-project switches (plugin-enable-failures.md); e2e checks C
 24. A refused activation redraws the block from an empty list, so every catalog row disappears and nothing can be retried. The error shows above the existing rows and the button is usable again. e2e C14.
 25. A switch answer for a project that is no longer selected toasts or says "on/off in this project" in the new project. The answer is shown only while the clicked project is still selected. e2e C13.
 26. Selecting a project with Settings open reads the catalog again. The host-wide catalog is read once per opening of Settings and again after the connection dropped; activations update it. e2e C12.
+27. Escape closes all Settings instead of only the restart confirmation. The confirmation closes first, Settings stays open and focus returns to Restart; the same layout keeps its actions reachable at 390 px and in the light theme.

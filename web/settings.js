@@ -584,17 +584,18 @@ async function pluginsSection(body, alive) {
   // Every read, the first one and one after a switch changed elsewhere (another tab, the Host agent), goes through here: only the newest
   // read draws, and an unchanged status leaves the mounted panels alone unless `force` asks for a redraw.
   const draw = async (force = false) => {
+    if (force) shown = null; // A newer feed read must also restore a refused switch.
     const ask = ++readId;
     const status = await call("plugins", state.projectId ? { id: state.projectId } : {});
     if (!alive() || ask !== readId) return;
     const signature = pluginsSignature(status);
-    if (!force && signature === shown) return;
-    const entries = hostCatalog ?? (await call("plugin-catalog")).entries;
+    if (signature === shown) return;
+    const catalog = hostCatalog ?? (await call("plugin-catalog"));
     if (!alive() || ask !== readId) return;
-    hostCatalog = entries;
+    hostCatalog = catalog;
     shown = signature;
     unmount?.();
-    body.innerHTML = `${line("Plugins this host loaded at its start. Turn one off to stop it in this project only; its saved data stays.", "A plugin with active work, or one this project's checkout needs, cannot be turned off. A panel is the plugin's own code running in this page. A changed plugin shows here after a host restart and a page reload.")}${catalogBlock(entries)}${pluginCards(status) || `<p class="muted">No plugins are loaded. List one in plugins.json and restart the host.</p>`}`;
+    body.innerHTML = `${line("Plugins this host loaded at its start. Turn one off to stop it in this project only; its saved data stays.", "A plugin with active work, or one this project's checkout needs, cannot be turned off. A panel is the plugin's own code running in this page. A changed plugin shows here after a host restart and a page reload.")}${catalogBlock(catalog)}${pluginCards(status) || `<p class="muted">No plugins are loaded. List one in plugins.json and restart the host.</p>`}`;
     unmount = mountPanels(body, state.projectId, status.web);
   };
   pluginsRefresh = draw;
@@ -612,9 +613,16 @@ async function pluginsSection(body, alive) {
   });
   wireCatalog(
     body,
-    () => showSection("deploy"),
-    (entries) => (hostCatalog = entries),
+    (catalog) => (hostCatalog = catalog),
+    () => alive() && draw(true),
   );
+  back = () => {
+    const confirmation = document.activeElement?.closest("[data-confirmation]");
+    const cancel = (confirmation ?? body).querySelector("[data-cancel-restart]");
+    if (!cancel) return false;
+    cancel.click();
+    return true;
+  };
   await draw(true);
 }
 

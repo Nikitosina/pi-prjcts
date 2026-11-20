@@ -38,6 +38,8 @@ try {
   assert.equal(ACTION_POLICY["plugin-catalog"].kind, "allow", "4 catalog is a read");
   assert.equal(ACTION_POLICY["plugin-activate"].kind, "exclude", "4 activation is excluded for agents");
 
+  assert.equal(ACTION_POLICY["plugin-restart"]?.kind, "exclude", "agents cannot request a catalog restart");
+
   // 3: ids outside the catalog are refused and nothing is written.
   for (const bad of ["../tasks", tasksDir, "https://example.invalid/x", "github", "", "Tasks"])
     assert.throws(() => pluginCatalog.activate(bad), /not a bundled plugin/, `3 refused: ${bad}`);
