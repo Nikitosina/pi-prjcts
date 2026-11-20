@@ -231,9 +231,10 @@ await kit.run(async () => {
     (await rpc({ action: "plugin-catalog" })).entries[0].state === "loaded" &&
       (await rpc({ action: "plugin-catalog" })).entries[0].version === "1.0.0",
   );
+  const beforeLoadedActivation = readFileSync(configFile, "utf8");
   check(
     "7 activating a loaded plugin changes nothing",
-    (await rpc({ action: "plugin-activate", plugin: "tasks" })) && readFileSync(configFile, "utf8") === afterClick,
+    (await rpc({ action: "plugin-activate", plugin: "tasks" })) && readFileSync(configFile, "utf8") === beforeLoadedActivation,
   );
   await page.navigate(await kit.webUrl(alpha));
   await page.waitFor(`document.body.dataset.ready === "1"`, "inbox ready after restart");
@@ -269,7 +270,7 @@ await kit.run(async () => {
     await page.evaluate(`!document.querySelector(${js(`${row("tasks")} [data-catalog-activate]`)})`),
   );
   await shot("07-combined-tasks-off-in-alpha");
-  check("C6 the project's switch change did not touch plugins.json", readFileSync(configFile, "utf8") === afterClick);
+  check("C6 the project's switch change did not touch plugins.json", readFileSync(configFile, "utf8") === beforeLoadedActivation);
 
   // An unresolved write of a plugin refuses its switch in the UI; the catalog block stays drawn and the plugin stays on.
   await rpc({ action: "plugin", plugin: "gated", method: "mark-uncertain", params: { projectId: alpha, mode: "yes" } });
