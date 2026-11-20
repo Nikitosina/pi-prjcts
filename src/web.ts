@@ -1,6 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type ServerResponse } from "node:http";
-import { readdirSync, readFileSync } from "node:fs";
+import { inboxAssetNames, readBrowserAsset } from "./host-assets.ts";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { body, bytes } from "./http.ts";
 import { UPLOAD_MAX_BYTES, uploadBytes, validUploadName } from "./uploads.ts";
@@ -123,7 +124,7 @@ export async function startWeb(
   // A pull without a deploy must not hand browsers code the running host cannot answer, so nothing is read from disk later.
   const assets = new Map<string, WebFile>();
   const webDir = fileURLToPath(new URL("../web/", import.meta.url));
-  for (const file of readdirSync(webDir))
+  for (const file of inboxAssetNames(webDir))
     if (/^[a-z0-9-]+\.(js|css|html|woff2)$/.test(file)) {
       const mime = file.endsWith(".css")
         ? "text/css; charset=utf-8"
@@ -132,7 +133,7 @@ export async function startWeb(
           : file.endsWith(".woff2")
             ? "font/woff2"
             : "text/javascript; charset=utf-8";
-      assets.set(file === "index.html" ? "/" : `/${file}`, webFile(readFileSync(join(webDir, file)), mime));
+      assets.set(file === "index.html" ? "/" : `/${file}`, webFile(readBrowserAsset(join(webDir, file)), mime));
     }
   /** Where an old `/ui2/` link or cached asset lives now (the inbox moved to `/` on 2026-11-04); only known targets, never the request path. */
   const movedFromUi2 = (path: string) => {

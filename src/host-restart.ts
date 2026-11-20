@@ -1,17 +1,13 @@
-import { execFileSync } from "node:child_process";
+import { hostCheckout as root, readHostGit } from "./host-checkout.ts";
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const entry = fileURLToPath(new URL("host.ts", import.meta.url));
-const root = fileURLToPath(new URL("..", import.meta.url));
 const git = (...args: string[]) =>
-  execFileSync("/usr/bin/git", ["--no-optional-locks", "-c", "core.fsmonitor=false", ...args], {
-    cwd: root,
-    env: { PATH: "/usr/bin:/bin", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
-    encoding: "utf8",
-    timeout: 5000,
-  }).trimEnd();
+  readHostGit(...args)
+    .toString()
+    .trimEnd();
 function cleanRevision(): string | null {
   try {
     if (git("status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=none")) return null;
