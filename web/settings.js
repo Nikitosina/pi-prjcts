@@ -616,6 +616,12 @@ async function pluginsSection(body, alive) {
     (catalog) => (hostCatalog = catalog),
     () => alive() && draw(true),
   );
+  back = () => {
+    const cancel = body.querySelector("[data-cancel-restart]");
+    if (!cancel) return false;
+    cancel.click();
+    return true;
+  };
   await draw(true);
 }
 

@@ -223,7 +223,7 @@ async function mountOne(node, item, { projectId, chatId }, signal, kind) {
 
 const CATALOG_STATES = {
   available: { label: "available", tone: "" },
-  configured: { label: "configured · restart needed", tone: "t-needs" },
+  configured: { label: "restart required", tone: "t-needs" },
   loaded: { label: "loaded", tone: "t-ready" },
   failed: { label: "failed", tone: "bad" },
 };
@@ -236,20 +236,15 @@ export function catalogBlock({ entries, instance, sha }, error = "") {
       const state = CATALOG_STATES[entry.state];
       const action =
         entry.state === "available"
-          ? `<button type="button" class="ghost-btn small" data-catalog-activate="${esc(entry.id)}">Add to host config</button>`
+          ? `<button type="button" class="ghost-btn small" data-catalog-activate="${esc(entry.id)}">Add plugin</button>`
           : entry.state === "configured"
-            ? `<button type="button" class="ghost-btn small" data-catalog-restart>Restart host and enable</button>`
+            ? `<button type="button" class="primary small" data-catalog-restart>Restart to enable</button>`
             : "";
-      const note =
-        entry.state === "configured"
-          ? `<p class="small muted">Not loaded yet. Restart this host on its current version to load the plugin.</p>`
-          : entry.state === "failed"
-            ? `<p class="small plugin-error">${esc(clip(entry.error ?? "failed", 300))}</p>`
-            : "";
-      return `<div class="catalog-row" data-catalog="${esc(entry.id)}" data-state="${esc(entry.state)}"><div class="plugin-head"><span class="mono">${esc(entry.name)}</span>${entry.version ? `<span class="muted small mono">${esc(entry.version)}</span>` : ""}<span class="badge ${state.tone}"${entry.state === "failed" ? ' data-tone="bad"' : ""}>${state.label}</span>${action}</div><p class="small muted">${esc(entry.description)}</p>${note}</div>`;
+      const note = entry.state === "failed" ? `<p class="small plugin-error">${esc(clip(entry.error ?? "failed", 300))}</p>` : "";
+      return `<div class="catalog-row" data-catalog="${esc(entry.id)}" data-state="${esc(entry.state)}"><div class="plugin-head"><span class="catalog-name mono">${esc(entry.name)}</span>${entry.version ? `<span class="muted small mono">${esc(entry.version)}</span>` : ""}<span class="badge ${state.tone}"${entry.state === "failed" ? ' data-tone="bad"' : ""}>${state.label}</span></div><p class="catalog-description small muted">${esc(entry.description)}</p>${note}${action ? `<div class="catalog-actions">${action}</div>` : ""}</div>`;
     })
     .join("");
-  return `<section class="plugin-catalog" data-instance="${esc(instance)}" data-sha="${esc(sha ?? "")}" aria-label="Plugins shipped with pi-prjcts"><h2 class="small">Shipped with pi-prjcts</h2><p class="small muted">Adding one writes it to this host's plugins.json for every project. Nothing restarts; the plugin loads at the next host restart.</p>${error ? catalogAlert(error) : ""}${rows}</section>`;
+  return `<section class="plugin-catalog" data-instance="${esc(instance)}" data-sha="${esc(sha ?? "")}" aria-label="Plugins shipped with pi-prjcts"><h2 class="small">Shipped with pi-prjcts</h2><p class="small muted">Add a plugin for every project. It loads at the next host restart.</p>${error ? catalogAlert(error) : ""}${rows}</section>`;
 }
 
 async function waitForReplacement(instance, sha) {
@@ -271,17 +266,18 @@ export function wireCatalog(container, onCatalog, refresh) {
     if (!row) return;
     const restart = row.querySelector("[data-catalog-restart]");
     if (event.target.closest("[data-catalog-restart]")) {
-      restart.hidden = true;
+      const name = row.querySelector(".catalog-name").textContent;
+      restart.closest(".catalog-actions").hidden = true;
       row.insertAdjacentHTML(
         "beforeend",
-        `<div data-confirmation><p>Restart this host to enable ${esc(row.dataset.catalog)}? This interrupts work in all projects. The code version will not change.</p><button type="button" data-cancel-restart>Cancel</button> <button type="button" data-confirm-restart>Restart host</button></div>`,
+        `<div class="catalog-confirm" data-confirmation role="group" aria-labelledby="restart-${esc(row.dataset.catalog)}-title"><h3 id="restart-${esc(row.dataset.catalog)}-title">Restart to enable ${esc(name)}?</h3><p class="catalog-warning small">Running work in all projects will be interrupted.</p><p class="small muted">The host restarts on the same code version, then loads ${esc(name)}.</p><div class="confirm-actions"><button type="button" class="ghost-btn" data-cancel-restart>Cancel</button><button type="button" class="primary" data-confirm-restart>Restart and enable</button></div></div>`,
       );
       row.querySelector("[data-cancel-restart]").focus();
       return;
     }
     if (event.target.closest("[data-cancel-restart]")) {
       row.querySelector("[data-confirmation]").remove();
-      restart.hidden = false;
+      restart.closest(".catalog-actions").hidden = false;
       restart.focus();
       return;
     }
