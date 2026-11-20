@@ -151,7 +151,7 @@ await kit.run(async () => {
   await click(restart);
   await page.waitFor(`!!document.querySelector(${js(`${row("tasks")} [data-confirmation]`)})`, "mobile confirmation");
   const confirmationFits = await page.evaluate(
-    `(() => { const row = document.querySelector(${js(row("tasks"))}); const actions = [...row.querySelectorAll("[data-cancel-restart], [data-confirm-restart]")]; return row.getBoundingClientRect().right <= innerWidth && actions.every((button) => { const box = button.getBoundingClientRect(); return box.left >= 0 && box.right <= innerWidth && box.bottom <= innerHeight; }) && document.documentElement.scrollWidth <= innerWidth; })()`,
+    `(() => { const row = document.querySelector(${js(row("tasks"))}); const actions = [...row.querySelectorAll("[data-cancel-restart], [data-confirm-restart]")]; return row.getBoundingClientRect().right <= innerWidth && actions.length === 2 && actions.every((button) => { const box = button.getBoundingClientRect(); return box.width > 0 && box.height > 0 && box.left >= 0 && box.right <= innerWidth && box.top >= 0 && box.bottom <= innerHeight; }) && document.documentElement.scrollWidth <= innerWidth; })()`,
   );
   check("27 mobile confirmation and both actions fit a 390 px phone", confirmationFits);
   await shot("04b-catalog-mobile-confirmation");
@@ -325,5 +325,25 @@ await kit.run(async () => {
   check(
     "C14 the retry works and clears the error",
     await page.evaluate(`!/disk full/.test(document.querySelector("#settings .plugin-catalog").innerText)`),
+  );
+
+  // 27: with two cards awaiting restart, Escape dismisses the confirmation that owns focus, not the first one in the list.
+  await click(restart);
+  await click(`${row("simulator")} [data-catalog-restart]`);
+  check(
+    "27 the second confirmation owns focus",
+    await page.evaluate(`document.activeElement.closest("[data-confirmation]")?.closest(${js(row("simulator"))}) !== null`),
+  );
+  await escape();
+  check(
+    "27 Escape cancels the focused confirmation only",
+    await page.evaluate(
+      `!document.querySelector(${js(`${row("simulator")} [data-confirmation]`)}) && !!document.querySelector(${js(`${row("tasks")} [data-confirmation]`)}) && document.activeElement === document.querySelector(${js(`${row("simulator")} [data-catalog-restart]`)})`,
+    ),
+  );
+  await escape();
+  check(
+    "27 the remaining confirmation can cancel too",
+    await page.evaluate(`!document.querySelector("#settings [data-confirmation]") && document.querySelector("#settings").open`),
   );
 });
