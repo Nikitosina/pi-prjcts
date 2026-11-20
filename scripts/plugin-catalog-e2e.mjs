@@ -8,9 +8,11 @@ import { createKit } from "./lib/e2e-kit.mjs";
 const kit = await createKit("plugin-catalog");
 const external = join(process.cwd(), "scripts/fixtures/second-plugin");
 const gated = join(process.cwd(), "scripts/fixtures/gated-plugin");
+const slow = join(kit.root, "startup-delay.mjs");
+writeFileSync(slow, 'await new Promise(r => setTimeout(r, 2500)); export default {name:"delay", register(){}};');
 const configFile = join(kit.home, "plugins.json");
 mkdirSync(kit.home, { recursive: true });
-writeFileSync(configFile, JSON.stringify({ plugins: [external, gated], keep: "me" }, null, 2) + "\n");
+writeFileSync(configFile, JSON.stringify({ plugins: [external, gated, slow], keep: "me" }, null, 2) + "\n");
 const tasksDir = join(process.cwd(), "plugins/tasks");
 
 await kit.run(async () => {
@@ -73,9 +75,9 @@ await kit.run(async () => {
     "6 the external entry, its order and the extra key are kept",
     config().plugins[0] === external &&
       config().plugins[1] === gated &&
-      config().plugins[2] === tasksDir &&
+      config().plugins[3] === tasksDir &&
       config().keep === "me" &&
-      config().plugins.length === 3,
+      config().plugins.length === 4,
     config(),
   );
   await Promise.all([rpc({ action: "plugin-activate", plugin: "tasks" }), rpc({ action: "plugin-activate", plugin: "tasks" })]);

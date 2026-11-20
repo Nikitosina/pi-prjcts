@@ -45,7 +45,7 @@ import { ensureKnowledge, historyKnowledge, listKnowledge, readKnowledge, writeK
 import { searchProject } from "./knowledge-search.ts";
 import { loadProjectResourceLoader } from "./project-resources.ts";
 import { referencedPrBlock } from "./pr-monitor.ts";
-import { assertRestartable, hostBoot, replaceHost } from "./host-restart.ts";
+import { hostBoot, prepareReplacement } from "./host-restart.ts";
 import { pluginCatalog } from "./plugin-catalog.ts";
 import { plugins } from "./plugins.ts";
 import { expandSkillCommand, listSkills, skillNames, skillPreview } from "./coordinator-skills.ts";
@@ -173,6 +173,7 @@ const settingsUpdating = new Set<string>();
 const lifecycleChanging = new Set<string>();
 const ownerCloseFailed = new Set<string>();
 const githubInspection = createGithubInspection();
+let pluginsReady = false;
 let closing = false;
 let shutdownOperation: Promise<void> | undefined;
 const activeRequests = new Set<Promise<unknown>>();
@@ -1299,8 +1300,10 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "plugin-restart":
       throw new Error("Restart requires exclusive admission");
     case "plugin-catalog":
+      if (!pluginsReady) throw new Refused("Plugins are still loading.");
       return { ...hostBoot, entries: pluginCatalog.list() };
     case "plugin-activate": {
+      if (!pluginsReady) throw new Refused("Plugins are still loading.");
       const before = pluginCatalog.list().find((entry) => entry.id === input.plugin)?.state;
       const entries = pluginCatalog.activate(input.plugin);
       if (before === "available")
@@ -2195,6 +2198,7 @@ for (const status of await plugins.load())
       ...(status.error ? { error: status.error } : {}),
     }) + "\n",
   );
+pluginsReady = true;
 server.listen(socketPath(), () => {
   if (closing) return;
   void loadProviderExtensions().then(({ status }) =>
@@ -2230,13 +2234,16 @@ async function restartConfigured(input: Extract<RequestData, { action: "plugin-r
   closing = true;
   try {
     if (input.instance !== hostBoot.instance) throw new Error("Host instance changed. Reopen Plugins before confirming.");
+    if (!pluginsReady) throw new Refused("Plugins are still loading.");
     await Promise.allSettled([...activeRequests]);
+    await quietWindow(runningToolCalls);
+    if (ownerCloseFailed.size) throw new Error("A project could not close safely. Catalog restart refused.");
     if (shutdownOperation || deployBusy() || readFileSync(lock, "utf8") !== String(process.pid))
       throw new Error("Host ownership changed or another lifecycle operation is running.");
     if (pluginCatalog.list().find((entry) => entry.id === input.plugin)?.state !== "configured")
       throw new Error("Plugin is not awaiting restart.");
-    assertRestartable();
-    setTimeout(() => void shutdown(true), 50);
+    const replace = prepareReplacement();
+    setTimeout(() => void shutdown(replace), 50);
     return { stopping: true };
   } catch (error) {
     closing = !!shutdownOperation;
@@ -2244,7 +2251,7 @@ async function restartConfigured(input: Extract<RequestData, { action: "plugin-r
   }
 }
 
-function shutdown(restart = false): Promise<void> {
+function shutdown(restart?: (home: string) => never): Promise<void> {
   if (shutdownOperation) return shutdownOperation;
   closing = true;
   closeArchives();
@@ -2316,7 +2323,7 @@ function shutdown(restart = false): Promise<void> {
     }
     try {
       if (existsSync(lock) && readFileSync(lock, "utf8") === String(process.pid)) {
-        if (restart && !failed) replaceHost(home());
+        if (restart && !failed) restart(home());
         unlinkSync(lock);
       }
     } catch (error) {
