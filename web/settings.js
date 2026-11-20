@@ -584,11 +584,12 @@ async function pluginsSection(body, alive) {
   // Every read, the first one and one after a switch changed elsewhere (another tab, the Host agent), goes through here: only the newest
   // read draws, and an unchanged status leaves the mounted panels alone unless `force` asks for a redraw.
   const draw = async (force = false) => {
+    if (force) shown = null; // A newer feed read must also restore a refused switch.
     const ask = ++readId;
     const status = await call("plugins", state.projectId ? { id: state.projectId } : {});
     if (!alive() || ask !== readId) return;
     const signature = pluginsSignature(status);
-    if (!force && signature === shown) return;
+    if (signature === shown) return;
     const catalog = hostCatalog ?? (await call("plugin-catalog"));
     if (!alive() || ask !== readId) return;
     hostCatalog = catalog;
