@@ -617,7 +617,8 @@ async function pluginsSection(body, alive) {
     () => alive() && draw(true),
   );
   back = () => {
-    const cancel = body.querySelector("[data-cancel-restart]");
+    const confirmation = document.activeElement?.closest("[data-confirmation]");
+    const cancel = (confirmation ?? body).querySelector("[data-cancel-restart]");
     if (!cancel) return false;
     cancel.click();
     return true;

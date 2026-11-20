@@ -1932,10 +1932,17 @@ a.pr-link:hover .pr-title {
   font: 600 13px/1.5 var(--font);
 }
 .catalog-confirm .catalog-warning {
-  color: var(--needs);
+  color: var(--accent-ink);
 }
 .catalog-confirm .confirm-actions {
   margin-top: 12px;
+}
+:root[data-theme="claude"] .catalog-row .primary {
+  color: var(--code-bg);
+}
+:root[data-theme="light"] .catalog-row .primary {
+  background: var(--accent-ink);
+  color: var(--bg);
 }
 /* Settings → Plugins: one card per plugin; a panel's slot belongs to the plugin. */
 .plugin-card {
