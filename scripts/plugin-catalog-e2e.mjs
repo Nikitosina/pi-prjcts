@@ -187,7 +187,7 @@ await kit.run(async () => {
   await click(`${row("simulator")} [data-catalog-restart]`);
   check(
     "27 the second confirmation owns focus",
-    await page.evaluate(`document.activeElement.closest("[data-confirmation]")?.closest(${js(row("simulator"))}) !== null`),
+    await page.evaluate(`document.activeElement === document.querySelector(${js(`${row("simulator")} [data-cancel-restart]`)})`),
   );
   await escape();
   check(
