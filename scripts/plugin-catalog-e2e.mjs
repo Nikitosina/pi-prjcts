@@ -159,6 +159,49 @@ await kit.run(async () => {
   await page.waitFor(`!document.querySelector(${js(`${row("tasks")} [data-confirmation]`)})`, "mobile Escape cancellation");
   await page.viewport(1440, 1000);
 
+  // C14: a refused activation keeps every catalog row and the button, so the owner can retry.
+  await page.evaluate(
+    `(() => { const original = window.fetch; window.__fetchOriginal = original; window.fetch = async (input, init) => typeof init?.body === "string" && /"action":"plugin-activate"/.test(init.body) ? new Response(JSON.stringify({ ok: false, error: "disk full" }), { status: 500 }) : original(input, init); })()`,
+  );
+  await click(`${row("simulator")} [data-catalog-activate]`);
+  await page.waitFor(`/disk full/.test(document.querySelector("#settings .plugin-catalog").innerText)`, "activation error shown");
+  check(
+    "C14 both rows stay after the refusal",
+    (await rowState("tasks")) === "configured" && (await rowState("simulator")) === "available",
+  );
+  check(
+    "C14 the button is usable again",
+    await page.evaluate(`document.querySelector(${js(`${row("simulator")} [data-catalog-activate]`)})?.disabled === false`),
+  );
+  await shot("09-activation-refused");
+  await page.evaluate("window.fetch = window.__fetchOriginal");
+  await click(`${row("simulator")} [data-catalog-activate]`);
+  await page.waitFor(`document.querySelector(${js(row("simulator"))})?.dataset.state === "configured"`, "retry configured it");
+  check(
+    "C14 the retry works and clears the error",
+    await page.evaluate(`!/disk full/.test(document.querySelector("#settings .plugin-catalog").innerText)`),
+  );
+
+  // 27: with two cards awaiting restart, Escape dismisses the confirmation that owns focus, not the first one in the list.
+  await click(restart);
+  await click(`${row("simulator")} [data-catalog-restart]`);
+  check(
+    "27 the second confirmation owns focus",
+    await page.evaluate(`document.activeElement.closest("[data-confirmation]")?.closest(${js(row("simulator"))}) !== null`),
+  );
+  await escape();
+  check(
+    "27 Escape cancels the focused confirmation only",
+    await page.evaluate(
+      `!document.querySelector(${js(`${row("simulator")} [data-confirmation]`)}) && !!document.querySelector(${js(`${row("tasks")} [data-confirmation]`)}) && document.activeElement === document.querySelector(${js(`${row("simulator")} [data-catalog-restart]`)})`,
+    ),
+  );
+  await escape();
+  check(
+    "27 the remaining confirmation can cancel too",
+    await page.evaluate(`!document.querySelector("#settings [data-confirmation]") && document.querySelector("#settings").open`),
+  );
+
   // The original tab confirms, reconnects and shows the loader’s result without navigating.
   await click(restart);
   await click(confirm);
@@ -283,7 +326,7 @@ await kit.run(async () => {
   await select(alpha);
   await kit.delay(1000);
   check("C12 selecting projects with Settings open does not read the catalog again", (await page.evaluate("window.__catalogCalls")) === 0);
-  check("C12 the catalog rows stay drawn", (await rowState("tasks")) === "loaded" && (await rowState("simulator")) === "available");
+  check("C12 the catalog rows stay drawn", (await rowState("tasks")) === "loaded" && (await rowState("simulator")) === "configured");
 
   // C13: the answer of a switch clicked in one project says nothing in another project after a selection.
   await page.evaluate(
@@ -304,46 +347,4 @@ await kit.run(async () => {
   check("C13 the project that was selected keeps its own switch", (await entry(beta, "second")).enabled === true);
   await page.evaluate("window.fetch = window.__fetchOriginal");
   await set(alpha, "second", true);
-
-  // C14: a refused activation keeps every catalog row and the button, so the owner can retry.
-  await select(alpha);
-  await page.waitFor(`document.querySelector(${js(row("simulator"))})`, "rows after selection");
-  await page.evaluate(
-    `(() => { const original = window.fetch; window.__fetchOriginal = original; window.fetch = async (input, init) => typeof init?.body === "string" && /"action":"plugin-activate"/.test(init.body) ? new Response(JSON.stringify({ ok: false, error: "disk full" }), { status: 500 }) : original(input, init); })()`,
-  );
-  await click(`${row("simulator")} [data-catalog-activate]`);
-  await page.waitFor(`/disk full/.test(document.querySelector("#settings .plugin-catalog").innerText)`, "activation error shown");
-  check("C14 both rows stay after the refusal", (await rowState("tasks")) === "loaded" && (await rowState("simulator")) === "available");
-  check(
-    "C14 the button is usable again",
-    await page.evaluate(`document.querySelector(${js(`${row("simulator")} [data-catalog-activate]`)})?.disabled === false`),
-  );
-  await shot("09-activation-refused");
-  await page.evaluate("window.fetch = window.__fetchOriginal");
-  await click(`${row("simulator")} [data-catalog-activate]`);
-  await page.waitFor(`document.querySelector(${js(row("simulator"))})?.dataset.state === "configured"`, "retry configured it");
-  check(
-    "C14 the retry works and clears the error",
-    await page.evaluate(`!/disk full/.test(document.querySelector("#settings .plugin-catalog").innerText)`),
-  );
-
-  // 27: with two cards awaiting restart, Escape dismisses the confirmation that owns focus, not the first one in the list.
-  await click(restart);
-  await click(`${row("simulator")} [data-catalog-restart]`);
-  check(
-    "27 the second confirmation owns focus",
-    await page.evaluate(`document.activeElement.closest("[data-confirmation]")?.closest(${js(row("simulator"))}) !== null`),
-  );
-  await escape();
-  check(
-    "27 Escape cancels the focused confirmation only",
-    await page.evaluate(
-      `!document.querySelector(${js(`${row("simulator")} [data-confirmation]`)}) && !!document.querySelector(${js(`${row("tasks")} [data-confirmation]`)}) && document.activeElement === document.querySelector(${js(`${row("simulator")} [data-catalog-restart]`)})`,
-    ),
-  );
-  await escape();
-  check(
-    "27 the remaining confirmation can cancel too",
-    await page.evaluate(`!document.querySelector("#settings [data-confirmation]") && document.querySelector("#settings").open`),
-  );
 });
