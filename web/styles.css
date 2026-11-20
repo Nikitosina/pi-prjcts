@@ -4214,8 +4214,11 @@ table.hotkeys tr.clash td {
     flex-wrap: wrap;
   }
   .catalog-confirm .confirm-actions > button {
-    flex: 1;
     justify-content: center;
+  }
+  .catalog-confirm .confirm-actions > .primary {
+    flex: 1;
+    white-space: nowrap;
   }
   .tier-row {
     grid-template-columns: 30px minmax(0, 1fr) 18px;
