@@ -45,6 +45,7 @@ import { ensureKnowledge, historyKnowledge, listKnowledge, readKnowledge, writeK
 import { searchProject } from "./knowledge-search.ts";
 import { loadProjectResourceLoader } from "./project-resources.ts";
 import { referencedPrBlock } from "./pr-monitor.ts";
+import { assertRestartable, hostBoot, replaceHost } from "./host-restart.ts";
 import { pluginCatalog } from "./plugin-catalog.ts";
 import { plugins } from "./plugins.ts";
 import { expandSkillCommand, listSkills, skillNames, skillPreview } from "./coordinator-skills.ts";
@@ -137,28 +138,32 @@ process.env.PI_PROJECTS_HOST = "1";
 initTheme("light", false);
 mkdirSync(home(), { recursive: true, mode: 0o700 });
 const lock = join(home(), "host.lock");
-if (existsSync(lock)) {
-  const value = readFileSync(lock, "utf8").trim();
-  if (!value) process.exit(0);
-  const pid = Number(value);
-  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("Invalid host lock. Inspect it before removing it.");
-  try {
-    process.kill(pid, 0);
-    process.exit(0);
-  } catch (error) {
-    if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error;
-    unlinkSync(lock);
+if (hostBoot.previous) {
+  if (readFileSync(lock, "utf8") !== String(process.pid)) throw new Error("Lost host ownership during restart");
+} else {
+  if (existsSync(lock)) {
+    const value = readFileSync(lock, "utf8").trim();
+    if (!value) process.exit(0);
+    const pid = Number(value);
+    if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("Invalid host lock. Inspect it before removing it.");
+    try {
+      process.kill(pid, 0);
+      process.exit(0);
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error;
+      unlinkSync(lock);
+    }
   }
+  let lockFd: number;
+  try {
+    lockFd = openSync(lock, "wx", 0o600);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "EEXIST") process.exit(0);
+    throw error;
+  }
+  writeFileSync(lockFd, String(process.pid));
+  closeSync(lockFd);
 }
-let lockFd: number;
-try {
-  lockFd = openSync(lock, "wx", 0o600);
-} catch (error) {
-  if (error instanceof Error && "code" in error && error.code === "EEXIST") process.exit(0);
-  throw error;
-}
-writeFileSync(lockFd, String(process.pid));
-closeSync(lockFd);
 if (existsSync(socketPath())) unlinkSync(socketPath());
 /** The skills installed right now (global, project-local, packages): built from disk on every call, never cached, so a skill installed a moment ago is found without a restart. Passive: never downloads a missing package. */
 const configuredSkills = (id: string) => loadProjectResourceLoader(loadProject(id), { passive: true });
@@ -506,6 +511,8 @@ const PROJECT_LIST_ACTIONS: ReadonlySet<RequestData["action"]> = new Set(["creat
 
 function dispatch(input: RequestData): Promise<unknown> {
   // This request closes admission itself and must not wait on its own entry in activeRequests.
+  if (closing) return Promise.reject(new Refused("Host is stopping"));
+  if (input.action === "plugin-restart") return restartConfigured(input);
   if (input.action === "deploy-shutdown") return stopForDeploy(input.sha);
   const operation = trackRequest(() => dispatchRequest(input));
   if (PROJECT_LIST_ACTIONS.has(input.action)) void operation.then(() => publishHost("projects")).catch(() => {});
@@ -1289,14 +1296,16 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         return { plugin: input.plugin, enabled: input.enabled };
       });
     }
+    case "plugin-restart":
+      throw new Error("Restart requires exclusive admission");
     case "plugin-catalog":
-      return { entries: pluginCatalog.list() };
+      return { ...hostBoot, entries: pluginCatalog.list() };
     case "plugin-activate": {
       const before = pluginCatalog.list().find((entry) => entry.id === input.plugin)?.state;
       const entries = pluginCatalog.activate(input.plugin);
       if (before === "available")
         recordHostEvent("plugins", `${input.plugin} added to plugins.json by the owner; it loads at the next restart`);
-      return { entries };
+      return { ...hostBoot, entries };
     }
     case "plugin": {
       const handler = plugins.rpc(input.plugin, input.method);
@@ -2217,7 +2226,25 @@ process.on("SIGINT", () => {
   void shutdown();
 });
 
-function shutdown(): Promise<void> {
+async function restartConfigured(input: Extract<RequestData, { action: "plugin-restart" }>) {
+  closing = true;
+  try {
+    if (input.instance !== hostBoot.instance) throw new Error("Host instance changed. Reopen Plugins before confirming.");
+    await Promise.allSettled([...activeRequests]);
+    if (shutdownOperation || deployBusy() || readFileSync(lock, "utf8") !== String(process.pid))
+      throw new Error("Host ownership changed or another lifecycle operation is running.");
+    if (pluginCatalog.list().find((entry) => entry.id === input.plugin)?.state !== "configured")
+      throw new Error("Plugin is not awaiting restart.");
+    assertRestartable();
+    setTimeout(() => void shutdown(true), 50);
+    return { stopping: true };
+  } catch (error) {
+    closing = !!shutdownOperation;
+    throw new Refused(errorText(error));
+  }
+}
+
+function shutdown(restart = false): Promise<void> {
   if (shutdownOperation) return shutdownOperation;
   closing = true;
   closeArchives();
@@ -2288,11 +2315,15 @@ function shutdown(): Promise<void> {
       report(error);
     }
     try {
-      if (existsSync(lock) && readFileSync(lock, "utf8") === String(process.pid)) unlinkSync(lock);
+      if (existsSync(lock) && readFileSync(lock, "utf8") === String(process.pid)) {
+        if (restart && !failed) replaceHost(home());
+        unlinkSync(lock);
+      }
     } catch (error) {
       report(error);
     }
-    process.exit(failed ? 1 : 0);
+    // Do not let a supervisor retry a refused replacement with unverified code.
+    process.exit(failed && !restart ? 1 : 0);
   });
   return shutdownOperation;
 }

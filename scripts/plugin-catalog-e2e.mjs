@@ -65,12 +65,9 @@ await kit.run(async () => {
   await click(`${row("tasks")} [data-catalog-activate]`);
   await page.waitFor(`document.querySelector(${js(row("tasks"))})?.dataset.state === "configured"`, "tasks configured");
   check("16 no activate button after", await page.evaluate(`!document.querySelector(${js(`${row("tasks")} [data-catalog-activate]`)})`));
-  check(
-    "13 the card names the existing deploy command and says a restart is needed",
-    await page.evaluate(
-      `/restart/.test(document.querySelector(${js(row("tasks"))}).innerText) && /npm run projects -- deploy/.test(document.querySelector(${js(row("tasks"))}).innerText) && !!document.querySelector(${js(`${row("tasks")} [data-catalog-deploy]`)})`,
-    ),
-  );
+  const restart = `${row("tasks")} [data-catalog-restart]`;
+  const confirm = `${row("tasks")} [data-confirm-restart]`;
+  check("restart offered", await page.evaluate(`!!document.querySelector(${js(restart)})`));
   const afterClick = readFileSync(configFile, "utf8");
   check(
     "6 the external entry, its order and the extra key are kept",
@@ -98,13 +95,20 @@ await kit.run(async () => {
     check(`3 refused: ${plugin}`, (await kit.rejects({ action: "plugin-activate", plugin })) !== null);
   check("3 the file did not change", readFileSync(configFile, "utf8") === afterClick);
 
-  // 13: the Deploy settings button opens the existing Deploy section.
-  await click(`${row("tasks")} [data-catalog-deploy]`);
-  await page.waitFor(`document.querySelector("#settings").dataset.section === "deploy"`, "deploy section");
-  await shot("03-deploy-pointer");
-  await click(`#settings nav [data-section="plugins"]`);
-  await page.waitFor(`document.querySelector(${js(row("tasks"))})`, "catalog drawn again");
-
+  const before = await rpc({ action: "plugin-catalog" });
+  await click(restart);
+  check(
+    "confirmation warns of interruption",
+    await page.evaluate(`/interrupt/i.test(document.querySelector(${js(row("tasks"))}).innerText)`),
+  );
+  await shot("03-confirm-restart");
+  await click(`${row("tasks")} [data-cancel-restart]`);
+  check(
+    "cancel kept the instance and config",
+    (await rpc({ action: "plugin-catalog" })).instance === before.instance && readFileSync(configFile, "utf8") === afterClick,
+  );
+  const replay = { action: "plugin-restart", plugin: "tasks", instance: before.instance };
+  check("arbitrary command refused", !!(await kit.rejects({ ...replay, command: "invalid" })));
   // 18: phone width.
   await page.viewport(390, 844, true);
   await page.waitFor(`document.querySelector(${js(row("simulator"))})`, "mobile layout");
@@ -115,8 +119,24 @@ await kit.run(async () => {
   await shot("04-catalog-mobile-configured");
   await page.viewport(1440, 1000);
 
-  // 12: a separate restart loads it; the external plugin loads too, and the catalog says loaded.
-  await kit.restartHost();
+  // The original tab confirms, reconnects and shows the loader’s result without navigating.
+  await click(restart);
+  await click(confirm);
+  await page.waitFor(
+    `document.querySelector(${js(row("tasks"))})?.dataset.state === "loaded"`,
+    "same tab reconnected to loaded tasks",
+    600,
+  );
+  const after = await rpc({ action: "plugin-catalog" });
+  const head = kit.git(kit.core, "rev-parse", "HEAD");
+  check(
+    "same revision, replacement instance",
+    before.sha === head && after.sha === head && after.instance !== before.instance && after.previous === before.instance,
+  );
+  check("old confirmation cannot restart the replacement", /instance/i.test(await kit.rejects(replay)));
+  const health = await rpc();
+  check("replacement owns the private home", health.home === kit.home);
+  writeFileSync(join(kit.artifacts, "restart.json"), JSON.stringify({ home: health.home, pid: health.pid, before, after }, null, 2));
   const reloaded = await rpc({ action: "plugins" });
   check(
     "12 after the restart tasks and the external plugin are loaded",

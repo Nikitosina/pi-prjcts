@@ -21,7 +21,7 @@ Configuration
 
 States
 12. The state is guessed from the file only. Four states are told apart: `available` (not configured), `configured` (in the config, not part of the running host: awaiting restart), `loaded`, `failed` (with the loader's error). A running host never reports `loaded` for a plugin it did not load at its start.
-13. Activation hot-loads the plugin or restarts the host. It does neither; the card says that a restart is needed and names the existing Deploy (`npm run projects -- deploy`), which is the only restart. The nightly window restarts only when new code is pending, so the card does not promise it. A button that claims to restart while Settings has none is a dead end.
+13. Configuring or cancelling restarts the host. Only a separate confirmation may interrupt work. A stale confirmation or duplicate cannot stop a replacement instance. A dirty or moved checkout must not be started. No deploy, branch selection, or client-supplied command. A new catalog read on the original tab must show the loader’s actual outcome.
 14. Activation changes the owner's live host in a test. Tests use a temp `PI_PROJECTS_HOME` and never a live one.
 
 Found in review (red before the fix)
