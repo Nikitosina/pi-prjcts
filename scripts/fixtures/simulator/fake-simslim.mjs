@@ -17,14 +17,21 @@ if (state.fail?.[command]) {
 }
 switch (command) {
   case "list":
-    process.stdout.write(JSON.stringify(state.devices));
+    process.stdout.write(JSON.stringify(state.devices.map((item) => ({ platform: "iOS", managedTotal: 168, ...item }))));
     break;
   case "status":
     process.stdout.write(
-      JSON.stringify({ managedDisabled: 3, managedTotal: 5, booted: device()?.state === "Booted", persistent: true, verdict: "slim" }),
+      JSON.stringify({
+        managedDisabled: device().managedDisabled ?? 168,
+        managedTotal: 168,
+        booted: device()?.state === "Booted",
+        persistent: true,
+        verdict: device().managedDisabled < 168 ? "partially slim" : "slim",
+      }),
     );
     break;
   case "on":
+    device().managedDisabled = name === "--except" ? 155 : 168;
     device().state = "Booted";
     save();
     break;

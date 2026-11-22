@@ -45,7 +45,10 @@ export default {
       { Value } = api.lib.value;
     const Id = Type.String({ pattern: "^[a-f0-9-]{36}$" }),
       Udid = Type.Optional(Type.String({ pattern: "^[a-fA-F0-9-]{36}$" }));
-    const Configure = Type.Object({ enabled: Type.Boolean(), sourceUdid: Udid, requestId: Id }, { additionalProperties: false });
+    const Configure = Type.Union([
+      Type.Object({ enabled: Type.Boolean(), sourceUdid: Udid, requestId: Id }, { additionalProperties: false }),
+      Type.Object({ keepCategories: simulators.KeepCategories, requestId: Id }, { additionalProperties: false }),
+    ]);
     const Act = Type.Object(
       { operation: simulators.SimulatorAction, requestId: Id, udid: Udid, sourceUdid: Udid },
       { additionalProperties: false },

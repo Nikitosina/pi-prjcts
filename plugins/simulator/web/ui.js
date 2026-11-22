@@ -249,6 +249,19 @@
         $("details"),
         `${d ? `<p class="small muted">View only: the screenshot refreshes about every 4 seconds, and no clicks or keyboard input are sent to the simulator.</p>` : ""}<p class="small muted">Agents create, boot, shut down, reset and delete up to ${esc(s.maxOwned)} clones for this project while management is on. Source simulators, shared runtimes and global caches are never changed.</p><dl class="simulator-facts"><dt>Default source</dt><dd>${esc(sourceName(v, s.defaultSourceUdid) ?? "Newest shut-down iPhone")}</dd>${d ? `<dt>Cloned from</dt><dd>${esc(sourceName(v, d.sourceUdid) ?? d.sourceUdid)}</dd><dt>iOS</dt><dd>${esc(d.osVersion)}</dd><dt>Device</dt><dd class="mono">${esc(d.udid)}</dd><dt>Slimming</dt><dd>${d.slim ? `${esc(d.slim.managedDisabled)}/${esc(d.slim.managedTotal)} services disabled${d.slim.persistent ? ", persistent" : ""}` : "Not reported"}</dd>` : ""}</dl>`,
       );
+    if (s) {
+      $("kept").textContent = s.keepCategories.join(", ") || "None";
+      patch(
+        $("options"),
+        s.categories
+          .map(
+            (id) =>
+              `<label><input type="checkbox" data-category="${esc(id)}"${s.keepCategories.includes(id) ? " checked" : ""}> ${esc(id)}</label>`,
+          )
+          .join(""),
+      );
+      $("categories").disabled = locked(v, true);
+    }
     if (focused && !slot.contains(document.activeElement))
       (
         slot.querySelector(`[data-action="${focused}"]${focusedUdid ? `[data-udid="${CSS.escape(focusedUdid)}"]` : ""}:not(:disabled)`) ??
@@ -341,7 +354,7 @@
       !retry &&
       (input.method === "recover"
         ? !recoverable(v)
-        : locked(v, (input.method === "configure" && input.params.enabled === false) || input.params.operation === "create"))
+        : locked(v, (input.method === "configure" && input.params.enabled !== true) || input.params.operation === "create"))
     )
       return;
     const intent = retry
@@ -388,6 +401,11 @@
       asked = v.confirm;
     v.slot.querySelector("[data-simulator-more]").open = false;
     switch (name) {
+      case "simulator-save-categories": {
+        const keepCategories = [...v.slot.querySelectorAll("[data-category]:checked")].map((box) => box.dataset.category);
+        await request(v, { method: "configure", params: { keepCategories } }, "Simulator categories saved");
+        break;
+      }
       case "simulator-refresh":
         v.nextPoll = 0;
         await load(v);
@@ -482,7 +500,11 @@
   </div>
   <div class="simulator-confirm" data-simulator-confirm hidden></div>
   <p class="small muted" role="status" data-simulator-notice hidden></p>
-  <details class="simulator-details" data-simulator-facts hidden><summary>${icon("info")}Details</summary><div data-simulator-details></div></details>
+  <details class="simulator-details" data-simulator-facts hidden><summary>${icon("info")}Details</summary><div data-simulator-details></div>
+    <fieldset class="simulator-categories" data-simulator-categories><legend>Keep services enabled</legend>
+      <p class="small muted">Applies on the next create, boot or reset. Saved: <span data-simulator-kept></span>.</p>
+      <div class="simulator-options" data-simulator-options></div>${button("Save categories", "save-categories")}
+    </fieldset></details>
 </section>`;
       // The menu closes on a press anywhere outside it (touch included); its own summary toggles it.
       const more = slot.querySelector("[data-simulator-more]");

@@ -111,6 +111,15 @@ try {
   assert.ok((await leases.acquire(simulatorResource(udid), { projectId, threadId: "job-a" }, 600_000)).acquired);
   const booted = await call("job-a", 7, { operation: "boot" });
   assert.equal(stateOf(), "Booted", "W2 the clone booted");
+  assert.deepEqual(
+    readFileSync(calls, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+      .find((args) => args[0] === "on"),
+    ["on", udid],
+    "No exclusions by default",
+  );
   assert.match(booted.output[0].text, /Booted/, "W2 the answer reports the booted state");
   assert.deepEqual(acquired, [], "W2 no maintenance lease was requested");
   assert.deepEqual(

@@ -247,7 +247,7 @@ await kit.run(async () => {
       listing.tabs.some((tab) => tab.startsWith(`${CLONE_B} false `) && /shut down$/.test(tab)) &&
       /iPhone 16 Pro/.test(listing.text) &&
       listing.text.includes(CLONE_A) &&
-      /3\/5 services disabled, persistent/.test(listing.text) &&
+      /168\/168 services disabled, persistent/.test(listing.text) &&
       /up to 4 clones/.test(listing.text),
     listing,
   );
@@ -260,6 +260,13 @@ await kit.run(async () => {
     frames,
   );
   await shot("01-listing", "[data-simulator-facts]");
+
+  await click(inPanel('[data-category="photos"]'));
+  await click(inPanel('[data-category="search"]'));
+  await click(inPanel('[data-action="simulator-save-categories"]'));
+  await kit.eventually(() => store().keepCategories?.join() === "photos,search", "categories persisted");
+  await waitPanel(`slot.querySelector('[data-simulator-kept]').textContent === 'photos, search'`, "saved categories in snapshot");
+  await shot("01-kept-categories", "[data-simulator-categories]");
 
   // ---- S3 boot and shut down
   await selectTab(CLONE_B);
@@ -412,6 +419,23 @@ await kit.run(async () => {
     { creates, owned: store().owned },
   );
   await shot("06-created");
+
+  await selectTab(created.udid);
+  await menu("reset");
+  await click(inPanel(`[data-action="simulator-confirm"]`));
+  await kit.eventually(() => fakeCalls().filter((call) => call.args[0] === "on").length === 3, "reset reapplied simslim");
+  await settled();
+  const onCalls = fakeCalls()
+    .filter((call) => call.args[0] === "on")
+    .map((call) => call.args);
+  check(
+    "S19 boot, create and reset confirm a partially slim clone with the project exclusions",
+    !store().uncertain &&
+      JSON.stringify(onCalls) ===
+        JSON.stringify([CLONE_B, created.udid, created.udid].map((id) => ["on", id, "--except", "photos,search"])),
+    onCalls,
+  );
+  await waitStatus(/^2\/2 running$/, "reset done");
 
   // ---- S7 an unknown outcome, acknowledged inline
   setFail({ erase: "simslim: erase failed (fixture)" });
