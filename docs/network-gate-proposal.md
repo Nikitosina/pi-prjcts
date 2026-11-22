@@ -1,8 +1,10 @@
-# Host network gate (proposed, awaiting decision)
+# Host network gate (approved design)
 
 A worker should keep its Job and conversation when the VPN drops. A coordinator should not have to infer which work to resend. Give the plugin authority over **when work may run**, not over which conversation to resume. Keep Stop, owner notices, the inbox, settings and the repair watcher usable throughout the outage.
 
-## Contract to approve
+The owner approved host admission and dispatch gating, without a firewall or kill switch. Implementation is blocked on [keyed scheduler parking](network-gate-scheduler-check.md).
+
+## Contract
 
 Add optional `PluginCapabilities.workGate` in `src/plugin-types.ts`. One selected plugin per host, not one per project. Select it explicitly by plugin name in the host's `plugins.json` (`workGate` beside the `plugins` list); no selection means no gate. This lets core distinguish a broken required plugin from an unconfigured host. Registration failure, ambiguous selection or unreadable gate configuration leaves work closed with a diagnostic, not silently unprotected. A project switch cannot disable host policy.
 
