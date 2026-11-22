@@ -241,6 +241,7 @@ type ModelMove = { at: number; from: string; to: string };
 export type JobsState = {
   paused: boolean;
   pauseOwner?: string;
+  lastPluginPause?: string;
   jobs: Record<string, Job>;
   agents: Record<string, Agent>;
   /** Subagent conversation id -> the Job it serves, so tools and the UI find a Job from any conversation of its tree. */
@@ -921,6 +922,7 @@ const reply = (text: string, details?: Record<string, string | number>) => ({
 export type JobsSnapshot = {
   paused: boolean;
   pauseOwner?: string;
+  lastPluginPause?: string;
   jobs: (Omit<Job, "children"> & {
     conversationId: ConversationId;
     working: boolean;
@@ -1771,12 +1773,14 @@ export function createJobs(host: JobsHost) {
     Object.values(doc.agents).filter((agent) => (agent.jobId ? doc.jobs[agent.jobId]?.status === "running" : agent.endedAt === null));
 
   /** Stop admitting work and abort every live agent, keeping their Jobs running so a resume continues them. */
-  async function pause(harness: Harness, plugin?: string): Promise<void> {
+  async function pause(harness: Harness, plugin?: { name: string; claim: string }): Promise<void> {
     const live = await harness.commit(async (tx) => {
       const doc = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
       doc.paused = true;
-      if (plugin) doc.pauseOwner = plugin;
-      else delete doc.pauseOwner;
+      if (plugin) {
+        doc.pauseOwner = plugin.name;
+        doc.lastPluginPause = plugin.claim;
+      } else delete doc.pauseOwner;
       return liveAgents(doc).map((agent) => agent.conversationId);
     }, context);
     const owned = (await Promise.all(live.map(async (id) => [id, ...(await descendants(harness, id))]))).flat();
@@ -1860,7 +1864,13 @@ export function createJobs(host: JobsHost) {
         prompt: await promptStatus(harness, agent as Agent, agent.jobId ? ((doc.jobs[agent.jobId] as Job | undefined) ?? null) : null),
       })),
     );
-    return { paused: doc.paused, ...(doc.pauseOwner && { pauseOwner: doc.pauseOwner }), jobs, agents };
+    return {
+      paused: doc.paused,
+      ...(doc.pauseOwner && { pauseOwner: doc.pauseOwner }),
+      ...(doc.lastPluginPause && { lastPluginPause: doc.lastPluginPause }),
+      jobs,
+      agents,
+    };
   }
 
   async function promptStatus(harness: Harness, agent: Agent, job: Job | null): Promise<AgentPromptStatus | null> {

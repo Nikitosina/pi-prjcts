@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 
 export const defaults = { configuration: "yteam fixed", probeUrl: "https://a.yandex-team.ru", intervalMs: 15000, stuckMs: 60000 };
@@ -16,7 +17,7 @@ export function settings(dir) {
 }
 export function createWatcher({ dir, run, probe, now = Date.now, config = defaults, projects, control }) {
   const file = join(dir, "outage.json");
-  const fresh = () => ({ outage: false, projects: {}, attempts: 0, next: 0, notified: false, restore: null, lastRepair: null });
+  const fresh = () => ({ outage: null, projects: {}, attempts: 0, next: 0, notified: false, restore: null, lastRepair: null });
   const s = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : fresh();
   let saved = JSON.stringify(s);
   function save() {
@@ -34,10 +35,10 @@ export function createWatcher({ dir, run, probe, now = Date.now, config = defaul
     repairing = false,
     lastError = null;
   const vpn = async (command) => {
-    const body = command === "state" ? "return state of configuration configName" : `return ${command} configName`;
+    const body = command === "state" ? "get state of configuration configName" : `${command} configName`;
     const result = await run("/usr/bin/osascript", [
       "-e",
-      `on run argv\nset configName to item 1 of argv\ntell application "Tunnelblick" to ${body.replace(/^return /, "")}\nend run`,
+      `on run argv\nset configName to item 1 of argv\ntell application "Tunnelblick" to ${body}\nend run`,
       config.configuration,
     ]);
     if (result === "false") throw Error(`Tunnelblick refused ${command}`);
@@ -95,29 +96,26 @@ export function createWatcher({ dir, run, probe, now = Date.now, config = defaul
   async function reconcile(recover) {
     const active = projects().filter((p) => !p.deleted && !p.archived && !p.disabledPlugins?.includes("network-gate"));
     const eligible = new Set(active.map((p) => p.id));
-    for (const id of Object.keys(s.projects)) if (!eligible.has(id)) delete s.projects[id];
-    save();
     for (const { id } of active) {
       try {
-        if (!(id in s.projects)) {
-          if (recover) continue;
+        if (!recover && (!(id in s.projects) || s.projects[id] === "claiming")) {
           s.projects[id] = "claiming";
           save();
           try {
             s.projects[id] = (await control.pause(
               id,
               `VPN ${config.configuration}: ${state}, corporate probe unavailable or VPN not connected`,
+              s.outage,
             ))
               ? "paused"
               : "skip";
           } catch (error) {
             if (!(await control.owns(id))) {
-              delete s.projects[id];
               throw error;
             }
             s.projects[id] = "paused";
           }
-        } else if (s.projects[id] !== "skip") {
+        } else if (id in s.projects && s.projects[id] !== "skip") {
           if (!(await control.owns(id))) s.projects[id] = "skip";
           else if (recover) {
             await control.resume(id);
@@ -130,7 +128,7 @@ export function createWatcher({ dir, run, probe, now = Date.now, config = defaul
         save();
       }
     }
-    if (recover && !Object.values(s.projects).some((v) => v !== "skip")) {
+    if (recover && !Object.entries(s.projects).some(([id, v]) => eligible.has(id) && v !== "skip")) {
       Object.assign(s, fresh(), { lastRepair: s.lastRepair });
       save();
     }
@@ -155,7 +153,7 @@ export function createWatcher({ dir, run, probe, now = Date.now, config = defaul
       bad++;
       good = 0;
     }
-    if (bad >= 2) s.outage = true;
+    if (bad >= 2 && !s.outage) s.outage = randomUUID();
     save();
     if (!s.outage) return;
     await reconcile(good >= 2);

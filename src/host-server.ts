@@ -2192,11 +2192,13 @@ for (const status of await plugins.load((name) => {
     if (project.archived || project.deleted || project.disabledPlugins?.includes(name)) throw new Error("Plugin unavailable for project");
   };
   return {
-    pause: (id, reason) =>
+    pause: (id, reason, requestId) =>
       lifecycle(id, eligible, async (owner) => {
         const state = await owner.jobs();
         if (state.paused) return state.pauseOwner === name;
-        await owner.pause(name);
+        const claim = JSON.stringify([name, requestId]);
+        if (state.lastPluginPause === claim) return false;
+        await owner.pause({ name, claim });
         recordHostEvent("lifecycle", `paused:${id}: ${name}: ${reason.slice(0, 500)}`);
         return true;
       }),

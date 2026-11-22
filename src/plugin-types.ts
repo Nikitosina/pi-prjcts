@@ -535,7 +535,7 @@ export type LeaseAnswer =
   | { acquired: false; resource: string; heldBy: LeaseHolder; until: string; waitedMs: number };
 
 export type ProjectPauseControl = {
-  pause(id: string, reason: string): Promise<boolean>;
+  pause(id: string, reason: string, requestId: string): Promise<boolean>;
   resume(id: string): Promise<boolean>;
   owns(id: string): Promise<boolean>;
   notice(message: string): Promise<void>;

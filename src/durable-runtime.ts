@@ -400,7 +400,7 @@ export type DurableProjectRuntime = {
     }
   >;
   /** Stop admitting work and pause every running agent; they continue after `resume`. */
-  pause(plugin?: string): Promise<{ paused: boolean }>;
+  pause(plugin?: { name: string; claim: string }): Promise<{ paused: boolean }>;
   resume(): Promise<{ paused: boolean }>;
   worktrees(): Promise<WorktreeInventory>;
   /** What the project keeps on disk, per kind, and what the cleanup routine would free now. */
