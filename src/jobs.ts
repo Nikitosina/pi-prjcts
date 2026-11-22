@@ -240,6 +240,7 @@ export type Agent = {
 type ModelMove = { at: number; from: string; to: string };
 export type JobsState = {
   paused: boolean;
+  pauseOwner?: string;
   jobs: Record<string, Job>;
   agents: Record<string, Agent>;
   /** Subagent conversation id -> the Job it serves, so tools and the UI find a Job from any conversation of its tree. */
@@ -919,6 +920,7 @@ const reply = (text: string, details?: Record<string, string | number>) => ({
 
 export type JobsSnapshot = {
   paused: boolean;
+  pauseOwner?: string;
   jobs: (Omit<Job, "children"> & {
     conversationId: ConversationId;
     working: boolean;
@@ -1769,10 +1771,12 @@ export function createJobs(host: JobsHost) {
     Object.values(doc.agents).filter((agent) => (agent.jobId ? doc.jobs[agent.jobId]?.status === "running" : agent.endedAt === null));
 
   /** Stop admitting work and abort every live agent, keeping their Jobs running so a resume continues them. */
-  async function pause(harness: Harness): Promise<void> {
+  async function pause(harness: Harness, plugin?: string): Promise<void> {
     const live = await harness.commit(async (tx) => {
       const doc = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
       doc.paused = true;
+      if (plugin) doc.pauseOwner = plugin;
+      else delete doc.pauseOwner;
       return liveAgents(doc).map((agent) => agent.conversationId);
     }, context);
     const owned = (await Promise.all(live.map(async (id) => [id, ...(await descendants(harness, id))]))).flat();
@@ -1788,6 +1792,7 @@ export function createJobs(host: JobsHost) {
     const live = await harness.commit(async (tx) => {
       const doc = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
       doc.paused = false;
+      delete doc.pauseOwner;
       return liveAgents(doc).map((agent) => ({ id: agent.id, brief: agent.briefed ? null : agent.brief }));
     }, context);
     for (const { id, brief } of live)
@@ -1855,7 +1860,7 @@ export function createJobs(host: JobsHost) {
         prompt: await promptStatus(harness, agent as Agent, agent.jobId ? ((doc.jobs[agent.jobId] as Job | undefined) ?? null) : null),
       })),
     );
-    return { paused: doc.paused, jobs, agents };
+    return { paused: doc.paused, ...(doc.pauseOwner && { pauseOwner: doc.pauseOwner }), jobs, agents };
   }
 
   async function promptStatus(harness: Harness, agent: Agent, job: Job | null): Promise<AgentPromptStatus | null> {

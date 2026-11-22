@@ -2187,7 +2187,34 @@ const server = createServer(async (request, response) => {
 });
 server.requestTimeout = 120000;
 // Plugins load before the first request or project restore; a failing plugin is recorded, never fatal.
-for (const status of await plugins.load())
+for (const status of await plugins.load((name) => {
+  const eligible = (project: ReturnType<typeof loadProject>) => {
+    if (project.archived || project.deleted || project.disabledPlugins?.includes(name)) throw new Error("Plugin unavailable for project");
+  };
+  return {
+    pause: (id, reason) =>
+      lifecycle(id, eligible, async (owner) => {
+        const state = await owner.jobs();
+        if (state.paused) return state.pauseOwner === name;
+        await owner.pause(name);
+        recordHostEvent("lifecycle", `paused:${id}: ${name}: ${reason.slice(0, 500)}`);
+        return true;
+      }),
+    owns: (id) => withDurableOwner({ id, operation: async (owner) => (await owner.jobs()).pauseOwner === name }),
+    resume: (id) =>
+      lifecycle(id, eligible, async (owner) => {
+        if ((await owner.jobs()).pauseOwner !== name) return false;
+        await owner.resume();
+        recordHostEvent("lifecycle", `resumed:${id}: ${name}`);
+        return true;
+      }),
+    notice: async (message) => {
+      const detail = `${name}: ${message.slice(0, 500)}`;
+      recordHostEvent("plugins", detail);
+      await sendOwnerMessage(detail);
+    },
+  };
+}))
   process.stderr.write(
     JSON.stringify({
       event: status.state === "loaded" ? "plugin-loaded" : "plugin-failed",

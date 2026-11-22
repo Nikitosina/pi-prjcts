@@ -14,6 +14,7 @@
   ],
   "browser": [],
   "map": {
+    "plugins/network-gate/*": ["network-gate-*"],
     "src/web.ts": ["*-ui-e2e", "chat-*", "settings-*", "theme-e2e", "search-ui-e2e"],
     "src/notify.ts": ["browser-notify-e2e", "telegram-e2e"],
     "src/web-push.ts": ["browser-notify-e2e"],

@@ -534,6 +534,13 @@ export type LeaseAnswer =
   | { acquired: true; resource: string; until: string }
   | { acquired: false; resource: string; heldBy: LeaseHolder; until: string; waitedMs: number };
 
+export type ProjectPauseControl = {
+  pause(id: string, reason: string): Promise<boolean>;
+  resume(id: string): Promise<boolean>;
+  owns(id: string): Promise<boolean>;
+  notice(message: string): Promise<void>;
+};
+
 export type HostPluginApi = {
   /** The plugin's own name. */
   name: string;
@@ -542,6 +549,8 @@ export type HostPluginApi = {
   lib: PluginLib;
   provide(capabilities: PluginCapabilities): void;
   projects: {
+    /** Available only on the running host. Resume never releases another caller's pause. */
+    control?: ProjectPauseControl;
     load(id: string): Project;
     /** Every project, for host-wide work that must still honor a project's plugin switch. */
     list(): Project[];
