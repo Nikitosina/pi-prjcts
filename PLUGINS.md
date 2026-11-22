@@ -50,6 +50,8 @@ Isolated task helpers require the separate optional `workspace.task` adapter. `p
 
 `helperGuard(command)` is the optional shell policy of every task helper, shared or isolated. Helpers never publish, so it should keep the provider's safety rules and refuse pushes and PR writes with a message that sends the work back to the Coordinator. Without it, core's Git helper policy applies.
 
+`workspace.verificationHead?(workDir: string): Promise<string>` opts the provider into `projects_verify_run`. Read the current full commit from the worker’s actual cwd (which can be a project subfolder), not its receipt. Throw with a reason when it cannot be read. Core trims the result and refuses an empty, unreadable or non-candidate HEAD without starting the command. It uses the worker attachment’s existing `guard(command: string): string`, including the host’s owner-checkout guard, or the task helper’s bound shell policy. Return the permitted or rewritten shell command; the standard denial script (`printf '%s\n' '<reason>' >&2; exit 126`) refuses the run without a proof id. Missing hook, scope or bound policy never falls back to the independent Git shell. Older cores ignore the method.
+
 Absent task support visibly refuses isolated task allocation. Existing independent `plan`/`attach` behavior remains unchanged. Task helpers receive core execution tools without independent worker publication hooks. Neither adapter gives permission to merge main, deploy or perform destructive actions.
 
 ## The built-in GitHub plugin
