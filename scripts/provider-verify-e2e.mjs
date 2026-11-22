@@ -4,21 +4,31 @@ import { createKit, call, say, randomUUID } from "./lib/e2e-kit.mjs";
 
 const sha = "c".repeat(40);
 const handler = ({ role, user, results }) => {
-  if (role === "coordinator" && user === "START" && !results.length)
+  if (role === "coordinator" && user.startsWith("START") && !results.length)
     return call("agents", {
       action: "spawn",
       role: "worker",
       title: "Proof",
-      brief: "VERIFY-FAKE",
+      brief: `VERIFY-FAKE ${user}`,
       acceptance: ["Check the candidate"],
       requestId: randomUUID(),
     });
   if (role !== "worker" || !user.includes("VERIFY-FAKE")) return say("Done.");
+  if (user.includes("NO-HOOK")) {
+    return (
+      [
+        call("job", { action: "candidate", sha }),
+        call("projects_verify_run", { command: "touch UNGUARDED" }),
+        call("bash", { command: "test ! -e UNGUARDED && echo not-run" }),
+      ][results.length] ?? say("Done.")
+    );
+  }
   const steps = [
     call("bash", { command: `echo ${sha} > .fake-revision` }),
     call("job", { action: "candidate", sha }),
     call("projects_verify_run", { command: "touch DENIED" }),
-    call("projects_verify_run", { command: "test ! -e DENIED && echo proof-ok" }),
+    call("projects_verify_run", { command: "fake-test-wrapper" }),
+    call("projects_verify_run", { command: "test ! -e LEASED && test ! -e DENIED && echo proof-ok" }),
     call("job", { action: "ready", summary: "Checked", proof: ["r1"] }),
   ];
   return steps[results.length] ?? say("Done.");
@@ -48,10 +58,26 @@ await kit.run(async () => {
     results.some((text) => text.includes('"runId":"r1"') && text.includes("proof-ok")),
     results,
   );
+  kit.check(
+    "rewritten command requires the container lease",
+    results.some((text) => text.includes("container runtime") && text.includes("no lease")),
+    results,
+  );
   const job = (await kit.jobs(id))[0];
   kit.check(
     "Ready accepted the proof reference on the candidate",
     job?.status === "ready" && job.candidate === sha && job.ready.proof.includes("r1"),
     job,
+  );
+  kit.hostEnv.FAKE_NO_VERIFICATION_HEAD = "1";
+  await kit.restartHost();
+  await kit.ask(id, "START NO-HOOK");
+  const hookless = kit.lastCall("worker", "VERIFY-FAKE START NO-HOOK")?.results ?? [];
+  kit.check(
+    "registered provider without verificationHead refuses without launching",
+    hookless[1]?.includes('"fake" workspace provider does not supply verificationHead') &&
+      !hookless[1].includes("runId") &&
+      hookless[2]?.includes("not-run"),
+    hookless,
   );
 });

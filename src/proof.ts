@@ -144,7 +144,10 @@ export function proofTools(deps: ProofDeps) {
       const held = deps.leases
         .held((holder) => holder.projectId === deps.projectId && holder.threadId === job.id)
         .map((item) => item.resource);
-      const missing = missingLease(args.command, held);
+      const command = shell.guard(args.command);
+      const denied = shell.refuseDenied ? policyDenial(command) : undefined;
+      if (denied !== undefined) return text(denied, true);
+      const missing = missingLease(args.command, held) ?? (command !== args.command ? missingLease(command, held) : null);
       if (missing)
         return text(
           `Not run: this command uses the ${missing.resource}, which other workers share, and you hold no lease for it. Take ${missing.hint} with projects_lease_acquire first. If the lease is held by someone else, or you lack the tool or grant, list the check under gaps.`,
@@ -155,9 +158,6 @@ export function proofTools(deps: ProofDeps) {
       const id = `r${runs.length + 1}`;
       const started = Date.now();
       const deadline = started + (args.timeoutSeconds ?? 600) * 1000;
-      const command = shell.guard(args.command);
-      const denied = policyDenial(command);
-      if (denied !== undefined && shell.refuseDenied) return text(denied, true);
       const running = deps.background.start(job.id, {
         command,
         label: `verify ${id}`,
