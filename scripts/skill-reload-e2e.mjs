@@ -2,7 +2,7 @@
 import { spawn, execFileSync } from "node:child_process";
 import { createServer, request } from "node:http";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, realpathSync, writeFileSync, createWriteStream } from "node:fs";
+import { mkdirSync, renameSync, readFileSync, realpathSync, writeFileSync, createWriteStream } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
@@ -410,6 +410,15 @@ try {
   await settleAll();
   check("reload works again once the turn finished", (await rpc({ action: "chat-reload", id })).changed === false);
 
+  renameSync(join(homeSkills, "home-new"), join(userHome, "home-new"));
+  await ask("after-move");
+  check("missing skill drops from coordinator briefs", !index(lastCall("coordinator", "after-move").system).includes("home-new"));
+  const { durable } = await rpc({ action: "host-health", id });
+  check(
+    "one broken skill across roles",
+    durable.brokenSkills.length === 1 && durable.brokenSkills[0].name === "home-new",
+    durable.brokenSkills,
+  );
   result.status = "passed";
 } catch (error) {
   result.status = "failed";

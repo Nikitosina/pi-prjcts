@@ -79,11 +79,7 @@ const CHECKS = new Set(["CHECK", "SLOW-CHECK", "SILENT", "BUSY"]);
 const GLUED = "Couldmerelykeepownedsessionrunningwhilelocaldebugandrenewlease";
 assert.match(DEFAULT_ROLE_PROMPTS.worker, /Mark the PR ready before calling job ready/, "Ready includes the draft PR transition");
 for (const prompt of [DEFAULT_ROLE_PROMPTS.worker, TASK_HELPER_PROMPT])
-  assert.match(
-    prompt,
-    /one projects_bg_status call with a large waitSeconds/,
-    "workers wait for long commands with one call, not by polling",
-  );
+  assert.match(prompt, /one projects_bg_wait call/, "workers wait for long commands with one call, not by polling");
 
 // The ETA counts down inside the step in progress and keeps a minute for an overrun one.
 {
@@ -188,7 +184,7 @@ function route(request) {
     return result ? say("OK.") : say("Noted.");
   }
   if (role === "worker") {
-    if (tag === "BRIEF-BGWAIT") return result ? say("Done.") : call("projects_bg_status", {});
+    if (tag === "BRIEF-BGWAIT") return result ? say("Done.") : call("projects_bg_wait", {});
     if (tag === "BRIEF-GLUEDSUB") return result ? say("Done.") : call("subagent", { role: "scout", task: `Look at ${GLUED} closely` });
     if (user === "Replace helper result") return say("New short helper result.");
     if (user === "Replace Ready result")
@@ -406,7 +402,7 @@ const TestTools = defineExtension({
     }),
     // Stands in for a long background wait (agent-signals-failures.md W1, W2): blocks until released or aborted.
     defineTool({
-      name: "projects_bg_status",
+      name: "projects_bg_wait",
       description: "A long background wait",
       parameters: Type.Object({}),
       replay: "safe",

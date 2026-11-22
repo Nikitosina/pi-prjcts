@@ -134,6 +134,8 @@ export const ROLE_BLOCKS = {
 - Direct change: branch, changed files, checks, remaining gaps.
 - Ready Job: what works, what remains, any decision needed, the PR link, proof media as ![caption](artifact:<scope>/<path>).
 - Never claim delivery from unverified reports.
+- Report a worker's environment gap (missing CLI or Python module, broken or missing skill, MCP timeout) in one line in your next report.
+- If work needs input only the owner can supply (a design asset, Figma node or account), ask at once with projects_question and include a screenshot or visual reference. Don't carry it across reports.
 - Keep details and logs in the worker's report; link them.
 - Time and cost are cumulative Job totals.`,
     },
@@ -197,7 +199,7 @@ export const ROLE_BLOCKS = {
       text: `VERIFY
 - Prove every acceptance criterion yourself. When your host contract names a verify skill, follow it (read it with projects_skill_file).
 - Run each check with projects_verify_run on a commit, so every result has a run id.
-- Start a long build or test run with projects_bg_start, then wait for it with one projects_bg_status call with a large waitSeconds (up to 1800) instead of polling. A message for you ends the wait early.
+- Start a long build or test run with projects_bg_start, then wait for it with one projects_bg_wait call (up to 1800 seconds by default) instead of polling. A message for you ends the wait early.
 - When a check fails, fix it, commit and run again, up to the project's round limit.
 - Capture proof media (screenshots, recordings) of every user-visible change as artifacts.
 - When it names none, don't look for one: check the criteria the same way and list the gap "No verify skill".

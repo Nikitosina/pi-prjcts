@@ -1,4 +1,4 @@
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { ResourceLoader, Skill } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
@@ -29,17 +29,18 @@ export const SkillProfiles = Type.Object({ off: Type.Optional(OffLists), ...list
 export type SkillProfiles = Static<typeof SkillProfiles>;
 type Loader = Pick<ResourceLoader, "getSkills">;
 
+export const skillPresent = (skill: Skill): boolean => statSync(skill.filePath, { throwIfNoEntry: false })?.isFile() === true;
 const loaded = (loader?: Loader) => loader?.getSkills().skills ?? [];
 /** Names switched off for a role (its own list plus "all"). */
 export const switchedOff = (off: OffLists | undefined, role: SkillRole): Set<string> =>
   new Set([...(off?.all ?? []), ...(off?.[role] ?? [])]);
 export function effectiveSkills(saved: SkillProfiles | undefined, loader: Loader | undefined, role: SkillRole): Skill[] {
   const off = switchedOff(saved?.off, role);
-  return loaded(loader).filter((skill) => !off.has(skill.name));
+  return loaded(loader).filter((skill) => !off.has(skill.name) && skillPresent(skill));
 }
 /** Names and descriptions only; bodies are read on demand. Manual-only skills are left out, as pi does. */
 export function skillIndex(skills: readonly Skill[]): string {
-  const listed = skills.filter((skill) => !skill.disableModelInvocation);
+  const listed = skills.filter((skill) => !skill.disableModelInvocation && skillPresent(skill));
   return listed.length
     ? `\n\nSkills for your role (names and descriptions only). When one applies, read its SKILL.md with projects_skill_file before acting, then any file it references:\n${listed.map((skill) => `- ${skill.name}: ${skill.description}`).join("\n")}`
     : "";
