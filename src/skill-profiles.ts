@@ -60,9 +60,9 @@ export function pruneSkillIndex(instructions: string, known: ReadonlyMap<string,
   const start = instructions.lastIndexOf(indexHeading);
   if (start < 0) return instructions;
   const rows = instructions.slice(start + indexHeading.length);
-  const block = /^(?:\n+- [\w.-]+: [^\n]*)+/.exec(rows)?.[0];
+  const block = /^(?:\n+- [^\n]+)+/.exec(rows)?.[0];
   if (!block) return instructions;
-  const kept = block.replace(/\n+- ([\w.-]+): [^\n]*/g, (row, name: string) => {
+  const kept = block.replace(/\n+- (.+?): [^\n]*/g, (row, name: string) => {
     const skill = known.get(name);
     return skill && skillPresent(skill) ? row : "";
   });
