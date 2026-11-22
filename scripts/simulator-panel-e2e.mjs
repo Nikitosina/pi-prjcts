@@ -438,6 +438,7 @@ await kit.run(async () => {
   await waitStatus(/^2\/2 running$/, "reset done");
 
   // ---- S7 an unknown outcome, acknowledged inline
+  const beforeFailedReset = fakeCalls().length;
   setFail({ erase: "simslim: erase failed (fixture)" });
   await selectTab(created.udid);
   mark = (await sim()).length;
@@ -465,7 +466,9 @@ await kit.run(async () => {
       recovers[0].params.confirm === alpha &&
       afterReset.length === 1 &&
       afterReset[0].params.operation === "reset" &&
-      fakeCalls().filter((call) => call.args[0] === "erase").length === 1 &&
+      fakeCalls()
+        .slice(beforeFailedReset)
+        .filter((call) => call.args[0] === "erase").length === 1 &&
       store().owned.length === 2,
     { recovers, afterReset },
   );
