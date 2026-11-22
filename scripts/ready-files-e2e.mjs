@@ -32,6 +32,7 @@ git("commit", "-qm", "many additions");
 const root = git("rev-list", "--max-parents=0", "HEAD");
 candidate = git("rev-parse", "HEAD");
 git("checkout", "-q", "main");
+git("tag", "main", candidate);
 const checkout = join(kit.root, "provider");
 mkdirSync(join(checkout, ".fakevcs"), { recursive: true });
 kit.hostEnv.FAKE_PLUGIN_DATA = join(kit.root, "fake.json");
@@ -69,6 +70,7 @@ await kit.run(async () => {
   kit.check("Provider reads the requested candidate", pluginFiles === `A\t${candidate}\nD\told`, pluginFiles);
   candidate = "0".repeat(40);
   kit.check("Hook failure is advisory", (await report(provider, "failed hook")) === "unavailable");
+  candidate = root;
   kit.hostEnv.FAKE_OLD_VCS = "1";
   await kit.restartHost();
   kit.check("Older plugin still reaches Ready", (await report(provider, "old plugin")) === "unavailable");
