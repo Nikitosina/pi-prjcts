@@ -49,7 +49,15 @@ import { checkProofRefs, proofTools } from "./proof.ts";
 import { createApprover, describeAcceptance, fileAcceptanceLog, githubMergeProvider } from "./result-acceptance.ts";
 import { pullMainCheckout } from "./main-pull.ts";
 import type { Skill } from "@earendil-works/pi-coding-agent";
-import { effectiveSkills, invokedSkills, skillIndex, skillPresent, SKILL_ROLES, type SkillRole } from "./skill-profiles.ts";
+import {
+  effectiveSkills,
+  invokedSkills,
+  skillIndex,
+  skillPresent,
+  pruneSkillIndex,
+  SKILL_ROLES,
+  type SkillRole,
+} from "./skill-profiles.ts";
 import { readOnlyCodeTools } from "./durable-code-tools.ts";
 import { cleanupWorktrees, worktreeInventory, type WorktreeInventory, type WorktreeItem } from "./worktree-maintenance.ts";
 import { coordinatorArtifactTools } from "./artifacts.ts";
@@ -884,8 +892,7 @@ export async function openDurableProject(input: {
     const roleSkills = rolesOf(input.configuredSkillLoader, project.skillProfiles);
     let delegatedSkills = roleSkills;
     // What each coordinator chat may read: the open-time set until that chat is reloaded, then its own reloaded set (a reload never widens another chat).
-    const coordinatorSkills = new Map<number, readonly Skill[]>();
-    const chatSkills = (id: number) => coordinatorSkills.get(id) ?? roleSkills.coordinator;
+    const coordinatorSkills = new Map<number, ReadonlySet<string>>();
     const staleChats = new Set<number>();
     // A thread reads the set that was current when it started; later installs reach only new threads.
     const threadSkills = new Map<number, ReadonlySet<string>>();
@@ -963,7 +970,10 @@ export async function openDurableProject(input: {
         return !caller
           ? new Set()
           : caller.role === "coordinator"
-            ? new Set([...chatSkills(Number(api.conversationId)).map((skill) => skill.name), ...invokedSkills(dir)])
+            ? new Set([
+                ...(coordinatorSkills.get(Number(api.conversationId)) ?? roleSkills.coordinator.map((skill) => skill.name)),
+                ...invokedSkills(dir),
+              ])
             : new Set(
                 caller.skills ?? threadSkills.get(Number(api.conversationId)) ?? delegatedSkills[caller.role].map((skill) => skill.name),
               );
@@ -1041,7 +1051,16 @@ export async function openDurableProject(input: {
       ],
       hooks: [
         hook(GenerationTask, {
-          beforeRequest: (request, api) => observeModelRequest(input, project.id, api.conversationId, request.messages),
+          beforeRequest: (request, api) => {
+            const messages = request.messages.map((message) => {
+              const instructions = message.role === "system" && message.sections?.instructions;
+              if (!instructions) return message;
+              const pruned = pruneSkillIndex(instructions, knownSkills);
+              return pruned === instructions ? message : { ...message, sections: { ...message.sections, instructions: pruned } };
+            });
+            observeModelRequest(input, project.id, api.conversationId, messages);
+            return { messages };
+          },
         }),
         hook(ToolTask, {
           beforeTool: async (call, api) => {
@@ -2373,13 +2392,13 @@ export async function openDurableProject(input: {
     }
 
     // Rebuilds a chat's prompt and tools from the saved project, the checkout's standing instructions and the skill catalog, and applies them in one commit: a failure leaves the chat as it was.
-    const rebuildCoordinator = async (conversation: Conversation, loader: SkillLoader, retained?: readonly Skill[]) => {
+    const rebuildCoordinator = async (conversation: Conversation, loader: SkillLoader) => {
       const current = loadProject(project.id);
       if (current.deleted || current.archived) throw new Error("Project is not active; reload is unavailable");
-      const skills = retained?.filter(skillPresent) ?? effectiveSkills(current.skillProfiles, loader, "coordinator");
+      const next = rolesOf(loader, current.skillProfiles);
       const agent = await conversation.agent(context);
       const instance = loadInstanceInstructions();
-      const instructions = coordinatorInstructions(current, loadDurableStanding(project.cwd).text, skillIndex(skills));
+      const instructions = coordinatorInstructions(current, loadDurableStanding(project.cwd).text, skillIndex(next.coordinator));
       const chat = (await chatList()).find((item) => item.conversationId === Number(conversation.id));
       if (!chat) throw new Error("Unknown coordinator chat");
       const workspace = await workspaces.inspect({ chatId: chat.id, conversationId: Number(conversation.id) });
@@ -2407,10 +2426,10 @@ export async function openDurableProject(input: {
             await refreshInstanceInstructions(tx, conversation.id, instance);
           },
         );
-      if (!retained) remember(loader);
-      coordinatorSkills.set(Number(conversation.id), skills);
+      remember(loader);
+      coordinatorSkills.set(Number(conversation.id), new Set(next.coordinator.map((skill) => skill.name)));
       staleChats.delete(Number(conversation.id));
-      return { skills: skills.length, changed };
+      return { skills: next.coordinator.length, changed };
     };
     // A working or compacting chat keeps its prompt until it is idle: it is marked stale and rebuilt before the owner's next message.
     const tryRebuildCoordinator = async (conversation: Conversation, loader: SkillLoader): Promise<boolean> => {
@@ -2433,10 +2452,6 @@ export async function openDurableProject(input: {
           const { conversation, chat } = await resolveChat(options.chatId);
           if (chat.archived) throw new Error("Chat is archived; restore it before sending");
           if (staleChats.has(Number(conversation.id))) await tryRebuildCoordinator(conversation, knownLoader);
-          else {
-            const retained = chatSkills(Number(conversation.id));
-            if (!chat.busy && retained.some((skill) => !skillPresent(skill))) await rebuildCoordinator(conversation, knownLoader, retained);
-          }
           const admitted = await admit(conversation, content, options);
           if (options.title && chat.id !== MAIN_CHAT) await updateChat(chat.id, { title: chatTitle(options.title), untitledOnly: true });
           return admitted;
@@ -2496,7 +2511,7 @@ export async function openDurableProject(input: {
           assertOpen();
           // Prompt, tools and skill list all come from Main's current state (open-time or its last reload), read together under the same lock a reload takes.
           const agent = await chatAgent();
-          const inherited = chatSkills(Number(root.id));
+          const inherited = new Set(coordinatorSkills.get(Number(root.id)) ?? roleSkills.coordinator.map((skill) => skill.name));
           const created = await root.commit(async (tx) => {
             const doc = await tx.doc(ProjectChats, root.id);
             if (doc.chats.length >= 500) throw new Error("Chat limit reached; archive is not deletion, so reuse an existing chat");
@@ -2878,7 +2893,7 @@ export async function openDurableProject(input: {
         if (skills) {
           // The saved skill profile, not a chat's frozen set: this list is where the owner changes it.
           const effective = new Set(rolesOf(knownLoader, current.skillProfiles)[profile].map((skill) => skill.name));
-          for (const skill of knownLoader?.getSkills().skills ?? [])
+          for (const skill of knownLoader?.getSkills().skills.filter(skillPresent) ?? [])
             skills.tools.push({
               name: `skill:${skill.name}`,
               description: skill.description,

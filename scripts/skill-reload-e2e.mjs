@@ -410,13 +410,17 @@ try {
   await settleAll();
   check("reload works again once the turn finished", (await rpc({ action: "chat-reload", id })).changed === false);
 
-  renameSync(join(homeSkills, "home-new"), join(userHome, "home-new"));
+  await rpc({ action: "message", id, text: "SLOW before-move" });
+  await eventually(() => lastCall("coordinator", "SLOW before-move"), "slow request did not start");
+  renameSync(join(globalSkills, "glob-old"), join(userHome, "glob-old"));
   await ask("after-move");
-  check("missing skill drops from coordinator briefs", !index(lastCall("coordinator", "after-move").system).includes("home-new"));
+  const { groups } = await rpc({ action: "profile-tools", projectId: id, profile: "worker" });
+  check("missing skill absent from role settings", !groups.flatMap((g) => g.tools).some((t) => t.name === "skill:glob-old"));
+  check("missing skill drops from coordinator briefs", !index(lastCall("coordinator", "after-move").system).includes("glob-old"));
   const { durable } = await rpc({ action: "host-health", id });
   check(
     "one broken skill across roles",
-    durable.brokenSkills.length === 1 && durable.brokenSkills[0].name === "home-new",
+    durable.brokenSkills.length === 1 && durable.brokenSkills[0].name === "glob-old",
     durable.brokenSkills,
   );
   result.status = "passed";
