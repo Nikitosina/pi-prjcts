@@ -72,3 +72,7 @@ The `github` provider reads through `gh` (`PI_PROJECTS_GH_CLI`): one `gh api gra
 - Follow PRs auto-fix for a failed check run includes name, conclusion, title, summary and details_url (http(s) only), capped at 4 KB and marked untrusted.
 - Limits: the repository's 50 most recently updated open PRs are listed; a branch without a review rule reports approval from the reviewers' latest reviews; a failing check counts as required unless GitHub reports the merge state UNSTABLE.
 Tests: `scripts/github-pr-watch-e2e.mjs` (failure modes: `scripts/github-pr-watch-failures.md`).
+
+### Ready report file list
+
+`vcs.candidateNameStatus?(root: string, candidate: string): Promise<string>` reads the candidate commit in the worker's checkout (`root` is its absolute VCS root; `candidate` is a full SHA). Diff its merge base with the provider's base branch against the candidate, not HEAD or uncommitted work. Return complete newline-separated `--name-status` output: tab-separated status and checkout-relative path, or `R<score>`, old path and new path. Quote unusual filenames as the CLI does; do not return a partial result. Empty output means no changes. Reject on failure. The host keeps A/D/R rows, at most 20, with an omitted count. With no hook, a failed read or no answer within five seconds, Ready records “unavailable” instead. No result affects Ready status.

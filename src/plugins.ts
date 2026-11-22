@@ -300,7 +300,13 @@ export const plugins = {
     const item = [...builtins(), ...loaded].find((entry) => entry.capabilities.vcs?.kind === kind);
     const provider = item?.capabilities.vcs;
     if (!item || !provider || !project) return provider;
-    return gate.methods(project.id, item.plugin, provider, ["changedFiles", "codeDiff", "workerState", "resolveContinuation"]);
+    return gate.methods(project.id, item.plugin, provider, [
+      "changedFiles",
+      "candidateNameStatus",
+      "codeDiff",
+      "workerState",
+      "resolveContinuation",
+    ]);
   },
   workspaceProviders: (): WorkspaceProvider[] => plugins.workspaceSources(),
   workspaceProvider: (id: string): WorkspaceProvider | undefined => plugins.workspaceSources().find((item) => item.id === id),
