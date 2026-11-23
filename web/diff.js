@@ -96,7 +96,7 @@ function hunks(diff) {
   return out;
 }
 export function thread(t) {
-  return `<aside class="rv-thread"><b>${t.resolved ? "Resolved thread" : t.outdated ? "Outdated thread" : "Review thread"}</b>${t.comments.map((c) => `<p><strong>${esc(c.author)}</strong> ${esc(c.body)}</p>`).join("")}</aside>`;
+  return `<aside class="rv-thread"><b>${t.resolved ? (t.outdated ? "Resolved · outdated thread" : "Resolved thread") : t.outdated ? "Outdated thread" : "Review thread"}</b>${t.comments.map((c) => `<p><strong>${esc(c.author)}</strong> ${esc(c.body)}</p>`).join("")}</aside>`;
 }
 export function renderDiff(diff, path, split, threads) {
   const lang = langOf(path),

@@ -539,10 +539,14 @@ export function followRuntime(
           seen = await observe(repo, previous, controller.signal);
         await recordReviewHeads(
           root,
-          repo.repositoryId,
+          String(repo.numericId),
           Object.entries(seen.state.prs)
             .filter(([id, p]) => p.head !== previous?.prs[id]?.head && /^[a-f0-9]{40}$/.test(p.head))
-            .map(([id, p]) => ({ id, head: p.head })),
+            .flatMap(([id, p]) =>
+              [previous?.prs[id]?.head, p.head]
+                .filter((head): head is string => !!head && /^[a-f0-9]{40}$/.test(head))
+                .map((head) => ({ id, head })),
+            ),
         );
         repoStates[repoKey("github", repo.repositoryId)] = { ...seen.state, provider: "github", repositoryId: repo.repositoryId };
         for (const item of seen.items) origin.set(item, "github");

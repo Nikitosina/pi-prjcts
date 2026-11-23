@@ -211,7 +211,7 @@ if (method === "POST" && parts[0] === "graphql") {
       });
     const item = state.pulls.find((value) => value.number === vars.number);
     if ((state.graphql?.failNumbers ?? []).includes(vars.number)) stop("GraphQL: boom", [{ message: "boom" }]);
-    reply({ repository: { pullRequest: item ? node(item, kind === "detail") : null } });
+    reply({ repository: { databaseId: repo.id, pullRequest: item ? node(item, kind === "detail") : null } });
   }
   const number = Number(/^PR_(\d+)$/.exec(vars.id ?? "")?.[1]),
     item = state.pulls.find((value) => value.number === number);

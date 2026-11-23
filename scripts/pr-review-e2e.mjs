@@ -54,6 +54,13 @@ await kit.run(async () => {
   const moved = { head: f.moved, since: f.second };
   assert.equal((await read("files", moved)).baseMoved, true);
   await assert.rejects(read("file", { ...moved, path }), /base moved/i);
+  const upstream = JSON.parse(readFileSync(f.state, "utf8"));
+  upstream.pulls[0].baseRefOid = f.moved;
+  writeFileSync(f.state, JSON.stringify(upstream));
+  assert.equal((await read("open")).iterations.find((it) => it.head === f.moved).base, f.movedBase);
+  upstream.repo.id++;
+  writeFileSync(f.state, JSON.stringify(upstream));
+  await assert.rejects(read("open"), /identity/i);
   assert.deepEqual(fingerprint(), before);
   kit.git(kit.workspace, "config", `url.${f.bare}.insteadOf`, f.url);
   await assert.rejects(read("file", { head: f.first, path }), /origin|checkout/i);

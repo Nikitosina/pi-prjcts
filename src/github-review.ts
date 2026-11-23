@@ -27,7 +27,7 @@ async function checkout(p: Project) {
   return git;
 }
 const checksFields = `statusCheckRollup{contexts(first:100){totalCount nodes{... on CheckRun{name status conclusion} ... on StatusContext{context state}}}}`;
-const query = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){title author{login} headRefOid baseRefOid timelineItems(last:50,itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT]){nodes{... on HeadRefForcePushedEvent{beforeCommit{oid} afterCommit{oid}}}} commits(last:1){nodes{commit{${checksFields}}}} reviewThreads(first:100){totalCount nodes{path line diffSide isResolved isOutdated comments(first:20){totalCount nodes{author{login} body commit{oid}}}}}}}}`;
+const query = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){databaseId pullRequest(number:$number){title author{login} headRefOid baseRefOid timelineItems(last:50,itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT]){nodes{... on HeadRefForcePushedEvent{beforeCommit{oid} afterCommit{oid}}}} commits(last:1){nodes{commit{${checksFields}}}} reviewThreads(first:100){totalCount nodes{path line diffSide isResolved isOutdated comments(first:20){totalCount nodes{author{login} body commit{oid}}}}}}}}`;
 const nullable = <T extends TSchema>(t: T) => Type.Union([t, Type.Null()]);
 const str = Type.String(),
   oid = Type.String({ pattern: "^[a-f0-9]{40}$" }),
@@ -65,12 +65,15 @@ export const githubReview: PrReviewSource = {
   capabilities: { viewedSync: false, annotations: false, issues: false, suggestions: false },
   async authorize(p) {
     await checkout(p);
-    return p.githubAuthorization![0]!.repositoryId;
+    return String(p.githubAuthorization![0]!.numericId);
   },
   async snapshot(p, id, observed) {
     const git = await checkout(p);
     const [owner, name] = p.githubAuthorization![0]!.repositoryId.split("/");
-    const data: unknown = (await githubGraphql(query, { owner, name, number: Number(id) })).repository?.pullRequest;
+    const repository = (await githubGraphql(query, { owner, name, number: Number(id) })).repository;
+    if (repository?.databaseId !== p.githubAuthorization![0]!.numericId)
+      throw Error("GitHub repository identity changed; reauthorize before reviewing");
+    const data: unknown = repository.pullRequest;
     if (!data) throw Error("PR not found");
     const pr = parse(metadata, data);
     const head = sha(pr.headRefOid),
@@ -96,9 +99,13 @@ export const githubReview: PrReviewSource = {
     let historical: Record<string, unknown> = {};
     if (heads.length) {
       const fields = heads.map((h, i) => `h${i}:object(oid:"${sha(h)}"){... on Commit{${checksFields}}}`).join(" ");
-      historical =
-        (await githubGraphql(`query($owner:String!,$name:String!){repository(owner:$owner,name:$name){${fields}}}`, { owner, name }))
-          .repository ?? {};
+      try {
+        historical =
+          (await githubGraphql(`query($owner:String!,$name:String!){repository(owner:$owner,name:$name){${fields}}}`, { owner, name }))
+            .repository ?? {};
+      } catch {
+        notices.add("Historical checks could not be read.");
+      }
     }
     for (const [index, h] of [...heads, head].entries()) {
       try {

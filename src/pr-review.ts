@@ -53,12 +53,17 @@ export async function reviewRead(root: Conversation, p: Project, source: PrRevie
     }, BACKGROUND_CONTEXT);
   if (i.action === "pr-review-open") {
     const snapshot = await source.snapshot(p, i.pr, await history((h) => [...(h.observed ?? [])]));
+    if (
+      !snapshot.iterations.some((it) => it.head === snapshot.head) ||
+      !snapshot.iterations.every((it) => [it.head, it.base].every((s) => typeof s === "string" && /^[0-9a-f]{40}$/.test(s)))
+    )
+      throw Error("Provider returned invalid review iterations");
     if (JSON.stringify(snapshot).length > 512000) throw Error("Review snapshot exceeds the display limit");
     const stored = await history((h) => {
       const byHead = new Map(h.iterations.map((x) => [x.head, x]));
       for (const it of snapshot.iterations) {
         const prior = byHead.get(it.head);
-        byHead.set(it.head, { ...prior, ...it });
+        byHead.set(it.head, { ...prior, ...it, base: prior?.base ?? it.base });
       }
       const iterations = Array.from(byHead.values()).slice(-100);
       const previous = h.previous;
@@ -71,15 +76,19 @@ export async function reviewRead(root: Conversation, p: Project, source: PrRevie
     });
     return { ...snapshot, ...stored, capabilities: source.capabilities };
   }
-  const h = await history((h) => JSON.parse(JSON.stringify(h)) as History);
-  const iteration = (head: string) => {
-    const it = h.iterations.find((x) => x.head === head);
-    if (!it) throw Error("Unknown PR iteration. Open the review first.");
-    return it;
-  };
-  const head = iteration(i.head),
-    since = i.since ? iteration(i.since) : null,
-    baseMoved = !!since && since.base !== head.base;
+  const { head, since, marks } = await history((h) => {
+    const iteration = (sha: string) => {
+      const it = h.iterations.find((x) => x.head === sha);
+      if (!it) throw Error("Unknown PR iteration. Open the review first.");
+      return { head: it.head, base: it.base };
+    };
+    return {
+      head: iteration(i.head),
+      since: i.since ? iteration(i.since) : null,
+      marks: i.action === "pr-review-files" ? { ...h.marks } : {},
+    };
+  });
+  const baseMoved = !!since && since.base !== head.base;
   const range = { base: since && !baseMoved ? since.head : head.base, head: head.head };
   const cacheKey = (...parts: unknown[]) => JSON.stringify([p.id, docKey, ...parts]);
   const list = (r: PrRange) => fileLists(cacheKey("files", r.base, r.head), () => source.files(p, i.pr, r));
@@ -95,7 +104,7 @@ export async function reviewRead(root: Conversation, p: Project, source: PrRevie
   const scoped = since && !baseMoved ? await Promise.all([list(head), list(since)]) : null;
   const inScope = (f: PrFile) => !scoped || scoped.some((list) => find(list, f.path));
   if (i.action === "pr-review-files")
-    return { baseMoved, files: files.filter(inScope).map((f) => ({ ...f, viewed: h.marks[`:${f.path}`] === f.blob })) };
+    return { baseMoved, files: files.filter(inScope).map((f) => ({ ...f, viewed: marks[`:${f.path}`] === f.blob })) };
   const entry = find(files, i.path),
     file = entry && inScope(entry) ? entry : null;
   if (!file) throw Error("Not a changed PR file");
