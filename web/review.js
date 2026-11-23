@@ -136,8 +136,10 @@ export async function renderReview(root, focus) {
       function layout(next) {
         if (next === split) return;
         const rect = stack.getBoundingClientRect(),
-          anchor = document.elementFromPoint(rect.left + rect.width / 2, rect.top + 68)?.closest(".drow,.row-extra"),
-          block = anchor?.closest(".fblock"),
+          hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + 68),
+          block = hit?.closest(".fblock") ?? blocks.find((b) => b.getBoundingClientRect().bottom >= rect.top) ?? blocks.at(-1),
+          anchor = hit?.closest(".drow,.row-extra,.hunk-head") ?? block,
+          hunk = anchor?.matches(".hunk-head") ? [...block.querySelectorAll(".hunk-head")].indexOf(anchor) : -1,
           offset = anchor?.getBoundingClientRect().top;
         split = next;
         q("[data-split]").setAttribute("aria-pressed", next);
@@ -146,7 +148,7 @@ export async function renderReview(root, focus) {
         if (block) {
           const d = anchor.dataset,
             sel = d.thread != null ? `[data-thread="${d.thread}"]` : d.n ? `[data-n="${d.n}"]` : `[data-o="${d.o}"]`;
-          const target = block.querySelector(sel);
+          const target = anchor === block ? block : hunk >= 0 ? block.querySelectorAll(".hunk-head")[hunk] : block.querySelector(sel);
           if (target) stack.scrollTop += target.getBoundingClientRect().top - offset;
         }
       }
@@ -212,7 +214,10 @@ export async function renderReview(root, focus) {
         if (blocks[i].querySelector(".diff").hidden) await toggle(i);
         else await load(i);
         if (document.querySelector("#app").dataset.sheet === "context") document.querySelector("#app").dataset.sheet = "";
+        if (!blocks[i].isConnected) return;
         blocks[i].querySelector(`[data-thread="${t.index}"]`)?.scrollIntoView({ block: "center" });
+        selectedScroll = stack.scrollTop;
+        select(i);
       };
       async function handle(e) {
         const el = e.target.closest("button,input");

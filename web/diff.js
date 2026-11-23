@@ -101,13 +101,16 @@ function hunks(diff) {
   }
   return out;
 }
-function thread(t) {
-  const comments = t.comments
+export function discussion(t) {
+  return t.comments
     .map(
       (c) =>
         `<div class="th-c"><span class="th-av">${esc(c.author.slice(0, 1).toUpperCase())}</span><div class="th-main"><div class="th-meta"><b>${esc(c.author)}</b>${t.kind === "ai" || t.severity ? `<span class="th-tag">${esc(t.severity || "AI")}</span>` : ""}${t.outdated ? " · Outdated" : ""}<time title="${esc(c.createdAt)}">${esc(ago(c.createdAt))}</time></div><div class="th-body prose">${markdown(c.body)}</div></div></div>`,
     )
     .join("");
+}
+function thread(t) {
+  const comments = discussion(t);
   return `<div class="row-extra" data-thread="${t.index}">${t.resolved ? `<details class="thread"><summary class="th-collapsed"><span class="th-av">${esc(t.comments[0]?.author.slice(0, 1).toUpperCase())}</span><b>Resolved</b><span class="th-snip">${esc(t.comments[0]?.body)}</span>${t.comments.length} comment${t.comments.length === 1 ? "" : "s"} ▸</summary>${comments}</details>` : `<aside class="thread">${comments}</aside>`}</div>`;
 }
 const gutter = (n, side, empty) => `<span class="ln ${side}${empty ? " empty" : ""}">${n ?? ""}</span>`;
