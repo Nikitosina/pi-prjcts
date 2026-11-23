@@ -1,7 +1,7 @@
 import { realpathSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { Type } from "typebox";
-import { findVcsRoot, cli, runCli, type CliResult } from "./vcs.ts";
+import { findVcsRoot, DEFAULT_BASES, cli, runCli, type CliResult } from "./vcs.ts";
 import { plugins } from "./plugins.ts";
 import type { Project } from "./state.ts";
 import { RESPONSE_LIMIT, bytes, ellipsize, fitPrefix } from "./response-limit.ts";
@@ -40,7 +40,6 @@ export type FileStat =
   /** An untracked file past the collection cap: named, not counted. */
   | { kind: "uncounted"; path: string };
 const REV = /^[A-Za-z0-9][A-Za-z0-9._/@-]{0,199}$/;
-const DEFAULT_BASES = ["origin/HEAD", "origin/main", "origin/master", "main", "master"] as const;
 
 type Collected = {
   kind: string;

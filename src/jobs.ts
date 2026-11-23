@@ -139,6 +139,7 @@ async function countedReviews(tx: Tx, job: Job): Promise<ReviewSpend> {
   return spent;
 }
 export type ReadyReport = {
+  files?: string;
   summary: string;
   proof: string[];
   review: string;
@@ -380,6 +381,7 @@ export function planEta(plan: readonly PlanStep[], now = Date.now()): { done: nu
 const WAITING_QUIET_MS = 5 * 60_000;
 const AUTO_CHECKPOINT = "The worker stopped without a Ready report or checkpoint; it may be waiting for a decision.";
 const reportList = (items: readonly string[]) => (items.length ? items.map((item) => `\n- ${item}`).join("") : " none");
+const fileSection = (ready: ReadyReport) => (ready.files ? [`Added / deleted files:\n${ready.files}`] : []);
 const notificationPreview = (report: string, agentId: string, ref: EntryId): string => {
   const pointer = `Report ref: ${ref}; read agents report id=${agentId} ref=${ref}.`;
   return report.length <= 2200
@@ -397,6 +399,7 @@ const jobReportDetails = (job: Job, answer: string, cost: number | null, answerI
     ...(ready
       ? [
           `Summary: ${ready.summary}`,
+          ...fileSection(ready),
           `Proof:${reportList(ready.proof)}`,
           `Review: ${ready.review || "none"}`,
           `Not fixed:${reportList(ready.notFixed.map((item) => `${item.text} (${item.reason})`))}`,
@@ -426,6 +429,7 @@ export function readyText(job: Job): string {
     `PR: ${job.pr ?? "none"}${job.branch ? ` (branch ${job.branch})` : ""}`,
     `Candidate: ${job.candidate ?? "none"}`,
     `Summary: ${ready.summary}`,
+    ...fileSection(ready),
     `Not fixed:${reportList(ready.notFixed.map((item) => `${item.text} (${item.reason})`))}`,
     `Gaps:${reportList(ready.gaps)}`,
     `Details: agents report id=${job.id}; full evidence and closing answer remain in the worker transcript.`,
@@ -475,6 +479,7 @@ export type JobsHost = {
   quotaResetAt?(model: string, now: number): number | undefined;
   /** A turn on this model failed on quota, so new agents and moves skip it for a while. */
   quotaFailed?(model: string): void;
+  readyFiles?(cwd: string, candidate: string, scopeId: string | null): Promise<string>;
   /** Why these proof references cannot back a Ready report, or null. */
   checkProof?(job: Job, refs: readonly string[]): Promise<string | null> | string | null;
   /** Merge a Ready Job's candidate. */
@@ -1220,6 +1225,7 @@ export function createJobs(host: JobsHost) {
             ...(ready
               ? [
                   `Summary: ${ready.summary}`,
+                  ...fileSection(ready),
                   `Proof:${reportList(ready.proof)}`,
                   `Review: ${ready.review || "none"}`,
                   `Not fixed:${reportList(ready.notFixed.map((item) => `${item.text} (${item.reason})`))}`,
@@ -1326,6 +1332,7 @@ export function createJobs(host: JobsHost) {
     ]),
     replay: "safe",
     execute: async (args, api, callContext) => {
+      let files: string | undefined;
       if (args.action === "ready") {
         const current = Object.values((await api.snapshot(Jobs, ROOT_CONVERSATION_ID, callContext))?.jobs ?? {}).find(
           (item) => item.workerConversation === api.conversationId,
@@ -1334,6 +1341,25 @@ export function createJobs(host: JobsHost) {
         if (current && host.checkProof) {
           const problem = await host.checkProof({ ...current, candidate: args.candidate ?? current.candidate }, args.proof ?? []);
           if (problem) return reply(`Not recorded: ${problem}`);
+        }
+        if (current && host.readyFiles) {
+          const candidate = args.candidate ?? current.candidate;
+          files = "unavailable";
+          let timeout: ReturnType<typeof setTimeout> | undefined;
+          try {
+            const cwd = (await api.agent(callContext)).cwd;
+            if (cwd && candidate)
+              files = await Promise.race([
+                host.readyFiles(cwd, candidate, current.scopeId),
+                new Promise<string>((resolve) => {
+                  timeout = setTimeout(() => resolve("unavailable"), 5000);
+                }),
+              ]);
+          } catch {
+            /* Advisory only: a failed read must not prevent Ready. */
+          } finally {
+            clearTimeout(timeout);
+          }
         }
       }
       return reply(
@@ -1386,6 +1412,7 @@ export function createJobs(host: JobsHost) {
           if (!args.summary.trim()) return "ready needs a summary.";
           const gaps = args.gaps ?? [];
           job.ready = {
+            ...(files ? { files } : {}),
             summary: args.summary.trim(),
             proof: args.proof ?? [],
             review: args.review ?? "",

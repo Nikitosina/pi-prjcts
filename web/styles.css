@@ -2041,6 +2041,10 @@ a.pr-link:hover .pr-title {
   margin-bottom: 10px;
   font-size: 13.5px;
 }
+.report-card pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .report-card p {
   margin: 4px 0;
 }

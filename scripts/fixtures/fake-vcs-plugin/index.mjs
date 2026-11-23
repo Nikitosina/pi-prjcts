@@ -90,7 +90,15 @@ export default {
       ...(process.env.FAKE_PLUGIN_UI ? { web: { script: process.env.FAKE_PLUGIN_UI } } : {}),
       vcs: {
         kind: "fake",
-        isRoot: (dir) => existsSync(join(dir, ".fakevcs")),
+        isRoot: (dir) => existsSync(join(dir, ".fakevcs")) || existsSync(join(dir, ".fake-worktree")),
+        ...(process.env.FAKE_OLD_VCS
+          ? {}
+          : {
+              candidateNameStatus: async (root, candidate) => {
+                if (!existsSync(join(root, ".fake-worktree")) || /^0+$/.test(candidate)) throw Error("unreadable");
+                return `A\t${candidate}\nD\told\nM\tedited\n`;
+              },
+            }),
         privateDirs: [".fakevcs"],
         executables: ["fakectl"],
         workerRule: "Fake VCS rule: use fakectl, never git.",

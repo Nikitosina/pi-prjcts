@@ -70,6 +70,8 @@ export type VcsProvider = {
   ): Promise<CodeDiffParts>;
   /** codeDiff honors `helpers.path`; without it the host refuses path narrowing for this kind. */
   codeDiffPath?: true;
+  /** Name-status output between the candidate's merge base with the provider's base branch and candidate (no working changes). Throw on failure. */
+  candidateNameStatus?(root: string, candidate: string): Promise<string>;
   /** Branch, head and status lines of a worker worktree. */
   workerState(root: string): Promise<{ branch: string; head: string; status: string }>;
   /** Resolves and authorizes an existing branch (or PR) for a new worker thread to continue. */

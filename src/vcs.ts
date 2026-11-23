@@ -7,6 +7,14 @@ import type { Project } from "./state.ts";
 /** What a project-scoped lookup needs of the project: the plugins it turned off are not asked about a folder. */
 type ProjectScope = Pick<Project, "id" | "disabledPlugins">;
 
+export const DEFAULT_BASES = [
+  "refs/remotes/origin/HEAD",
+  "refs/remotes/origin/main",
+  "refs/remotes/origin/master",
+  "refs/heads/main",
+  "refs/heads/master",
+] as const;
+
 /** Version-control binaries. */
 export const cli = {
   git: () => "/usr/bin/git",
