@@ -1,0 +1,85 @@
+<!doctype html>
+<!-- PROTOTYPE: inline PR / diff viewer variants inside the real pi-prjcts shell. Run: node ui-prototype-diff/serve.mjs -->
+<html lang="en" data-theme="claude" data-font="jetbrains-mono" data-chat-size="default" data-motion="subtle">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PROTOTYPE · PR viewer · pi-prjcts</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/proto/proto.css" />
+    <script src="/proto/data-diff.js"></script>
+    <script type="module" src="/proto/app.js"></script>
+  </head>
+  <body>
+    <div id="app" data-list="1" data-context="1" data-statusline="1">
+      <header id="topbar">
+        <button type="button" class="icon-btn" data-cmd="toggle-list" aria-label="Toggle list">
+          <span aria-hidden="true">☰</span><kbd>[</kbd>
+        </button>
+        <div class="crumbs" id="crumbs"><b>pi-prjcts</b><span class="sep">/</span><span>Main</span></div>
+        <button type="button" id="status-pill" class="pill" data-tone="needs">
+          <span class="dot" aria-hidden="true"></span><span class="pill-text">1 ready for review</span>
+        </button>
+        <div class="top-actions">
+          <button type="button" class="ghost-btn"><span aria-hidden="true">⌕</span><span class="label">Search</span><kbd>⌘K</kbd></button>
+          <button type="button" class="icon-btn" aria-label="Host agent"><span aria-hidden="true">✦</span><kbd>\</kbd></button>
+          <button type="button" class="icon-btn" data-cmd="toggle-context" aria-label="Toggle context panel">
+            <span aria-hidden="true">◫</span><kbd>]</kbd>
+          </button>
+          <button type="button" class="icon-btn" aria-label="Settings"><span aria-hidden="true">⚙</span><kbd>⌘,</kbd></button>
+        </div>
+      </header>
+      <nav id="list" aria-label="Projects and chats">
+        <div class="list-head">
+          <button type="button" class="new-btn"><span aria-hidden="true">＋</span> New project</button>
+        </div>
+        <div id="tree" role="tree" aria-label="Projects">
+          <div class="tree-project selected" role="group">
+            <button type="button" role="treeitem" aria-expanded="true" class="tree-head">
+              <span class="chev" aria-hidden="true">▾</span><span class="dot ready" aria-hidden="true"></span
+              ><span class="name">pi-prjcts</span>
+            </button>
+            <div class="tree-children">
+              <div class="tree-row" role="none">
+                <button type="button" role="treeitem" class="tree-chat current" aria-current="true">
+                  <span class="dot idle" aria-hidden="true"></span><span class="name">Main</span>
+                </button>
+              </div>
+              <div class="tree-row" role="none">
+                <button type="button" role="treeitem" class="tree-chat">
+                  <span class="dot idle" aria-hidden="true"></span><span class="name">Arc plugin sync</span>
+                </button>
+              </div>
+              <button type="button" role="treeitem" class="tree-chat tree-memory">
+                <span class="node-icon" aria-hidden="true">◆</span><span class="name">Memory</span>
+              </button>
+              <button type="button" class="tree-chat tree-new">
+                <span class="node-icon" aria-hidden="true">＋</span><span class="name">New chat</span>
+              </button>
+            </div>
+          </div>
+          <div class="tree-project" role="group">
+            <button type="button" role="treeitem" aria-expanded="false" class="tree-head">
+              <span class="chev" aria-hidden="true">▸</span><span class="dot idle" aria-hidden="true"></span
+              ><span class="name">vibe-ios</span>
+            </button>
+          </div>
+        </div>
+      </nav>
+      <main id="center" aria-label="Focus"></main>
+      <aside id="context" aria-label="Context panel"></aside>
+      <footer id="statusline" aria-label="Status line">
+        <span class="sl-item"><span class="sl-dot" aria-hidden="true"></span>idle</span><span class="sl-item mono">gpt-5.5</span
+        ><span class="sl-item mono sl-think">think medium</span
+        ><span class="sl-item mono"
+          >ctx 31k/272k <span class="sl-bar"><span style="width: 11%"></span></span> 11%</span
+        ><span class="sl-item sl-cost mono">$0.412 chat</span><span class="grow"></span><span class="sl-item mono ok">● connected</span
+        ><span class="sl-item hint"><kbd>⌘K</kbd> commands <kbd>?</kbd> in settings</span>
+      </footer>
+    </div>
+    <nav id="proto-bar" aria-label="Prototype variants"></nav>
+    <dialog id="proto-dialog"></dialog>
+    <div id="toasts" role="status" aria-live="polite"></div>
+    <div id="popover" role="tooltip" hidden></div>
+  </body>
+</html>
