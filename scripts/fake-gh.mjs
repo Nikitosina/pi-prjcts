@@ -161,6 +161,8 @@ if (method === "POST" && parts[0] === "graphql") {
       merged: item.merged === true,
       isDraft: item.draft === true,
       headRefName: item.head,
+      baseRefName: item.base ?? "main",
+      baseRefOid: item.baseRefOid,
       headRefOid: item.sha ?? head(item.head),
       mergeable: item.mergeable ?? "MERGEABLE",
       mergeStateStatus: item.mergeState ?? "CLEAN",
@@ -171,11 +173,21 @@ if (method === "POST" && parts[0] === "graphql") {
       latestOpinionatedReviews: { nodes: (item.opinions ?? []).map((value) => ({ state: value })) },
       reviewThreads: {
         nodes: (item.threads ?? []).map((thread) => ({
+          diffSide: "RIGHT",
           isResolved: thread.resolved === true,
           isOutdated: false,
           path: thread.path ?? "a.txt",
           line: thread.line ?? 1,
-          comments: { nodes: [{ author: { login: thread.user ?? "rev" }, body: thread.body ?? "" }] },
+          comments: {
+            nodes: [
+              {
+                author: { login: thread.user ?? "rev" },
+                createdAt: thread.createdAt ?? "2026-11-23T09:40:00Z",
+                commit: { oid: item.sha },
+                body: thread.body ?? "",
+              },
+            ],
+          },
         })),
       },
       commits: {
@@ -209,7 +221,7 @@ if (method === "POST" && parts[0] === "graphql") {
       });
     const item = state.pulls.find((value) => value.number === vars.number);
     if ((state.graphql?.failNumbers ?? []).includes(vars.number)) stop("GraphQL: boom", [{ message: "boom" }]);
-    reply({ repository: { pullRequest: item ? node(item, kind === "detail") : null } });
+    reply({ repository: { databaseId: repo.id, pullRequest: item ? node(item, kind === "detail") : null } });
   }
   const number = Number(/^PR_(\d+)$/.exec(vars.id ?? "")?.[1]),
     item = state.pulls.find((value) => value.number === number);

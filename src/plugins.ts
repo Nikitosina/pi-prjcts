@@ -338,6 +338,16 @@ export const plugins = {
       return [
         guarded(item.plugin, "prs", provider, {
           applies: (project) => !disabledIn(project, plugin) && provider.applies(project),
+          review: provider.review
+            ? {
+                capabilities: provider.review.capabilities,
+                authorize: (p) => run(p, () => provider.review!.authorize(p)),
+                snapshot: (p, id, observed) => run(p, () => provider.review!.snapshot(p, id, observed)),
+                files: (p, id, r) => run(p, () => provider.review!.files(p, id, r)),
+                fileDiff: (p, id, path, r) => run(p, () => provider.review!.fileDiff(p, id, path, r)),
+                fileLines: (p, id, path, sha, from, count) => run(p, () => provider.review!.fileLines(p, id, path, sha, from, count)),
+              }
+            : undefined,
           list: (project, options) => run(project, () => provider.list(project, options)),
           touching: provider.touching ? (project) => run(project, () => provider.touching!(project)) : undefined,
           detail: (project, id) => run(project, () => provider.detail(project, id)),

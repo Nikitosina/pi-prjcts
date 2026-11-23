@@ -329,7 +329,43 @@ export type PrDetailData = {
   draft?: boolean;
   review?: PrCardData["review"];
 };
+export type PrCheck = { name: string; result: string };
+export type PrIteration = { head: string; base: string; checks?: PrCheck[] };
+export type PrRange = { base: string; head: string };
+export type PrFile = { path: string; status: string; blob: string; stats?: { additions: number; deletions: number } };
+export type PrReviewThread = {
+  path: string;
+  side: "LEFT" | "RIGHT";
+  line: number | null;
+  commit: string | null;
+  resolved: boolean;
+  outdated: boolean;
+  comments: { author: string; body: string; createdAt?: string }[];
+  severity?: string;
+  kind?: "ai" | "human";
+};
+export type PrReviewSnapshot = {
+  url?: string;
+  branch?: string;
+  baseBranch?: string;
+  state?: string;
+  title: string;
+  author: string;
+  head: string;
+  iterations: PrIteration[];
+  notice?: string;
+  threads: PrReviewThread[];
+};
+export type PrReviewSource = {
+  capabilities: { viewedSync: boolean; annotations: boolean; issues: boolean; suggestions: boolean };
+  authorize(project: Project): Promise<string>;
+  snapshot(project: Project, id: PrId, observed: readonly string[]): Promise<PrReviewSnapshot>;
+  files(project: Project, id: PrId, range: PrRange): Promise<PrFile[]>;
+  fileDiff(project: Project, id: PrId, path: string, range: PrRange): Promise<string>;
+  fileLines(project: Project, id: PrId, path: string, sha: string, from: number, count: number): Promise<string[]>;
+};
 export type PrProvider = {
+  review?: PrReviewSource;
   id: string;
   /** Shown as the card group and in events ("GitHub", or a plugin's label). */
   label: string;

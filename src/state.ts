@@ -564,6 +564,14 @@ const scheduleTiming = {
     ]),
   ),
 };
+const reviewId = { id: Id, provider: Provider, pr: Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$" }) };
+const reviewSha = Type.String({ pattern: "^[0-9a-f]{40}$" });
+const reviewRange = { ...reviewId, head: reviewSha, since: Type.Optional(reviewSha) };
+const reviewPath = Type.String({
+  minLength: 1,
+  maxLength: 1024,
+  pattern: "^(?!/|:)(?!.*(?:^|/)(?:\\.{1,2})(?:/|$))(?!.*//)(?!.*[/]$)[^\\x00-\\x1f\\x7f\\\\]+$",
+});
 export const Request = Type.Union([
   Type.Object({ action: Type.Literal("remote-reload") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("remote-status") }, { additionalProperties: false }),
@@ -1358,6 +1366,26 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("automation-update"), id: Id, change: AutomationChange }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("webhook-rotate"), id: Id, confirm: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("follow-poll"), id: Id }, { additionalProperties: false }),
+  Type.Object(
+    { action: Type.Literal("pr-review-open"), ...reviewId, seen: Type.Optional(Type.Boolean()) },
+    { additionalProperties: false },
+  ),
+  Type.Object({ action: Type.Literal("pr-review-files"), ...reviewRange }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("pr-review-file"), ...reviewRange, path: reviewPath }, { additionalProperties: false }),
+  Type.Object(
+    {
+      action: Type.Literal("pr-review-lines"),
+      ...reviewRange,
+      path: reviewPath,
+      from: Type.Integer({ minimum: 1, maximum: 10000000 }),
+      count: Type.Integer({ minimum: 1, maximum: 100 }),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { action: Type.Literal("pr-review-viewed"), ...reviewRange, path: reviewPath, viewed: Type.Boolean() },
+    { additionalProperties: false },
+  ),
   Type.Object({ action: Type.Literal("prs"), id: Id, refresh: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
   Type.Object(
     {

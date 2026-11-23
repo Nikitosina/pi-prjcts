@@ -353,10 +353,12 @@ box.addEventListener("click", async (event) => {
 
 // ---------------------------------------------------------------------------------------------------------------- PRs
 
+let reviewProviders = [];
 let prItems = []; // the PR rows on the page, in order: `data-merge-pr` is an index into it
 const merging = new Set(); // provider:id of merge requests being sent
 // Another project's rows must not stay clickable while its PRs load: Merge would pair them with the new project.
 on("select", ({ projectId }) => {
+  if (prItems[0]?.projectId !== projectId) reviewProviders = [];
   if (!prItems.length || prItems[0].projectId === projectId) return;
   prItems = [];
   renderPrs();
@@ -383,7 +385,7 @@ function prRow(pr, index) {
     blocked = mergeBlocked(pr),
     busy = merging.has(prKey(pr));
   const head = `<span class="mono">${esc(pr.ref ?? `#${pr.id ?? ""}`)}</span><span class="pr-title">${esc(clip(pr.title ?? "", 70))}</span>`;
-  return `<div class="pr-row">${href ? `<a class="pr-link" href="${esc(href)}" target="_blank" rel="noopener noreferrer" title="${esc(`Open in ${pr.label}`)}">${head}</a>` : `<span class="pr-link">${head}</span>`}<span class="badge">${esc(pr.state ?? pr.status ?? "")}</span><button type="button" class="ghost-btn small" data-merge-pr="${index}" data-pr-key="${esc(prKey(pr))}"${blocked || busy ? " disabled" : ""} title="${esc(blocked ?? (busy ? "Merge request is being sent" : "Ask the Coordinator to merge this PR"))}">Merge</button></div>`;
+  return `<div class="pr-row">${href ? `<a class="pr-link" href="${esc(href)}" target="_blank" rel="noopener noreferrer" title="${esc(`Open in ${pr.label}`)}">${head}</a>` : `<span class="pr-link">${head}</span>`}<span class="badge">${esc(pr.state ?? pr.status ?? "")}</span>${pr.canReview ? `<button type="button" class="ghost-btn small" data-review-pr="${index}">Review</button>` : ""}<button type="button" class="ghost-btn small" data-merge-pr="${index}" data-pr-key="${esc(prKey(pr))}"${blocked || busy ? " disabled" : ""} title="${esc(blocked ?? (busy ? "Merge request is being sent" : "Ask the Coordinator to merge this PR"))}">Merge</button></div>`;
 }
 function renderPrs() {
   const root = document.querySelector("#prs"),
@@ -398,11 +400,16 @@ export async function loadSide() {
   const projectId = state.projectId;
   const prs = await call("prs", { id: projectId }).catch(() => null);
   if (stale(gen)) return;
-  prItems = (prs?.providers ?? [])
-    .flatMap((provider) =>
-      (provider.prs ?? []).map((pr) => ({ ...pr, projectId, provider: provider.provider, label: provider.label ?? provider.provider })),
-    )
-    .slice(0, 12);
+  reviewProviders = (prs?.providers ?? []).filter((p) => p.canReview).map((p) => p.provider);
+  prItems = (prs?.providers ?? []).flatMap((provider) =>
+    (provider.prs ?? []).map((pr) => ({
+      ...pr,
+      projectId,
+      provider: provider.provider,
+      canReview: provider.canReview,
+      label: provider.label ?? provider.provider,
+    })),
+  );
   renderPrs();
 }
 
@@ -480,6 +487,11 @@ function requestMerge(pr) {
   confirm.focus();
 }
 document.querySelector("#prs").addEventListener("click", (event) => {
+  const review = event.target.closest("[data-review-pr]");
+  if (review) {
+    const pr = prItems[Number(review.dataset.reviewPr)];
+    if (pr?.canReview) openReview(pr.provider, pr.id);
+  }
   const merge = event.target.closest("[data-merge-pr]");
   if (merge && !merge.disabled) requestMerge(prItems[Number(merge.dataset.mergePr)]);
 });
@@ -629,4 +641,18 @@ export async function renderWorker(root, id, { steer = false } = {}) {
 on("tiers", () => {
   tiers = null;
   if (state.projectId) void loadJobs();
+});
+
+function openReview(provider, id) {
+  emit("open", { kind: "pr", provider, id });
+}
+export function reviewEntries() {
+  return prItems
+    .filter((p) => p.canReview)
+    .map((p) => ({ id: `review:${prKey(p)}`, label: `Review #${p.id} · ${p.title}`, run: () => openReview(p.provider, p.id) }));
+}
+on("review-reference", (id) => {
+  const provider = prItems.find((p) => p.canReview && p.id === id)?.provider ?? reviewProviders[0];
+  if (provider) openReview(provider, id);
+  else toast("No review provider serves this project.");
 });

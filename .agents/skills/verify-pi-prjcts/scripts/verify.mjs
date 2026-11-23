@@ -180,6 +180,7 @@ function hostEnv(run) {
     PI_PROJECTS_HOST: "1",
     PI_CODING_AGENT_DIR: run.agentDir,
     PI_OFFLINE: "1",
+    ...run.review?.env,
     // Plugins under development load through the env list only; the scratch home has no plugins.json.
     ...(run.plugins?.length ? { PI_PROJECTS_PLUGINS: run.plugins.join(":") } : {}),
     // The host's test seam that holds each cleanup run at its first step, so a journey can watch its progress.
@@ -256,6 +257,10 @@ async function launch() {
     });
     git("add", ".");
     git("commit", "-qm", "seed");
+    if (rest.includes("--review-fixture")) {
+      const { reviewFixture } = await import("../../../../scripts/lib/pr-review-fixture.mjs");
+      run.review = reviewFixture(scratch, run.workspace, repo);
+    }
     // Fake model provider (the only external-model seam): its own detached process group.
     const portFile = join(scratch, "fake-provider.port"),
       providerFd = openSync(run.providerLog, "a");
@@ -1186,6 +1191,73 @@ async function ui2Prompts(run, page, record, dir, sinks) {
 const EXPAND_HISTORY = `document.querySelector('#workers [data-worker-history][aria-expanded="false"]')?.click()`;
 
 const journeys = {
+  async "pr-review"(run, page, record, dir) {
+    if (!run.review) throw Error("launch with --review-fixture");
+    const { advanceReview } = await import("../../../../scripts/lib/pr-review-fixture.mjs");
+    await page.navigate(run.webUrl);
+    await page.waitFor(`!!document.querySelector('[data-review-pr]')`, "PR row");
+    await page.click("[data-review-pr]");
+    await page.waitFor(`document.querySelector('#focus-view')?.innerText.includes('Should holidays count here?')`, "inline thread");
+    await page.shot(dir, "01-unified-thread");
+    await page.click("[data-split]");
+    await page.waitFor(
+      `document.querySelector('.srow .code.del mark') && document.querySelector('.srow .code.add mark') && document.querySelector('.srow .code.empty')`,
+      "split replacement and one-sided rows",
+    );
+    await page.shot(dir, "02-split");
+    await page.press("s");
+    await page.waitFor(`!!document.querySelector('.th-collapsed') && !document.querySelector('.srow')`, "unified resolved discussion");
+    await page.evaluate(`document.querySelector('.th-collapsed').scrollIntoView({block:'center'})`);
+    await page.shot(dir, "03-resolved");
+    await page.click("[data-end]");
+    await page.waitFor(`!!document.querySelector('.expanded-line')`, "expanded context");
+    await page.shot(dir, "04-expanded");
+    await page.press("s");
+    await page.waitFor(`!!document.querySelector('.expanded-line.srow')`, "layout preserved expanded lines");
+    await page.press("s");
+    await page.click('[data-goto="2"]');
+    await page.press("v");
+    await page.waitFor(
+      `document.querySelector('[data-idx="2"] [data-mark]').checked && !!document.querySelector('.current[data-goto="3"]')`,
+      "viewed shortcut marks selected file and advances",
+    );
+    await page.press("k");
+    await page.waitFor(`!!document.querySelector('.current[data-goto="2"]')`, "previous file");
+    await page.press("j");
+    await page.waitFor(`!!document.querySelector('.current[data-goto="3"]')`, "next file");
+    await page.click("[data-jump]");
+    await page.shot(dir, "05-context");
+    await page.press("Escape", { keyCode: 27 });
+    advanceReview(run.review, run.review.second);
+    await page.click("#composer-input");
+    await page.cdp("Input.insertText", { text: "Review #7" });
+    await page.press("Enter", { keyCode: 13, text: "\r" });
+    await page.waitFor(`!!document.querySelector('[data-review-ref="7"]')`, "chat reference");
+    await page.click('[data-review-ref="7"]');
+    await page.waitFor(`!!document.querySelector('[data-since]:not(:disabled)')`, "previous head");
+    await page.click("[data-since]");
+    await page.waitFor(
+      `document.querySelector('.rv-code')?.innerText.includes('days = 7') && document.querySelector('.rv-code')?.innerText.includes('days = 5')`,
+      "interdiff",
+    );
+    await page.shot(dir, "06-since");
+    await page.click("[data-all]");
+    await page.waitFor(`!!document.querySelector('.th-collapsed')`, "all changes restored");
+    await page.evaluate(`document.documentElement.dataset.theme='light'`);
+    await page.shot(dir, "07-light");
+    await page.evaluate(`document.documentElement.dataset.theme='claude'`);
+    await page.cdp("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await page.waitFor(
+      `getComputedStyle(document.querySelector("#context")).visibility === "hidden" && document.querySelector("[data-tree]").offsetWidth > 0`,
+      "narrow layout settled",
+    );
+    await page.shot(dir, "08-narrow");
+    if (await page.evaluate(`document.documentElement.scrollWidth>innerWidth`)) throw Error("narrow overflow");
+    record(
+      "visible",
+      "PR row and chat #7; unified and aligned split, resolved and open threads, expanded gap, since previous head, light and 390px",
+    );
+  },
   // Feature: features/storage.md; failure list: scripts/workspace-cleanup-failures.md (R22).
   async "storage-clean"(run, page, record, dir) {
     // Precondition, not the journey: more than 30 routine runs, so history's oldest-first page cannot hold the next one.

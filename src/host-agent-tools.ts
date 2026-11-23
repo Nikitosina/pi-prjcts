@@ -153,6 +153,11 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
   "webhook-rotate": dangerous("Rotate a project's webhook secret; existing senders stop working."),
   "follow-poll": allow("Poll followed pull requests now."),
   prs: allow("A project's pull requests."),
+  "pr-review-open": allow("Read a PR review snapshot. Leave seen unset."),
+  "pr-review-files": allow("List files at an observed PR head."),
+  "pr-review-file": allow("Read one file diff at an observed PR head."),
+  "pr-review-lines": allow("Read context at an observed PR head."),
+  "pr-review-viewed": exclude("Viewed files belong to the owner."),
   "pr-watch": allow("Watch or unwatch a pull request."),
   "pr-hide": allow("Hide or show a pull request."),
   plugins: allow("Loaded plugins."),
@@ -254,6 +259,8 @@ export function validateCall(action: string, input: unknown): RequestData {
         .join("; ")
         .slice(0, 1500)}`,
     );
+  if (action === "pr-review-open" && "seen" in request && request.seen === true)
+    throw Error("Only the owner can advance the last seen PR head");
   return request as RequestData;
 }
 

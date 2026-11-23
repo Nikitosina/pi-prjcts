@@ -564,11 +564,11 @@ const approvalPattern = /^\[approval ([0-9a-f-]{36})\] The owner (approved|denie
 function ownerMessageHtml(message, className, who, text) {
   const meta = `<div class="msg-meta"><span class="who">${who}</span>${who === "Earlier input" ? "" : `<time>${esc(clock(message.at))}</time>`}</div>`;
   if (message.entryId == null)
-    return `<article class="${className}">${meta}<div class="bubble">${markdown(text)}${imagesHtml(message.images)}</div></article>`;
+    return `<article class="${className}">${meta}<div class="bubble">${chatMarkdown(text)}${imagesHtml(message.images)}</div></article>`;
   const key = `${renderScope}msg:${message.entryId}`,
     open = revealed.has(key);
   const hint = `<button type="button" class="msg-more" data-reveal="${esc(key)}" aria-expanded="${open}">Show more ▾ · ${text.length.toLocaleString("en-US")} chars</button>`;
-  return `<article class="${className}">${meta}<div class="bubble"><div class="msg-body" tabindex="-1">${markdown(text)}</div>${imagesHtml(message.images)}</div>${hint}</article>`;
+  return `<article class="${className}">${meta}<div class="bubble"><div class="msg-body" tabindex="-1">${chatMarkdown(text)}</div>${imagesHtml(message.images)}</div>${hint}</article>`;
 }
 function inputHtml(message, who = "Coordinator") {
   const text = message.text ?? "";
@@ -610,7 +610,7 @@ function itemHtml(item, who = "Coordinator") {
   if (item.kind === "tool-call") return toolRowHtml({ call: item });
   if (item.kind === "message" && item.role === "user") return inputHtml(item, who);
   if (item.kind !== "message") return "";
-  const text = item.text?.trim() ? `<div class="prose">${markdown(item.text)}</div>` : "";
+  const text = item.text?.trim() ? `<div class="prose">${chatMarkdown(item.text)}</div>` : "";
   return `${item.thinking && showThinking() ? thinkingHtml(item.thinking, `th${item.entryId}`) : ""}${text || item.images?.length ? `<article class="msg agent"><div class="msg-meta"><span class="who">${esc(who)}</span><time>${esc(clock(item.at))}</time></div>${text}${imagesHtml(item.images)}</article>` : ""}`;
 }
 /** Thinking is display-only: hiding it changes nothing the model gets. */
@@ -997,6 +997,8 @@ export async function transcriptClick(event, root, rerender, follow) {
     emit("review-approval", review.dataset.reviewApproval);
     return true;
   }
+  const reference = event.target.closest("[data-review-ref]");
+  if (reference) return emit("review-reference", reference.dataset.reviewRef);
   const undo = event.target.closest("[data-memory-undo]");
   if (undo) {
     const gen = state.generation;
@@ -1108,3 +1110,29 @@ feed.addEventListener("click", async (event) => {
     feed.scrollTop = 0;
   }
 });
+
+function chatMarkdown(text) {
+  const html = markdown(text);
+  if (!/#\d/.test(text)) return html;
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  const walker = document.createTreeWalker(template.content, NodeFilter.SHOW_TEXT),
+    nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  for (const node of nodes) {
+    if (node.parentElement?.closest("a,code,pre,button")) continue;
+    const parts = node.data.split(/(?<![\w/&])(#(?:[1-9]\d{0,8}))(?!\w)/);
+    if (parts.length > 1)
+      node.replaceWith(
+        ...parts.map((part, i) => {
+          if (i % 2 === 0) return part;
+          const b = document.createElement("button");
+          b.className = "link-btn";
+          b.dataset.reviewRef = part.slice(1);
+          b.textContent = part;
+          return b;
+        }),
+      );
+  }
+  return template.innerHTML;
+}

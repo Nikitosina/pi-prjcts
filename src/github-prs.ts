@@ -1,3 +1,5 @@
+import { githubReview } from "./github-review.ts";
+
 import { execFile } from "node:child_process";
 import { githubCli } from "./github-authorization.ts";
 import { githubPublishedPullRequests } from "./github-worker.ts";
@@ -283,6 +285,8 @@ const key = (project: Project) => {
 };
 
 export const githubPrProvider: PrProvider = {
+  review: githubReview,
+
   id: "github",
   label: "GitHub",
   watchDocKind: "projects.github-pr-watch",
