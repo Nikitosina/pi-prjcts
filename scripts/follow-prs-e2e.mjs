@@ -1043,6 +1043,11 @@ try {
     for (let i = 0; i < 500 / 20 && !cdpEnded; i++) await delay(20);
     if (!cdpEnded) chrome.kill("SIGTERM");
   }
+  // Chrome helpers can inherit the debugging pipes beyond Browser.close.
+  chrome?.stdio[3]?.destroy();
+  chrome?.stdio[4]?.destroy();
+  chrome?.stdout?.destroy();
+  chrome?.stderr?.destroy();
   await stopHost().catch(() => host.kill("SIGKILL"));
   model.closeAllConnections();
   model.close();

@@ -27,7 +27,7 @@ async function checkout(p: Project) {
   return git;
 }
 const checksFields = `statusCheckRollup{contexts(first:100){totalCount nodes{... on CheckRun{name status conclusion} ... on StatusContext{context state}}}}`;
-const query = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){databaseId pullRequest(number:$number){title author{login} headRefOid baseRefOid timelineItems(last:50,itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT]){nodes{... on HeadRefForcePushedEvent{beforeCommit{oid} afterCommit{oid}}}} commits(last:1){nodes{commit{${checksFields}}}} reviewThreads(first:100){totalCount nodes{path line diffSide isResolved isOutdated comments(first:20){totalCount nodes{author{login} body commit{oid}}}}}}}}`;
+const query = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){databaseId pullRequest(number:$number){title state isDraft headRefName baseRefName author{login} headRefOid baseRefOid timelineItems(last:50,itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT]){nodes{... on HeadRefForcePushedEvent{beforeCommit{oid} afterCommit{oid}}}} commits(last:1){nodes{commit{${checksFields}}}} reviewThreads(first:100){totalCount nodes{path line diffSide isResolved isOutdated comments(first:20){totalCount nodes{author{login} createdAt body commit{oid}}}}}}}}`;
 const nullable = <T extends TSchema>(t: T) => Type.Union([t, Type.Null()]);
 const str = Type.String(),
   oid = Type.String({ pattern: "^[a-f0-9]{40}$" }),
@@ -44,6 +44,10 @@ const check = Type.Object({
 const checks = Type.Object({ statusCheckRollup: nullable(Type.Object({ contexts: nodes(check) })) });
 const metadata = Type.Object({
   title: str,
+  state: str,
+  isDraft: Type.Boolean(),
+  headRefName: str,
+  baseRefName: str,
   author,
   headRefOid: oid,
   baseRefOid: oid,
@@ -56,7 +60,7 @@ const metadata = Type.Object({
       diffSide: Type.Union([Type.Literal("LEFT"), Type.Literal("RIGHT")]),
       isResolved: Type.Boolean(),
       isOutdated: Type.Boolean(),
-      comments: nodes(Type.Object({ body: str, author, commit: nullable(commit) })),
+      comments: nodes(Type.Object({ body: str, createdAt: str, author, commit: nullable(commit) })),
     }),
   ),
 });
@@ -145,6 +149,10 @@ export const githubReview: PrReviewSource = {
       title: pr.title.slice(0, 300),
       author: pr.author?.login ?? "",
       head,
+      branch: pr.headRefName,
+      baseBranch: pr.baseRefName,
+      state: pr.isDraft ? "Draft" : pr.state,
+      url: `https://github.com/${owner}/${name}/pull/${id}`,
       iterations,
       notice: [...notices].join(" "),
       threads: pr.reviewThreads.nodes.map((t) => ({
@@ -155,6 +163,7 @@ export const githubReview: PrReviewSource = {
         resolved: t.isResolved,
         outdated: t.isOutdated,
         comments: t.comments.nodes.map((c) => ({
+          createdAt: c.createdAt,
           author: c.author?.login ?? "unknown",
           body: c.body.length > 2000 ? c.body.slice(0, 1999) + "…" : c.body,
         })),
@@ -164,10 +173,16 @@ export const githubReview: PrReviewSource = {
   async files(p, _id, r) {
     const git = await checkout(p);
     const raw = (await git(...diffArgs, "--raw", "--no-abbrev", "-z", sha(r.base), sha(r.head), "--")).split("\0");
+    const stats = new Map(
+      (await git(...diffArgs, "--numstat", "-z", sha(r.base), sha(r.head), "--")).split("\0").flatMap((line) => {
+        const match = /^(\d+|-)\t(\d+|-)\t(.*)$/s.exec(line);
+        return match && match[1] !== "-" ? [[match[3]!, { additions: Number(match[1]), deletions: Number(match[2]) }] as const] : [];
+      }),
+    );
     const files = [];
     for (let i = 0; i < raw.length - 1; i += 2) {
       const [, , old, blob, status] = raw[i]!.split(" ");
-      files.push({ path: raw[i + 1]!, status: status!, blob: status === "D" ? `deleted:${old}` : blob! });
+      files.push({ ...stats.get(raw[i + 1]!), path: raw[i + 1]!, status: status!, blob: status === "D" ? `deleted:${old}` : blob! });
     }
     return files;
   },

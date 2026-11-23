@@ -161,6 +161,7 @@ if (method === "POST" && parts[0] === "graphql") {
       merged: item.merged === true,
       isDraft: item.draft === true,
       headRefName: item.head,
+      baseRefName: item.base ?? "main",
       baseRefOid: item.baseRefOid,
       headRefOid: item.sha ?? head(item.head),
       mergeable: item.mergeable ?? "MERGEABLE",
@@ -177,7 +178,16 @@ if (method === "POST" && parts[0] === "graphql") {
           isOutdated: false,
           path: thread.path ?? "a.txt",
           line: thread.line ?? 1,
-          comments: { nodes: [{ author: { login: thread.user ?? "rev" }, commit: { oid: item.sha }, body: thread.body ?? "" }] },
+          comments: {
+            nodes: [
+              {
+                author: { login: thread.user ?? "rev" },
+                createdAt: thread.createdAt ?? "2026-11-23T09:40:00Z",
+                commit: { oid: item.sha },
+                body: thread.body ?? "",
+              },
+            ],
+          },
         })),
       },
       commits: {

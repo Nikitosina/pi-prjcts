@@ -1,4 +1,4 @@
-import { esc } from "./format.js";
+import { esc, ago } from "./format.js";
 const JS_RE =
   /(\/\/.*$)|(\/\*.*?\*\/)|("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`?)|\b(const|let|var|function|return|if|else|for|while|of|in|new|throw|try|catch|finally|async|await|import|export|from|default|class|extends|typeof|instanceof|null|undefined|true|false|this|break|continue|switch|case|type|interface|as|void|never|string|number|boolean)\b|\b(\d[\d_.]*)\b|([A-Za-z_$][\w$]*)(?=\()/g;
 const CSS_RE =
@@ -87,47 +87,73 @@ function hunks(diff) {
   const out = [];
   let h = null;
   for (const line of diff.split("\n")) {
-    const match = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+    const match = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/.exec(line);
     if (match) {
-      h = { oldStart: +match[1], newStart: +match[2], lines: [] };
+      h = {
+        oldStart: +match[1],
+        newStart: +match[2],
+        lines: [],
+        header: line.slice(0, line.length - match[3].length),
+        section: match[3].trim(),
+      };
       out.push(h);
     } else if (h && /^[ +-]/.test(line)) h.lines.push(line);
   }
   return out;
 }
-export function thread(t) {
-  return `<aside class="rv-thread"><b>${t.resolved ? (t.outdated ? "Resolved · outdated thread" : "Resolved thread") : t.outdated ? "Outdated thread" : "Review thread"}</b>${t.comments.map((c) => `<p><strong>${esc(c.author)}</strong> ${esc(c.body)}</p>`).join("")}</aside>`;
+function thread(t) {
+  const comments = t.comments
+    .map(
+      (c) =>
+        `<div class="th-c"><span class="th-av">${esc(c.author.slice(0, 1).toUpperCase())}</span><div class="th-main"><div class="th-meta"><b>${esc(c.author)}</b>${t.kind === "ai" || t.severity ? `<span class="th-tag">${esc(t.severity || "AI")}</span>` : ""}${t.outdated ? " · Outdated" : ""}<time title="${esc(c.createdAt)}">${esc(ago(c.createdAt))}</time></div><div class="th-body"><p>${esc(c.body)}</p></div></div></div>`,
+    )
+    .join("");
+  return `<div class="row-extra" data-thread="${t.index}">${t.resolved ? `<details class="thread"><summary class="th-collapsed"><b>✓ Resolved</b><span class="th-snip">${esc(t.comments[0]?.body)}</span>${t.comments.length} comment${t.comments.length === 1 ? "" : "s"} ▸</summary>${comments}</details>` : `<aside class="thread">${comments}</aside>`}</div>`;
+}
+const gutter = (n, side, empty) => `<span class="ln ${side}${empty ? " empty" : ""}">${n ?? ""}</span>`;
+function code(r, lang) {
+  return r
+    ? `<span class="code ${r.t}" data-sign="${r.t === "del" ? "−" : r.t === "add" ? "+" : ""}">${codeHtml(r.text, lang, r.range)}</span>`
+    : '<span class="code empty"></span>';
+}
+function row(l, r, split, lang, extra = "") {
+  const only = r ?? l;
+  return `<div class="drow ${extra} ${split ? "srow" : only.t}">${gutter(l?.o, "o", split && !l)}${split ? code(l, lang) : ""}${gutter(r?.n, "n", split && !r)}${code(split ? r : only, lang)}</div>`;
+}
+export function contextRows(lines, o, n, split, path) {
+  return lines
+    .map((text, i) => {
+      const r = { t: "ctx", text, o: o + i, n: n + i };
+      return row(r, r, split, langOf(path), "expanded-line");
+    })
+    .join("");
 }
 export function renderDiff(diff, path, split, threads) {
   const lang = langOf(path),
     pending = new Set(threads);
-  const cell = (r) =>
-    r ? `<span class="rv-cell ${r.t}"><small>${r.n ?? r.o}</small><code>${codeHtml(r.text, lang, r.range)}</code></span>` : "<span></span>";
-  const row = (l, r) => {
-    const notes = [];
-    for (const t of pending) {
+  let html = "",
+    next = 1,
+    old = 1;
+  function emit(l, r) {
+    html += row(l, r, split, lang);
+    for (const t of pending)
       if (!t.outdated && t.line != null && t.line === (t.side === "LEFT" ? l?.o : r?.n)) {
-        notes.push(thread(t));
+        html += thread(t);
         pending.delete(t);
       }
-    }
-    return `<div class="rv-row${split ? " rv-split" : ""}">${split ? cell(l && { ...l, n: null }) + cell(r) : cell(r ?? l)}</div>${notes.join("")}`;
-  };
-  let html = "",
-    next = 1;
+  }
   for (const h of hunks(diff)) {
-    if (next < h.newStart)
-      html += `<button class="link-btn rv-gap" data-start="${next}" data-end="${h.newStart}">Expand ${h.newStart - next} context lines</button>`;
-    html += `<div class="rv-hunk">@@ −${h.oldStart} +${h.newStart} @@</div>`;
+    const gap = h.newStart - next;
+    html += `<div class="hunk-head compact">${gap > 0 ? `<button class="expand" data-old="${old}" data-start="${next}" data-end="${h.newStart}">↑ ${gap} hidden lines</button>` : ""}<span class="hh-range">${esc(h.header)}</span><span class="hh-sec">${esc(h.section)}</span></div>`;
     for (const r of hunkRows(h)) {
       if (r.n) next = r.n + 1;
-      if (r.t === "ctx") html += row(r, r);
-      else if (!split) html += r.t === "del" ? row(r, null) : row(null, r);
-      else if (r.t === "del") html += row(r, r.pair);
-      else if (!r.pair) html += row(null, r);
+      if (r.o) old = r.o + 1;
+      if (r.t === "ctx") emit(r, r);
+      else if (r.t === "del") emit(r, split ? r.pair : null);
+      else if (!split || !r.pair) emit(null, r);
     }
   }
   if (html && !diff.includes("\n+++ /dev/null\n"))
-    html += `<button class="link-btn rv-gap" data-start="${next}">Read following context</button>`;
+    html += `<div class="hunk-head compact"><button class="expand" data-old="${old}" data-start="${next}">↓ More context</button></div>`;
   return (html || `<pre>${esc(diff || "No textual changes")}</pre>`) + Array.from(pending, thread).join("");
 }

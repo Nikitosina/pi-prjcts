@@ -34,8 +34,9 @@ await kit.run(async () => {
   const files = await read("files", { head: f.first });
   assert.deepEqual(
     files.files.map((x) => x.path),
-    ["calendar.js", "calendar.md", "package-lock.json"],
+    ["calendar.js", "docs/calendar.md", "package-lock.json", "src/workdays.js"],
   );
+  assert.ok(files.files[0].additions > 100 && files.files[0].deletions > 100);
   const path = "calendar.js";
   assert.match((await read("file", { head: f.first, path })).diff, /\+export const days = 7/);
   await read("viewed", { head: f.first, path, viewed: true });

@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 export function reviewFixture(root, workspace, core) {
   const bare = join(root, "review.git"),
     builder = join(root, "contributor"),
@@ -17,15 +17,33 @@ export function reviewFixture(root, workspace, core) {
   const ssh = join(root, "ssh-stub");
   writeFileSync(ssh, `#!/bin/sh\nexec /usr/bin/git-upload-pack "${bare}"\n`, { mode: 0o755 });
   git(workspace, "remote", "add", "origin", url);
+  mkdirSync(join(builder, "docs"));
+  mkdirSync(join(builder, "src"));
+  const year = (weekdays) =>
+    Array.from({ length: 180 }, (_, i) => {
+      const date = new Date(Date.UTC(2026, 0, i + 1));
+      const working = weekdays && date.getUTCDay() % 6 !== 0;
+      return `  "${date.toISOString().slice(0, 10)}": ${working ? '"workday"' : '"closed"'},`;
+    });
+  const calendar = (days, revised) =>
+    [`export const days = ${days};`, "", "export const schedule = {", ...year(revised), "};", ""].join("\n");
+  writeFileSync(join(builder, "calendar.js"), calendar(0, false));
+  git(builder, "add", ".");
+  git(builder, "commit", "-qm", "Seed calendar schedule");
   const base = git(builder, "rev-parse", "HEAD");
   git(builder, "checkout", "-qb", "topic");
-  writeFileSync(join(builder, "calendar.js"), "export const days = 7;\n");
-  writeFileSync(join(builder, "calendar.md"), "Weekly calendar\n");
+  const revised = calendar(7, true).split("\n");
+  revised.splice(10, 0, "  // Regional working hours start here.");
+  // Keep a mid-year gap unchanged across revisions.
+  revised.splice(51, 18, ...calendar(0, false).split("\n").slice(50, 68));
+  writeFileSync(join(builder, "calendar.js"), revised.join("\n"));
+  writeFileSync(join(builder, "docs/calendar.md"), "# Regional calendar\n\nUse local working days for capacity estimates.\n");
+  writeFileSync(join(builder, "src/workdays.js"), "export const isWorkday = (schedule, date) => schedule[date] === 'workday';\n");
   writeFileSync(join(builder, "package-lock.json"), "{}\n");
   git(builder, "add", ".");
   git(builder, "commit", "-qm", "Calendar");
   const first = git(builder, "rev-parse", "HEAD");
-  writeFileSync(join(builder, "calendar.js"), "export const days = 5;\n");
+  writeFileSync(join(builder, "calendar.js"), revised.join("\n").replace("days = 7", "days = 5"));
   git(builder, "commit", "-qam", "Use workdays");
   const second = git(builder, "rev-parse", "HEAD");
   git(builder, "checkout", "-q", "main");
@@ -46,7 +64,10 @@ export function reviewFixture(root, workspace, core) {
         title: "Use workdays in the calendar",
         head: "topic",
         base: "main",
-        threads: [{ path: "calendar.js", line: 1, user: "alice", body: "Should holidays count here?" }],
+        threads: [
+          { path: "calendar.js", line: 1, user: "alice", body: "Should holidays count here?", createdAt: "2026-11-23T09:45:00Z" },
+          { path: "calendar.js", line: 11, resolved: true, user: "mara", body: "The regional boundary now matches the schedule." },
+        ],
       },
     ],
     checks: {},

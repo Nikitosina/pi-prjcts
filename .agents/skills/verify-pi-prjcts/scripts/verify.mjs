@@ -1200,22 +1200,46 @@ const journeys = {
     await page.waitFor(`document.querySelector('#focus-view')?.innerText.includes('Should holidays count here?')`, "inline thread");
     await page.shot(dir, "01-unified-thread");
     await page.click("[data-split]");
-    await page.waitFor(`!!document.querySelector('.rv-split')`, "split");
+    await page.waitFor(
+      `document.querySelector('.srow .code.del mark') && document.querySelector('.srow .code.add mark') && document.querySelector('.srow .code.empty')`,
+      "split replacement and one-sided rows",
+    );
     await page.shot(dir, "02-split");
+    await page.press("s");
+    await page.waitFor(`!!document.querySelector('.th-collapsed') && !document.querySelector('.srow')`, "unified resolved discussion");
+    await page.evaluate(`document.querySelector('.th-collapsed').scrollIntoView({block:'center'})`);
+    await page.shot(dir, "03-resolved");
+    await page.click("[data-end]");
+    await page.waitFor(`!!document.querySelector('.expanded-line')`, "expanded context");
+    await page.shot(dir, "04-expanded");
+    await page.click("[data-jump]");
+    await page.shot(dir, "05-context");
     await page.press("Escape", { keyCode: 27 });
     advanceReview(run.review, run.review.second);
-    await page.click("[data-review-pr]");
+    await page.click("#composer-input");
+    await page.cdp("Input.insertText", { text: "Review #7" });
+    await page.press("Enter", { keyCode: 13, text: "\r" });
+    await page.waitFor(`!!document.querySelector('[data-review-ref="7"]')`, "chat reference");
+    await page.click('[data-review-ref="7"]');
     await page.waitFor(`!!document.querySelector('[data-since]:not(:disabled)')`, "previous head");
     await page.click("[data-since]");
     await page.waitFor(
       `document.querySelector('.rv-code')?.innerText.includes('days = 7') && document.querySelector('.rv-code')?.innerText.includes('days = 5')`,
       "interdiff",
     );
-    await page.shot(dir, "03-since");
+    await page.shot(dir, "06-since");
+    await page.click("[data-all]");
+    await page.waitFor(`!!document.querySelector('.th-collapsed')`, "all changes restored");
+    await page.evaluate(`document.documentElement.dataset.theme='light'`);
+    await page.shot(dir, "07-light");
+    await page.evaluate(`document.documentElement.dataset.theme='claude'`);
     await page.cdp("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
-    await page.shot(dir, "04-narrow");
+    await page.shot(dir, "08-narrow");
     if (await page.evaluate(`document.documentElement.scrollWidth>innerWidth`)) throw Error("narrow overflow");
-    record("visible", "Unified and split, inline thread, since previous head, 390px");
+    record(
+      "visible",
+      "PR row and chat #7; unified and aligned split, resolved and open threads, expanded gap, since previous head, light and 390px",
+    );
   },
   // Feature: features/storage.md; failure list: scripts/workspace-cleanup-failures.md (R22).
   async "storage-clean"(run, page, record, dir) {
