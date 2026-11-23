@@ -1,5 +1,5 @@
 // Agent signals: the glued-words and source-write detectors, the warnings bash and projects_bg_start add, and a long
-// projects_bg_status wait that a queued message ends early. Bare Pi Durable Harness, faux model, temp folders only.
+// projects_bg_wait wait that a queued message ends early. Bare Pi Durable Harness, faux model, temp folders only.
 // Failure cases: scripts/agent-signals-failures.md.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -116,7 +116,7 @@ for (const command of clean) assert.equal(sourceWrites(command).kind, "none", `n
 for (const malformed of ["sed -i 's/a/b x", "python3 <<EOF\nopen('x','w')", "bash -c", "sed", "perl -", "node -e", ""])
   assert.doesNotThrow(() => sourceWrites(malformed), malformed);
 
-// ── Wiring on a Harness: bash and projects_bg_start warn (S8-S10); a long projects_bg_status wait ends on a queued message (Q1-Q6).
+// ── Wiring on a Harness: bash and projects_bg_start warn (S8-S10); a long projects_bg_wait wait ends on a queued message (Q1-Q6).
 const dir = mkdtempSync(join(tmpdir(), "agent-signals-"));
 const work = join(dir, "work");
 mkdirSync(work);
@@ -157,15 +157,16 @@ function route(request) {
     return call("bash", { command: "printf 'a\\n' > f.txt && sed -i.bak 's/a/b/' f.txt && cat f.txt" });
   if (brief === "READ" && !steps.length) return call("bash", { command: "sed -n 1p f.txt" });
   if (brief === "BGEDIT") {
-    if (!steps.length) return call("projects_bg_start", { command: "sed -i.bak 's/b/c/' f.txt", label: "edit" });
-    if (steps.length === 1) return call("projects_bg_status", { id: JSON.parse(result).id, waitSeconds: 30 });
+    if (!steps.length) return call("projects_bg_start", { command: "sleep 1; sed -i.bak 's/b/c/' f.txt", label: "edit" });
+    if (steps.length === 1) return call("projects_bg_wait", { id: JSON.parse(last.content[0].text).id });
   }
   if (brief.startsWith("BGWAIT")) {
     if (!steps.length) return call("projects_bg_start", { command: "sleep 60", label: "long" });
     if (steps.length === 1) waitArgs.id = JSON.parse(result).id;
-    if (steps.length === 1) return call("projects_bg_status", { id: waitArgs.id, waitSeconds: 1801 });
-    if (steps.length === 2) return call("projects_bg_status", { id: waitArgs.id, waitSeconds: 1800 });
-    if (brief === "BGWAIT-FOLLOWUP" && steps.length === 3) return call("projects_bg_status", { id: waitArgs.id, waitSeconds: 3 });
+    if (steps.length === 1) return call("projects_bg_wait", { id: waitArgs.id, waitSeconds: 1801 });
+    if (steps.length === 2)
+      return call("projects_bg_wait", { id: waitArgs.id, ...(brief === "BGWAIT-FOLLOWUP" ? { waitSeconds: 1800 } : {}) });
+    if (brief === "BGWAIT-FOLLOWUP" && steps.length === 3) return call("projects_bg_wait", { id: waitArgs.id, waitSeconds: 3 });
   }
   return fauxAssistantMessage([fauxText("Done.")]);
 }
@@ -208,12 +209,13 @@ try {
   // S10: a background command gets the same warning and still runs.
   await ask("BGEDIT");
   assert.match(of("BGEDIT")[0].text, /\[warn\] .*edit tool/);
+  assert.equal(JSON.parse(of("BGEDIT")[1].text).state, "exited");
   assert.equal(readFileSync(join(work, "f.txt"), "utf8"), "c\n", "the background command ran");
 
   // Q1, Q2, Q5: 1801 s is refused, 1800 s is accepted; a steer ends the wait early with the command still running.
   const waiting = async () =>
     ((await harness.snapshot(LiveDoc, root.id, context))?.tools ?? []).some(
-      (slot) => slot.name === "projects_bg_status" && slot.status === "running",
+      (slot) => slot.name === "projects_bg_wait" && slot.status === "running",
     );
   const steered = await root.submit({ type: "input", content: "BGWAIT" }, context);
   await until(waiting, "the steer wait started");

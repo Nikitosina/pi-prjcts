@@ -5,7 +5,7 @@ as soon as a message is queued for the waiting agent; source edits through bash 
 model-visible warning while the command or message still goes through. Proof: `scripts/agent-signals-e2e.mjs` (Q, S, G) and
 `scripts/jobs-e2e.mjs` (W, G6).
 
-## Queued input during a wait (`src/queued-input.ts`, `projects_bg_status`, `agents wait`)
+## Queued input during a wait (`src/queued-input.ts`, `projects_bg_wait`, `agents wait`)
 - Q1 `waitSeconds` above 120 is refused, so an agent polls a long build every two minutes.
 - Q2 A steer for the waiting agent sits in its inbox until the wait times out (up to 30 minutes), so the owner's or Coordinator's
   message is delayed.
@@ -17,7 +17,7 @@ model-visible warning while the command or message still goes through. Proof: `s
 - Q8 The Coordinator's `agents wait` keeps an owner message waiting for up to 15 minutes.
 
 ## Stall detector (`stallTick` in `src/jobs.ts`)
-- W1 A worker inside a long `projects_bg_status` wait on a background command that keeps printing is reported stalled after
+- W1 A worker inside a long `projects_bg_wait` wait on a background command that keeps printing is reported stalled after
   `stallMinutes`.
 - W2 A worker inside such a wait on a background command that printed nothing for `stallMinutes` is no longer reported.
 

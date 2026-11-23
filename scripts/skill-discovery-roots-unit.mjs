@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, readFileSync, existsSync, writeFileSync } from "node:fs";
+import { chmodSync, renameSync, mkdirSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 // Roots and precedence of the SDK catalog Projects relies on, and that passive discovery never installs a package.
@@ -50,4 +50,16 @@ assert.ok(
   "the opening load still installs, as before",
 );
 assert.equal(shared.description, "projectPi", "project .pi/skills wins a name collision");
+const { effectiveSkills, skillIndex, pruneSkillIndex } = await import("../src/skill-profiles.ts");
+const { listSkills } = await import("../src/coordinator-skills.ts");
+const cached = effectiveSkills(undefined, passive, "worker");
+const moved = "only-homeAgents";
+const oddName = { ...shared, name: "Design Review" };
+const snapshot = [oddName, cached.find((skill) => skill.name === moved)];
+const frozen = skillIndex(snapshot);
+renameSync(join(roots.homeAgents, moved), join(home, moved));
+assert.equal(pruneSkillIndex(frozen, new Map(snapshot.map((skill) => [skill.name, skill]))), skillIndex([oddName]));
+assert.ok(!listSkills(passive).some((s) => s.name === moved));
+assert.ok(!effectiveSkills(undefined, passive, "worker").some((s) => s.name === moved));
+assert.ok(!skillIndex(cached).includes(moved));
 console.log("ok");

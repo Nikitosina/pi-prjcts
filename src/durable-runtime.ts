@@ -50,7 +50,15 @@ import { checkProofRefs, proofTools } from "./proof.ts";
 import { createApprover, describeAcceptance, fileAcceptanceLog, githubMergeProvider } from "./result-acceptance.ts";
 import { pullMainCheckout } from "./main-pull.ts";
 import type { Skill } from "@earendil-works/pi-coding-agent";
-import { effectiveSkills, invokedSkills, skillIndex, SKILL_ROLES, type SkillRole } from "./skill-profiles.ts";
+import {
+  effectiveSkills,
+  invokedSkills,
+  skillIndex,
+  skillPresent,
+  pruneSkillIndex,
+  SKILL_ROLES,
+  type SkillRole,
+} from "./skill-profiles.ts";
 import { readOnlyCodeTools } from "./durable-code-tools.ts";
 import { cleanupWorktrees, worktreeInventory, type WorktreeInventory, type WorktreeItem } from "./worktree-maintenance.ts";
 import { coordinatorArtifactTools } from "./artifacts.ts";
@@ -549,6 +557,7 @@ export type DurableTaskDiagnostics = {
     background: boolean;
     abortRequested: boolean;
   }[];
+  brokenSkills: { name: string; path: string }[];
   totalTasks: number;
   reports: Omit<DurableRuntimeReport, "message">[];
 };
@@ -898,7 +907,8 @@ export async function openDurableProject(input: {
     remember(input.configuredSkillLoader);
     const lookupSkill = async (name: string) => {
       const seen = knownSkills.get(name);
-      if (seen || !input.discoverSkills || !invokedSkills(dir).has(name)) return seen;
+      if (seen) return skillPresent(seen) ? seen : undefined;
+      if (!input.discoverSkills || !invokedSkills(dir).has(name)) return undefined;
       try {
         remember(await input.discoverSkills());
       } catch (error) {
@@ -1042,7 +1052,16 @@ export async function openDurableProject(input: {
       ],
       hooks: [
         hook(GenerationTask, {
-          beforeRequest: (request, api) => observeModelRequest(input, project.id, api.conversationId, request.messages),
+          beforeRequest: (request, api) => {
+            const messages = request.messages.map((message) => {
+              const instructions = message.role === "system" && message.sections?.instructions;
+              if (!instructions) return message;
+              const pruned = pruneSkillIndex(instructions, knownSkills);
+              return pruned === instructions ? message : { ...message, sections: { ...message.sections, instructions: pruned } };
+            });
+            observeModelRequest(input, project.id, api.conversationId, messages);
+            return { messages };
+          },
         }),
         hook(ToolTask, {
           beforeTool: async (call, api) => {
@@ -2904,7 +2923,7 @@ export async function openDurableProject(input: {
         if (skills) {
           // The saved skill profile, not a chat's frozen set: this list is where the owner changes it.
           const effective = new Set(rolesOf(knownLoader, current.skillProfiles)[profile].map((skill) => skill.name));
-          for (const skill of knownLoader?.getSkills().skills ?? [])
+          for (const skill of knownLoader?.getSkills().skills.filter(skillPresent) ?? [])
             skills.tools.push({
               name: `skill:${skill.name}`,
               description: skill.description,
@@ -3004,6 +3023,9 @@ export async function openDurableProject(input: {
             abortRequested: node.abortRequested,
           })),
           totalTasks: nodes.length,
+          brokenSkills: [...knownSkills.values()]
+            .filter((skill) => !skillPresent(skill))
+            .map(({ name, filePath }) => ({ name, path: filePath })),
           reports: [...recentReports],
         };
       },

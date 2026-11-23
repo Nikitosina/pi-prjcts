@@ -11,6 +11,10 @@ Each prompt states the outcome the role owns, not a procedure:
 - Scout: read-only investigation with sources.
 - Reviewer: reads pinned code and reports findings with evidence; never edits.
 
+Report a worker's environment gap (missing CLI or Python module, broken or missing skill, MCP timeout) in one line in your next report. If work needs input only the owner can supply (a design asset, Figma node or account), ask at once with `projects_question` and include a screenshot or visual reference. Don't carry it across reports.
+
+Workers wait for long commands with one `projects_bg_wait` call. It waits up to 1800 seconds by default and returns early on a queued message.
+
 After asking the owner for a decision, the Coordinator ends its turn without acknowledgment-only messages to workers. It still processes new results and failures, but reports to the owner only when the result, blocker or decision changes. Compact handbacks point to `agents report` for the full evidence; a short notification is not proof of acceptance.
 
 A checkpointed worker waits for the Coordinator. It answers, stops or dismisses it, or asks the owner before ending its turn, and never ends a turn saying it continues while nothing it started runs. The host backs this up: an idle chat with waiting workers gets one `[waiting]` notice (see ARCHITECTURE.md, Stall detector).
