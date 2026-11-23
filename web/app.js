@@ -21,7 +21,8 @@ import {
 } from "./tree.js";
 import { currentChat, loadChat, stopTurn, toggleSteer } from "./chat.js";
 import "./sidebar.js";
-import { closeMergeDialog, loadJobs, loadSide, mergeDialogOpen, renderWorker } from "./workers.js";
+import { renderReview } from "./review.js";
+import { reviewEntries, closeMergeDialog, loadJobs, loadSide, mergeDialogOpen, renderWorker } from "./workers.js";
 import { refreshRecentMemory, renderMemoryEntry, renderMemoryList } from "./memory.js";
 import { closeSettings, openSettings, SECTIONS, settingsBack, settingsOpen, showSection } from "./settings.js";
 import {
@@ -151,6 +152,7 @@ function renderFocus() {
   focusView.hidden = false;
   focusView.className = `view focus-${focus.kind}`;
   if (focus.kind === "worker") void renderWorker(focusView, focus.id, { steer: focus.steer });
+  else if (focus.kind === "pr") void renderReview(focusView, focus);
   else if (focus.kind === "memory" && focus.path) void renderMemoryEntry(focusView, focus.path, focus.edit);
   else if (focus.kind === "memory") void renderMemoryList(focusView);
   renderTree();
@@ -189,7 +191,9 @@ function paintCrumbs() {
       ? " › worker"
       : state.focus.kind === "memory"
         ? ` › Memory${state.focus.path ? ` › ${clip(state.focus.path, 40)}` : ""}`
-        : "";
+        : state.focus.kind === "pr"
+          ? ` › PR #${state.focus.id}`
+          : "";
   document.querySelector("#crumbs").innerHTML =
     `<b>${esc(name)}</b>${chat ? `<span class="sep">/</span><span>${esc(chat)}</span>` : ""}<span class="muted">${esc(focus)}</span>`;
   document.title = name ? `${name} · pi-prjcts` : "pi-prjcts";
@@ -337,6 +341,7 @@ on("leave-focus", () => {
 });
 
 setPaletteSource(() => [
+  ...reviewEntries(),
   ...state.projects.flatMap((item) => [
     { id: `p:${item.id}`, label: item.name, hint: "project", run: () => void select(item.id, "main") },
     {

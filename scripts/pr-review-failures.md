@@ -1,0 +1,5 @@
+# Review room failure contracts
+
+Use a fresh temporary project home, a local origin and a stub `gh`. A dirty checkout stays on its branch and keeps staged, unstaged and untracked files when review fetches a private PR ref. A moving remote must not substitute another head for a requested SHA. Files and context must come from commit blobs, never from the worktree. An ordinary push has a head-to-head diff; a changed merge base has a file list and no interdiff. Viewed marks survive unrelated changes, not changes to the marked blob. Invalid PR numbers, traversal, git pathspecs and unbounded line ranges must fail before opening a project runtime. An unavailable provider, excessive output or missing commit must not appear as an empty successful review.
+
+Browser journey: independently listed PRs and chat references open the center. Switching iterations or files cannot display a stale result. Unified and split rows preserve line anchors; provider HTML is text. Expand context at the selected SHA. Check narrow overflow, generated-file collapse and Esc back to chat.

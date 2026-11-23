@@ -161,6 +161,7 @@ if (method === "POST" && parts[0] === "graphql") {
       merged: item.merged === true,
       isDraft: item.draft === true,
       headRefName: item.head,
+      baseRefOid: item.baseRefOid,
       headRefOid: item.sha ?? head(item.head),
       mergeable: item.mergeable ?? "MERGEABLE",
       mergeStateStatus: item.mergeState ?? "CLEAN",

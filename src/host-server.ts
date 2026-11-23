@@ -1,3 +1,4 @@
+import { reviewRead } from "./pr-review.ts";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { createServer } from "node:http";
 import { execFileSync, spawn } from "node:child_process";
@@ -1626,6 +1627,19 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         providers: await (await durable(input.id)).prs(input.refresh === true),
         unloaded: granted && granted !== "github" && !plugins.workspaceProvider(granted) ? [granted] : [],
       };
+    }
+    case "pr-review-open":
+    case "pr-review-files":
+    case "pr-review-file":
+    case "pr-review-lines":
+    case "pr-review-viewed": {
+      const project = loadProject(input.id),
+        provider = plugins.prProvider(input.provider),
+        source = provider?.review;
+      if (!provider?.applies(project) || !source || project.archived || project.deleted)
+        throw Error("Review not available for this project");
+      provider.validateId?.(input.pr);
+      return (await durable(input.id)).withRoot((root) => reviewRead(root, project, source, input));
     }
     case "pr-watch":
     case "pr-hide": {

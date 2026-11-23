@@ -38,3 +38,5 @@ Each file: H1, one paragraph, then exactly four H2s in order: `Sub-features`, `H
 - [Plugins](./plugins.md) — a plugin under development on the private host (`launch --plugin`), its row in the Plugins section and the `plugins` RPC. Scripted.
 - [UI 2.0 Prompt blocks](./ui2-prompts.md) — Settings → Prompt: block list with switches, badges and tokens, one editor, custom blocks, reorder, restore default, drafts, stale-write conflicts, preview, Host agent, 390 px. Scripted.
 - [Storage and Clean up](./storage.md) — Settings → Storage rows and the Clean up button ending with its run summary. Scripted.
+
+`pr-review`: launch with `--review-fixture`, doctor, then drive `pr-review`. A local contributor checkout and stub gh supply two heads, three files and an inline review thread. Captures unified, split, since-you-looked and 390 px.

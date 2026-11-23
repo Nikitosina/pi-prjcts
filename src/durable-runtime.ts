@@ -2761,6 +2761,7 @@ export async function openDurableProject(input: {
               return {
                 provider: monitor.provider.id,
                 label: monitor.provider.label,
+                canReview: !!monitor.provider.review,
                 urlTemplate: monitor.provider.url("{id}", current),
                 ticketTemplate: monitor.provider.ticketUrl?.("{key}") ?? null,
                 ...listing,

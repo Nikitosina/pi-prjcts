@@ -180,6 +180,7 @@ function hostEnv(run) {
     PI_PROJECTS_HOST: "1",
     PI_CODING_AGENT_DIR: run.agentDir,
     PI_OFFLINE: "1",
+    ...run.review?.env,
     // Plugins under development load through the env list only; the scratch home has no plugins.json.
     ...(run.plugins?.length ? { PI_PROJECTS_PLUGINS: run.plugins.join(":") } : {}),
     // The host's test seam that holds each cleanup run at its first step, so a journey can watch its progress.
@@ -256,6 +257,10 @@ async function launch() {
     });
     git("add", ".");
     git("commit", "-qm", "seed");
+    if (rest.includes("--review-fixture")) {
+      const { reviewFixture } = await import("../../../../scripts/lib/pr-review-fixture.mjs");
+      run.review = reviewFixture(scratch, run.workspace, repo);
+    }
     // Fake model provider (the only external-model seam): its own detached process group.
     const portFile = join(scratch, "fake-provider.port"),
       providerFd = openSync(run.providerLog, "a");
@@ -315,6 +320,7 @@ async function launch() {
       expectedRevision: settings.revision,
       changes: { models: { worker: "fake/fake-model", scout: "fake/fake-model", reviewer: "fake/fake-model" } },
     });
+    if (run.review) git("config", `url.${run.review.bare}.insteadOf`, run.review.url);
     run.projectId = project.id;
     run.webUrl = (await rpc(run, { action: "web" })).url;
     saveRun(run);
@@ -1186,6 +1192,32 @@ async function ui2Prompts(run, page, record, dir, sinks) {
 const EXPAND_HISTORY = `document.querySelector('#workers [data-worker-history][aria-expanded="false"]')?.click()`;
 
 const journeys = {
+  async "pr-review"(run, page, record, dir) {
+    if (!run.review) throw Error("launch with --review-fixture");
+    const { advanceReview } = await import("../../../../scripts/lib/pr-review-fixture.mjs");
+    await page.navigate(run.webUrl);
+    await page.waitFor(`!!document.querySelector('[data-review-pr]')`, "PR row");
+    await page.click("[data-review-pr]");
+    await page.waitFor(`document.querySelector('#focus-view')?.innerText.includes('Should holidays count here?')`, "inline thread");
+    await page.shot(dir, "01-unified-thread");
+    await page.click("[data-split]");
+    await page.waitFor(`!!document.querySelector('.rv-split')`, "split");
+    await page.shot(dir, "02-split");
+    await page.press("Escape", { keyCode: 27 });
+    advanceReview(run.review, run.review.second);
+    await page.click("[data-review-pr]");
+    await page.waitFor(`!!document.querySelector('[data-since]:not(:disabled)')`, "previous head");
+    await page.click("[data-since]");
+    await page.waitFor(
+      `document.querySelector('.rv-code')?.innerText.includes('days = 7') && document.querySelector('.rv-code')?.innerText.includes('days = 5')`,
+      "interdiff",
+    );
+    await page.shot(dir, "03-since");
+    await page.cdp("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await page.shot(dir, "04-narrow");
+    if (await page.evaluate(`document.documentElement.scrollWidth>innerWidth`)) throw Error("narrow overflow");
+    record("visible", "Unified and split, inline thread, since previous head, 390px");
+  },
   // Feature: features/storage.md; failure list: scripts/workspace-cleanup-failures.md (R22).
   async "storage-clean"(run, page, record, dir) {
     // Precondition, not the journey: more than 30 routine runs, so history's oldest-first page cannot hold the next one.
