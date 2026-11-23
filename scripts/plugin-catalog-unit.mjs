@@ -23,13 +23,14 @@ try {
     [
       ["tasks", "available"],
       ["simulator", "available"],
+      ["network-gate", "available"],
     ],
     "2 both listed as available",
   );
   assert.ok(entry("tasks").name && entry("tasks").description, "2 name and description without loading");
   assert.equal(plugins.status().length, 0, "1 listing loaded nothing");
   assert.ok(
-    BUNDLED_PLUGINS.every((item) => existsSync(join(item.directory, "index.ts"))),
+    BUNDLED_PLUGINS.every((item) => ["index.ts", "index.mjs"].some((entry) => existsSync(join(item.directory, entry)))),
     "5 every entry is a directory shipped in this checkout",
   );
 

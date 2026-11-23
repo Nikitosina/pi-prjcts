@@ -4,6 +4,8 @@ A plugin is a module the host loads at its start to add capabilities: RPC method
 
 Core ships Git and GitHub only. GitHub is the built-in `github` plugin (see [The built-in GitHub plugin](#the-built-in-github-plugin)); no config. Other checkout kinds and PR services (an internal VCS, GitLab, ...) are separate plugins loaded at host start. Bundled: `plugins/simulator` (iOS simulators per project; not loaded unless configured) and `plugins/tasks` (a task list per project and chat for the Coordinator with a right-panel section; not loaded unless configured).
 
+Optional host plugin: [Network gate](docs/network-gate-proposal.md) pauses projects on corporate VPN loss. Activate it in Settings → Plugins.
+
 ## Author guide
 
 Start with [`docs/plugins/README.md`](docs/plugins/README.md):

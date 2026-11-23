@@ -400,7 +400,7 @@ export type DurableProjectRuntime = {
     }
   >;
   /** Stop admitting work and pause every running agent; they continue after `resume`. */
-  pause(): Promise<{ paused: boolean }>;
+  pause(plugin?: { name: string; claim: string }): Promise<{ paused: boolean }>;
   resume(): Promise<{ paused: boolean }>;
   worktrees(): Promise<WorktreeInventory>;
   /** What the project keeps on disk, per kind, and what the cleanup routine would free now. */
@@ -2602,12 +2602,12 @@ export async function openDurableProject(input: {
           generations: generations.slice(-10).map(({ phase, state, terminal, outcome }) => ({ phase, state, terminal, outcome })),
         };
       },
-      pause: async () => {
+      pause: async (plugin) => {
         follow.abort();
         commands.abort();
         await schedules.mutex.run(async () => {
           dispatchReady = false;
-          await jobs.pause(openedHarness);
+          await jobs.pause(openedHarness, plugin);
         });
         await (await openedHarness.conversation(root.id, context))?.abort(context, { background: true });
         await abortChats(openedHarness);

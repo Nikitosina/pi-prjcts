@@ -15,6 +15,7 @@ import type {
   FollowProvider,
   MergeProvider,
   HostPluginApi,
+  ProjectPauseControl,
   PluginCapabilities,
   PluginModule,
   PluginRoute,
@@ -684,6 +685,8 @@ function conflict(name: string, caps: PluginCapabilities, builtIn: boolean): str
 const provides = (caps: PluginCapabilities) =>
   (Object.keys(caps) as Array<keyof PluginCapabilities>).filter((key) => caps[key] !== undefined);
 
+let projectControl: ((name: string) => ProjectPauseControl) | undefined;
+
 async function hostApi(name: string, stage: PluginCapabilities): Promise<HostPluginApi> {
   const { Jobs } = await import("./jobs.ts");
   const stateDir = join(home(), "plugins", name);
@@ -699,6 +702,7 @@ async function hostApi(name: string, stage: PluginCapabilities): Promise<HostPlu
       }
     },
     projects: {
+      ...(projectControl && { control: projectControl(name) }),
       load: loadProject,
       list: listProjects,
       dir: projectDir,
@@ -808,7 +812,8 @@ function retakePauses() {
 }
 
 /** Loads every configured plugin once per host process; later callers share the result. Never throws. */
-export function loadPlugins(): Promise<PluginStatus[]> {
+export function loadPlugins(control?: (name: string) => ProjectPauseControl): Promise<PluginStatus[]> {
+  if (control) projectControl = control;
   return (loading ??= (async () => {
     for (const item of BUNDLED) statuses.push(await loadOne(BUILT_IN, item.path, true));
     for (const item of configured()) {

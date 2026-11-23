@@ -55,7 +55,7 @@ await kit.run(async () => {
   const first = await rpc({ action: "plugin-catalog" });
   check(
     "2 both listed as available",
-    first.entries.map((item) => `${item.id}:${item.state}`).join() === "tasks:available,simulator:available",
+    first.entries.map((item) => `${item.id}:${item.state}`).join() === "tasks:available,simulator:available,network-gate:available",
     first,
   );
   check("14 the private host's config is the temp one", kit.home.startsWith(kit.root) && config().keep === "me");
