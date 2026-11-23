@@ -254,6 +254,19 @@
   font-size: 11px;
   margin-bottom: 0;
 }
+.simulator-panel .simulator-categories {
+  margin: 12px 0 0;
+  min-width: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  font-size: 12px;
+}
+.simulator-panel .simulator-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(98px, 1fr));
+  gap: 6px;
+  margin-bottom: 10px;
+}
 .simulator-panel .simulator-facts dt {
   color: var(--muted);
 }

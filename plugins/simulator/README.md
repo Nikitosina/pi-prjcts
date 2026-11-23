@@ -30,3 +30,5 @@ The cleanup routine's plugin step erases idle owned clones, deletes the parallel
 Rotation: `rotate.swift` sends the device-orientation event to the clone (headless, no Simulator.app window); it is compiled with `xcrun swiftc` on first use into the ignored `.build/`.
 
 Failure cases: `FAILURES.md`. Panel design notes: `NOTES.md`.
+
+In **Details → Keep services enabled**, select the simslim categories the project needs, then save. For example, `photos` keeps the photo picker working and `search` keeps Recents in Files and the document picker working. The choice applies on the next create, boot or reset, not to running clones immediately. With no categories selected the plugin uses the default full slimming. Exclusions require simslim 0.15.0 or later. `projects_simulator_status` reports the saved `keepCategories` separately from each booted clone's current slimming status.

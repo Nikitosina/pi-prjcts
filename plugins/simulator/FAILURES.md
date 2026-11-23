@@ -118,3 +118,5 @@ Layout refresh (written before the change; the e2e covers each):
 - S16 An icon-only button has no accessible name, or its name is only a hover tooltip. Every icon-only button has an `aria-label` and a matching `title`; clone tabs say their state in text, not only by a colour dot.
 - S17 Errors, an unknown outcome or Retry exact request end up inside the Details disclosure or the menu. They stay visible in the primary view.
 - S18 At 390 px the panel overflows sideways or pushes its controls out of view. The toolbar wraps inside the card and every control stays on screen.
+
+- S19 A project's saved simslim categories are ignored at create, boot or reset, or a successful boot with the 0.15.0 `partially slim` verdict is recorded as uncertain. The panel saves photos and search, shows the saved setting and the fake CLI records the exact arguments for each operation. Without exclusions boot still requests and confirms full slimming.
