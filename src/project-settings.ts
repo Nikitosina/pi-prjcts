@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { DEFAULT_REVIEW_RECHECKS, DEFAULT_STALL_MINUTES, type Project, type Request } from "./state.ts";
+import { plugins } from "./plugins.ts";
 import { PROFILE_IDS } from "./profiles.ts";
 import { normalizePromptBlocks, PROJECT_PROMPT_TARGETS, type ProjectPromptBlocks } from "./prompt-blocks.ts";
 
@@ -36,8 +37,8 @@ export function projectSettings(project: Project) {
 /** Why this project's workers cannot be verified whatever the settings say, or null. */
 export function verificationProviderProblem(project: Project): string | null {
   const provider = project.workspaceAuthorization?.provider;
-  return provider && provider !== "github"
-    ? `Verification covers git workspaces. The "${provider}" workspace provider keeps its shell policy in its plugin, which verifiers cannot use, so its workers are not verified`
+  return provider && provider !== "github" && typeof plugins.workspaceProvider(provider)?.verificationHead !== "function"
+    ? `The "${provider}" workspace provider does not supply verificationHead; verification is unavailable`
     : null;
 }
 export function updateProjectSettings(project: Project, input: Update): Project {

@@ -81,7 +81,7 @@ import { mcpPool } from "./mcp-servers.ts";
 import type { DurableRole, DurableGenerationLifecycleObserver } from "./durable-types.ts";
 export type { DurableGenerationLifecycle, DurableGenerationLifecycleObserver } from "./durable-types.ts";
 import { loadDurableStanding, loadInstanceInstructions } from "./durable-standing.ts";
-import { durableWorkspaceBinding, verifierShell } from "./durable-workspace-binding.ts";
+import { durableWorkspaceBinding, verificationHead, verifierShell } from "./durable-workspace-binding.ts";
 import { commandExecution, commandIntentsSnapshot, commandIntentInspect } from "./command-runtime.ts";
 import { ensureKnowledge, historyKnowledge, readKnowledge, writeKnowledge } from "./knowledge.ts";
 import { findMemory, preferencesText } from "./memory.ts";
@@ -139,7 +139,7 @@ import {
   type DurableInspection,
   type Project,
 } from "./state.ts";
-import { catalog } from "./workspace-authorization.ts";
+import { authorizationFingerprint, catalog } from "./workspace-authorization.ts";
 import { providerFailure, QUOTA_RETRY_BASE_MS, unansweredReason, type ProviderFailure } from "./provider-failure.ts";
 import { AdmissionMutex, scheduleRuntime, type DurableScheduleSnapshot } from "./durable-schedule.ts";
 import { followRuntime } from "./durable-follow.ts";
@@ -1171,12 +1171,33 @@ export async function openDurableProject(input: {
       throw new Error("Project runtime is not open");
     };
     // Verification runs: trusted runs on the candidate, tied to its commit, under the worker's own shell policy.
+    const verificationGuards = new Map<string, { cwd: string; guard: (command: string) => string; grant: string }>();
     const proof = proofTools({
       projectId: project.id,
       controlRoot: dir,
       background,
       leases: hostLeases,
-      shell: (job, cwd) => verifierShell(loadProject(project.id), job.scopeId ?? "", cwd, job.branch),
+      readHead: (cwd) => verificationHead(loadProject(project.id), cwd),
+      shell: async (job, cwd) => {
+        const current = loadProject(project.id),
+          bound = verificationGuards.get(job.id);
+        if (job.workspace && current.workspaceAuthorization?.provider !== "github" && current.workspaceAuthorization) {
+          const target = await taskWorkspaces.validate({
+            threadId: job.id,
+            conversationId: Number(job.workerConversation),
+            workId: job.id,
+            taskText: job.request,
+          });
+          return verifierShell(current, job.scopeId ?? "", cwd, job.branch, target.cwd === cwd ? target.guard : undefined);
+        }
+        return verifierShell(
+          current,
+          job.scopeId ?? "",
+          cwd,
+          job.branch,
+          bound?.cwd === cwd && bound.grant === authorizationFingerprint(current) ? bound.guard : undefined,
+        );
+      },
       isClosed: () => closed,
       caches,
     });
@@ -1411,6 +1432,12 @@ export async function openDurableProject(input: {
           configured: agent.prepared,
           ...(continued ? { continueBranch: continued } : {}),
         });
+        if (environment.verificationGuard)
+          verificationGuards.set(job.id, {
+            cwd: environment.cwd,
+            guard: environment.verificationGuard,
+            grant: authorizationFingerprint(project),
+          });
         registry.install(environment.extension);
         const base = agentSetup({ role: "worker", jobId: job.id });
         return {
@@ -1427,6 +1454,7 @@ export async function openDurableProject(input: {
       },
       killProcesses: async (ids) => {
         const threads = await threadsOf(ids);
+        for (const id of threads) verificationGuards.delete(id);
         await Promise.all([...threads].map((id) => background.killThread(id)));
         hostLeases.releaseWhere((holder) => ownLease()(holder) && threads.has(holder.threadId));
         await Promise.all([...threads].map((id) => taskWorkspaces.closeThread(id)));

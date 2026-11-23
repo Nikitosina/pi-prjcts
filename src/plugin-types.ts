@@ -233,6 +233,8 @@ export type WorkspaceProvider = {
   /** Names, branch and base of a worker worktree: frozen with the receipt on first allocation, then reused. */
   plan(context: BindContext): Promise<AllocationPlan>;
   attach(context: AttachContext): Promise<WorkerAttachment>;
+  /** Opts in to verification with the bound worker shell guard. Read the full current commit from the worktree; throw if unreadable. */
+  verificationHead?(workDir: string): Promise<string>;
   /** Explicit chat ownership, without worker publication policy or a fabricated Job. */
   coordinator?: {
     plan(context: CoordinatorBindContext): Promise<AllocationPlan>;

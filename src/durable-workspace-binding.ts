@@ -1,3 +1,4 @@
+import { readHead, type HeadRead } from "./vcs.ts";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
@@ -340,6 +341,7 @@ export function durableWorkspaceBinding(input: {
     const artifacts = whole ? ensureArtifactDir(input.controlRoot, request.threadId) : undefined;
     const cache = whole ? input.caches?.forIntent(intentId) : undefined;
     let pluginNotes = "";
+    let verificationGuard: ((command: string) => string) | undefined;
     if (whole) {
       // Plugin worker tools freeze with the thread: a bound thread keeps exactly what it had; only new threads follow the plugin's offer.
       for (const provider of plugins.workerTools()) {
@@ -366,6 +368,7 @@ export function durableWorkspaceBinding(input: {
         publication,
         attachmentGuard: attachment?.guard,
       });
+      if (plug?.verificationHead && typeof attachment?.guard === "function") verificationGuard = guard;
       const builtins = coordinatorExecutionTools({
         controlRoot: input.controlRoot,
         cache: input.caches?.forCwd,
@@ -425,6 +428,7 @@ export function durableWorkspaceBinding(input: {
     const handover = `${thread.continueBranch ? `\nThis worktree continues the existing branch ${branch} (tip ${thread.continueBranch.sha.slice(0, 12)}) of an existing PR. Commit on top and push to it; never open a second PR.` : ""}`;
     return {
       cwd: workDir,
+      verificationGuard,
       tools,
       extension,
       repositoryStanding,
@@ -469,16 +473,26 @@ export function workerShellGuard(input: {
       owners,
     );
 }
-/**
- * The shell policy projects_verify_run commands pass through: the one of the worker whose scope they verify. Plugin workspace providers keep that
- * policy inside the plugin, which these runs cannot reach, so those scopes are refused rather than run under a weaker one.
- */
+export async function verificationHead(project: Project, cwd: string): Promise<HeadRead> {
+  const provider = project.workspaceAuthorization?.provider;
+  if (!provider || provider === "github") return readHead(cwd, project);
+  const plug = plugins.workspaceProvider(provider);
+  if (!plug?.verificationHead)
+    return { kind: "unreadable", reason: `The "${provider}" workspace provider does not supply verificationHead` };
+  try {
+    const sha = (await plug.verificationHead(cwd)).trim();
+    return sha ? { kind: "commit", sha } : { kind: "unreadable", reason: `${provider} reported no HEAD commit` };
+  } catch (error) {
+    return { kind: "unreadable", reason: error instanceof Error ? error.message : String(error) };
+  }
+}
 export function verifierShell(
   project: Project,
   scopeId: string,
   workDir: string,
   branch: string | null,
-): { guard: (command: string) => string } | { refusal: string } {
+  boundGuard?: (command: string) => string,
+): { guard: (command: string) => string; refuseDenied?: boolean } | { refusal: string } {
   const authorization = project.workspaceAuthorization,
     scope = authorization?.scopes.find((item) => item.id === scopeId),
     repository = authorization?.repositories.find((item) => item.repositoryId === scope?.repositoryId);
@@ -490,6 +504,10 @@ export function verifierShell(
       refusal:
         "Verification requires the worker's whole-repository shell grant; folder-limited workers cannot gain general shell through a verifier",
     };
+  if (authorization.provider !== "github")
+    return boundGuard
+      ? { guard: boundGuard, refuseDenied: true }
+      : { refusal: "The verification shell is not bound to this worker worktree" };
   const publication = project.githubAuthorization?.find(
     (item) => item.repositoryId === repository.repositoryId && item.workspaceRevision === authorizationFingerprint(project),
   );

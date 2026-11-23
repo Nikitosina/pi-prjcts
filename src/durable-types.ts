@@ -23,4 +23,5 @@ export type DurablePreparedWorkerEnvironment = Readonly<{
   bindingRevision: string;
   repositoryStanding?: DurableStanding;
   workerInstructions?: string;
+  verificationGuard?: (command: string) => string;
 }>;

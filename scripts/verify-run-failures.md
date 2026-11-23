@@ -8,3 +8,4 @@ Written before the code (retro 2026-11-09). Script: `scripts/verify-run-unit.mjs
 4. A task helper gets the same push advice, but helpers never publish: it must be told to record a local candidate with `job {action:"candidate", sha}` (no push, no branch or PR), then retry.
 5. On a mismatch the worker is told to "verify the candidate or ask the worker" (it is the worker). It must get both ways out: record the current HEAD (full SHA, with the kind's candidate call) if that is the work to verify, otherwise check out the candidate.
 6. A run on the candidate is refused, or a fix reads HEAD twice and runs on a commit other than the one recorded.
+7. A plugin Job cannot cite a passing proof run on its candidate, or verification ignores the policy its worker uses. Exercise both through a Job on a fake provider (`provider-verify-e2e.mjs`). A missing hook must still refuse verification.

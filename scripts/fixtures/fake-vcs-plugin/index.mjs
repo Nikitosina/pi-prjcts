@@ -124,6 +124,9 @@ export default {
           dirty: false,
           dialog: { checkoutLabel: "Fake checkout", rows: [["Fake row", "fake value"]], bullets: ["Workers get plain directories."] },
         }),
+        ...(process.env.FAKE_NO_VERIFICATION_HEAD
+          ? {}
+          : { verificationHead: async (cwd) => readFileSync(join(cwd, ".fake-revision"), "utf8").trim() }),
         isolation,
         leaseOwner: (project) => `fake:${project.id}`,
         plan: async (context) => {
@@ -141,7 +144,12 @@ export default {
           workDir: context.receipt.workspacePath,
           start: async () => {},
           tools: async () => [publish],
-          guard: (command) => command,
+          guard: (command) =>
+            command === "touch DENIED"
+              ? "printf '%s\\n' 'Denied by fake worker' >&2; exit 126"
+              : command === "fake-test-wrapper"
+                ? "touch LEASED # docker"
+                : command,
           instructions: "\n\nFake mode: your worktree is a plain directory; publish with fake_publish.",
         }),
         // Chat and task checkouts are the same plain directories. A task checkout's revision lives in `.fake-revision`, so a test can move it or dirty the

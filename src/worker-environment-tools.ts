@@ -16,7 +16,7 @@ export const BACKGROUND_WAIT_TOOL = "projects_bg_status";
 const MAX_WAIT_SECONDS = 1800;
 const BLOCKED = /^printf '%s\\n' '([\s\S]*)' >&2; exit 126$/;
 /** The worker shell policies answer a blocked command with a replacement script ending in `exit 126`; unwrap its message. */
-function policyDenial(guarded: string): string | undefined {
+export function policyDenial(guarded: string): string | undefined {
   const message = BLOCKED.exec(guarded)?.[1];
   return message === undefined ? undefined : message.replaceAll("'\\''", "'");
 }
