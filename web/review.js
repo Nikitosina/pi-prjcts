@@ -25,8 +25,7 @@ export async function renderReview(root, focus) {
     keys,
     version = 0,
     split = false,
-    wrap = true,
-    since = false;
+    wrap = true;
   const keyHandler = (e) => {
     if (
       !e.defaultPrevented &&
@@ -48,24 +47,27 @@ export async function renderReview(root, focus) {
   room.innerHTML = `<div class="rv-head">${back}<h1>Reading PR #${esc(focus.id)}…</h1></div>`;
   try {
     const s = await rpc("open", { seen: true });
-    let head = s.head;
-    async function show() {
+    async function show(head = s.head, since = false) {
       const gen = ++version;
-      observer?.disconnect();
-      keys = null;
-      panel.replaceChildren();
       const range = { head, ...(since ? { since: s.previous } : {}) };
       const { files, baseMoved } = await rpc("files", range);
       if (!room.isConnected || gen !== version) return;
+      observer?.disconnect();
+      const listed = new Set(files.map((f) => f.path));
       const threads = s.threads
-        .map((t, index) => ({ ...t, index, outdated: t.outdated || (since && t.side === "LEFT") }))
+        .map((t, index) => ({
+          ...t,
+          index,
+          jumpable: !baseMoved && listed.has(t.path),
+          outdated: t.outdated || (since && t.side === "LEFT"),
+        }))
         .filter((t) => head === s.head || t.commit === head);
       for (const f of files) f.threads = threads.filter((t) => t.path === f.path);
-      const open = files.flatMap((f) => f.threads.filter((t) => !t.resolved)),
+      const open = threads.filter((t) => !t.resolved),
         checks = s.iterations.find((it) => it.head === head)?.checks;
       room.innerHTML =
         header(s, focus, head, since, split, wrap, files, checks, open, back) +
-        `${s.notice || baseMoved ? `<div class="since-note">${esc(s.notice)} ${baseMoved ? "Base moved — file list only." : ""}</div>` : ""}<div class="rv-body"><nav class="rv-files"><div class="ft-head">Files<span class="grow"></span><span data-progress class="mono"></span></div><div class="bar ft-bar"><span></span></div><input class="ft-filter" type="search" placeholder="Filter files…" aria-label="Filter files"><div class="rv-paths"></div></nav><div class="rv-scroll">${files.map((f, i) => fileHeader(f, i, baseMoved || generated(f.path), baseMoved)).join("")}<p class="rv-end muted small">End of changes · ${files.length} files</p></div></div><footer class="rv-bar muted small">Read-only review <span class="grow"></span><kbd>j</kbd><kbd>k</kbd> files <kbd>v</kbd> viewed <kbd>s</kbd> split</footer>`;
+        `${s.notice || baseMoved ? `<div class="since-note">${esc(s.notice)} ${baseMoved ? "Base moved — file list only." : ""}</div>` : ""}<div class="rv-body"><nav class="rv-files"><div class="ft-head"><span class="ft-title">Files</span><button data-tree aria-expanded="false">Files ▸</button><span class="grow"></span><span data-progress class="mono"></span></div><div class="bar ft-bar"><span></span></div><input class="ft-filter" type="search" placeholder="Filter files…" aria-label="Filter files"><div class="rv-paths"></div></nav><div class="rv-scroll">${files.map((f, i) => fileHeader(f, i, baseMoved || generated(f.path), baseMoved)).join("")}<p class="rv-end muted small">End of changes · ${files.length} files</p></div></div><footer class="rv-bar muted small">Read-only review <span class="grow"></span><kbd>j</kbd><kbd>k</kbd> files <kbd>v</kbd> viewed <kbd>s</kbd> split</footer>`;
       panel.innerHTML = context(s, head, checks, open);
       const q = (sel) => room.querySelector(sel),
         stack = q(".rv-scroll"),
@@ -80,19 +82,74 @@ export async function renderReview(root, focus) {
       };
       tree();
       filter.oninput = tree;
+      let selectedScroll;
+      function select(i) {
+        if (i === current) return;
+        q(".ft-file.current")?.classList.remove("current");
+        current = i;
+        q(`[data-goto="${i}"]`)?.classList.add("current");
+      }
       function goto(i) {
-        blocks[i]?.scrollIntoView({ block: "start" });
+        if (!blocks[i]) return;
+        blocks[i].scrollIntoView({ block: "start" });
+        selectedScroll = stack.scrollTop;
+        select(i);
       }
       stack.onscroll = () => {
+        if (stack.scrollTop === selectedScroll) return;
+        selectedScroll = null;
         const top = stack.getBoundingClientRect().top + 16;
-        let i = blocks.findLastIndex((b) => b.getBoundingClientRect().top <= top);
-        i = Math.max(0, i);
-        if (i !== current) {
-          current = i;
-          tree();
+        let lo = 0,
+          hi = blocks.length;
+        while (lo < hi) {
+          const mid = Math.floor((lo + hi) / 2);
+          if (blocks[mid].getBoundingClientRect().top <= top) lo = mid + 1;
+          else hi = mid;
         }
+        select(Math.max(0, lo - 1));
       };
-      const loads = new Map();
+      const loads = new Map(),
+        patches = new Map(),
+        expansions = new Map();
+      function appendContext(body, page, path) {
+        const btn = body.querySelector(`[data-start="${page.from}"]`);
+        if (!btn) return;
+        btn.parentElement.insertAdjacentHTML("beforebegin", contextRows(page.lines, page.old, page.from, split, path));
+        const next = page.from + page.lines.length;
+        if (page.done) btn.remove();
+        else {
+          btn.dataset.start = next;
+          btn.dataset.old = page.old + page.lines.length;
+          btn.textContent = btn.dataset.end ? `↑ ${Number(btn.dataset.end) - next} hidden lines` : "↓ More context";
+        }
+      }
+      function paint(i) {
+        const body = blocks[i].querySelector(".diff"),
+          f = files[i];
+        const opened = [...body.querySelectorAll("details[open]")].map((el) => el.parentElement.dataset.thread);
+        body.classList.toggle("split", split);
+        body.classList.toggle("nowrap", !wrap);
+        body.innerHTML = renderDiff(patches.get(i), f.path, split, f.threads);
+        for (const page of expansions.get(i) ?? []) appendContext(body, page, f.path);
+        for (const id of opened) body.querySelector(`[data-thread="${id}"] details`)?.setAttribute("open", "");
+      }
+      function layout(next) {
+        if (next === split) return;
+        const rect = stack.getBoundingClientRect(),
+          anchor = document.elementFromPoint(rect.left + rect.width / 2, rect.top + 68)?.closest(".drow,.row-extra"),
+          block = anchor?.closest(".fblock"),
+          offset = anchor?.getBoundingClientRect().top;
+        split = next;
+        q("[data-split]").setAttribute("aria-pressed", next);
+        q("[data-unified]").setAttribute("aria-pressed", !next);
+        for (const i of patches.keys()) paint(i);
+        if (block) {
+          const d = anchor.dataset,
+            sel = d.thread != null ? `[data-thread="${d.thread}"]` : d.n ? `[data-n="${d.n}"]` : `[data-o="${d.o}"]`;
+          const target = block.querySelector(sel);
+          if (target) stack.scrollTop += target.getBoundingClientRect().top - offset;
+        }
+      }
       async function load(i) {
         const body = blocks[i].querySelector(".diff");
         if (body.hidden) return;
@@ -103,9 +160,8 @@ export async function renderReview(root, focus) {
             rpc("file", { ...range, path: f.path })
               .then(({ diff }) => {
                 if (body.isConnected) {
-                  body.classList.toggle("split", split);
-                  body.classList.toggle("nowrap", !wrap);
-                  body.innerHTML = renderDiff(diff, f.path, split, f.threads);
+                  patches.set(i, diff);
+                  paint(i);
                 }
               })
               .catch((e) => (body.textContent = e.message)),
@@ -155,6 +211,7 @@ export async function renderReview(root, focus) {
           i = files.findIndex((f) => f.path === t.path);
         if (blocks[i].querySelector(".diff").hidden) await toggle(i);
         else await load(i);
+        if (document.querySelector("#app").dataset.sheet === "context") document.querySelector("#app").dataset.sheet = "";
         blocks[i].querySelector(`[data-thread="${t.index}"]`)?.scrollIntoView({ block: "center" });
       };
       async function handle(e) {
@@ -163,7 +220,16 @@ export async function renderReview(root, focus) {
         const d = el.dataset,
           b = el.closest(".fblock"),
           i = +(b?.dataset.idx ?? 0);
-        if ("goto" in d) return goto(+d.goto);
+        if ("tree" in d) {
+          const open = q(".rv-files").classList.toggle("open");
+          el.setAttribute("aria-expanded", open);
+          el.textContent = open ? "Files ▾" : "Files ▸";
+          return;
+        }
+        if ("goto" in d) {
+          if (q(".rv-files.open") && matchMedia("(max-width:760px)").matches) q("[data-tree]").click();
+          return goto(+d.goto);
+        }
         if ("mark" in d) return mark(i, false);
         if ("toggle" in d) return toggle(i);
         if ("wrap" in d) {
@@ -180,25 +246,19 @@ export async function renderReview(root, focus) {
           el.disabled = true;
           try {
             const { lines } = await rpc("lines", { ...range, path: files[i].path, from, count });
-            el.parentElement.insertAdjacentHTML("beforebegin", contextRows(lines, old, from, split, files[i].path));
-            if (lines.length < count || from + lines.length >= end) el.remove();
-            else {
-              d.start = from + lines.length;
-              d.old = old + lines.length;
-              el.textContent = Number.isFinite(end) ? `↑ ${end - from - lines.length} hidden lines` : "↓ More context";
-            }
+            if (!b.isConnected) return;
+            const page = { from, old, lines, done: lines.length < count || from + lines.length >= end };
+            if (!expansions.has(i)) expansions.set(i, []);
+            expansions.get(i).push(page);
+            appendContext(b.querySelector(".diff"), page, files[i].path);
           } finally {
             el.disabled = false;
           }
           return;
         }
-        if ("iteration" in d) {
-          head = d.iteration;
-          since = false;
-        } else if ("since" in d || "all" in d) since = "since" in d;
-        else if ("unified" in d || "split" in d) split = "split" in d;
-        else return;
-        await show();
+        if ("iteration" in d) return show(d.iteration, false);
+        if ("since" in d || "all" in d) return show(head, "since" in d);
+        if ("unified" in d || "split" in d) layout("split" in d);
       }
       room.onclick = (e) => {
         handle(e).catch((err) => error(err, e.target.closest(".fblock") || room));

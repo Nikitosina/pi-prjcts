@@ -880,9 +880,7 @@
     border-bottom: 1px solid var(--line);
     padding: 5px 8px;
   }
-  .rv-room .ft-dirname {
-    display: none;
-  }
+
   .rv-room .rv-scroll {
     flex: 1;
     padding: 8px;
@@ -900,5 +898,42 @@
   }
   .rv-room .rv-sub .grow {
     display: none;
+  }
+}
+
+.rv-context .ck-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 2px;
+  font-size: 12.5px;
+}
+.rv-context .il-t {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+.rv-room .thread {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.rv-room [data-tree] {
+  display: none;
+}
+@media (max-width: 760px) {
+  .rv-room [data-tree] {
+    display: block;
+    color: var(--accent-ink);
+  }
+  .rv-room .rv-files:not(.open) :is(.ft-filter, .rv-paths),
+  .rv-room .ft-title {
+    display: none;
+  }
+  .rv-room .rv-files.open {
+    max-height: 30vh;
+  }
+  .rv-room .ft-bar {
+    margin-bottom: 2px;
   }
 }

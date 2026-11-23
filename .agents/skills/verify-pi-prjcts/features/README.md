@@ -39,4 +39,4 @@ Each file: H1, one paragraph, then exactly four H2s in order: `Sub-features`, `H
 - [UI 2.0 Prompt blocks](./ui2-prompts.md) — Settings → Prompt: block list with switches, badges and tokens, one editor, custom blocks, reorder, restore default, drafts, stale-write conflicts, preview, Host agent, 390 px. Scripted.
 - [Storage and Clean up](./storage.md) — Settings → Storage rows and the Clean up button ending with its run summary. Scripted.
 
-`pr-review`: launch with `--review-fixture`, doctor, then drive `pr-review`. A local contributor checkout and stub gh supply two heads, three files and an inline review thread. Captures unified, split, since-you-looked and 390 px.
+`pr-review`: launch with `--review-fixture`, doctor, then drive `pr-review`. A local contributor checkout and stub gh supply two heads, four files across directories, a large multi-hunk patch, and open and resolved threads. Drive the PR row and chat #7, file navigation, Viewed and gap expansion; capture unified, split, resolved, expanded, context, since-you-looked, light and 390 px.

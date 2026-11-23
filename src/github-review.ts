@@ -182,7 +182,7 @@ export const githubReview: PrReviewSource = {
     const files = [];
     for (let i = 0; i < raw.length - 1; i += 2) {
       const [, , old, blob, status] = raw[i]!.split(" ");
-      files.push({ ...stats.get(raw[i + 1]!), path: raw[i + 1]!, status: status!, blob: status === "D" ? `deleted:${old}` : blob! });
+      files.push({ stats: stats.get(raw[i + 1]!), path: raw[i + 1]!, status: status!, blob: status === "D" ? `deleted:${old}` : blob! });
     }
     return files;
   },

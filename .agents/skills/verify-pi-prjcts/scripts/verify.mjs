@@ -1212,6 +1212,19 @@ const journeys = {
     await page.click("[data-end]");
     await page.waitFor(`!!document.querySelector('.expanded-line')`, "expanded context");
     await page.shot(dir, "04-expanded");
+    await page.press("s");
+    await page.waitFor(`!!document.querySelector('.expanded-line.srow')`, "layout preserved expanded lines");
+    await page.press("s");
+    await page.click('[data-goto="2"]');
+    await page.press("v");
+    await page.waitFor(
+      `document.querySelector('[data-idx="2"] [data-mark]').checked && !!document.querySelector('.current[data-goto="3"]')`,
+      "viewed shortcut marks selected file and advances",
+    );
+    await page.press("k");
+    await page.waitFor(`!!document.querySelector('.current[data-goto="2"]')`, "previous file");
+    await page.press("j");
+    await page.waitFor(`!!document.querySelector('.current[data-goto="3"]')`, "next file");
     await page.click("[data-jump]");
     await page.shot(dir, "05-context");
     await page.press("Escape", { keyCode: 27 });
@@ -1234,6 +1247,10 @@ const journeys = {
     await page.shot(dir, "07-light");
     await page.evaluate(`document.documentElement.dataset.theme='claude'`);
     await page.cdp("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await page.waitFor(
+      `getComputedStyle(document.querySelector("#context")).visibility === "hidden" && document.querySelector("[data-tree]").offsetWidth > 0`,
+      "narrow layout settled",
+    );
     await page.shot(dir, "08-narrow");
     if (await page.evaluate(`document.documentElement.scrollWidth>innerWidth`)) throw Error("narrow overflow");
     record(

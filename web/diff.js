@@ -1,4 +1,4 @@
-import { esc, ago } from "./format.js";
+import { esc, ago, markdown } from "./format.js";
 const JS_RE =
   /(\/\/.*$)|(\/\*.*?\*\/)|("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`?)|\b(const|let|var|function|return|if|else|for|while|of|in|new|throw|try|catch|finally|async|await|import|export|from|default|class|extends|typeof|instanceof|null|undefined|true|false|this|break|continue|switch|case|type|interface|as|void|never|string|number|boolean)\b|\b(\d[\d_.]*)\b|([A-Za-z_$][\w$]*)(?=\()/g;
 const CSS_RE =
@@ -105,10 +105,10 @@ function thread(t) {
   const comments = t.comments
     .map(
       (c) =>
-        `<div class="th-c"><span class="th-av">${esc(c.author.slice(0, 1).toUpperCase())}</span><div class="th-main"><div class="th-meta"><b>${esc(c.author)}</b>${t.kind === "ai" || t.severity ? `<span class="th-tag">${esc(t.severity || "AI")}</span>` : ""}${t.outdated ? " · Outdated" : ""}<time title="${esc(c.createdAt)}">${esc(ago(c.createdAt))}</time></div><div class="th-body"><p>${esc(c.body)}</p></div></div></div>`,
+        `<div class="th-c"><span class="th-av">${esc(c.author.slice(0, 1).toUpperCase())}</span><div class="th-main"><div class="th-meta"><b>${esc(c.author)}</b>${t.kind === "ai" || t.severity ? `<span class="th-tag">${esc(t.severity || "AI")}</span>` : ""}${t.outdated ? " · Outdated" : ""}<time title="${esc(c.createdAt)}">${esc(ago(c.createdAt))}</time></div><div class="th-body prose">${markdown(c.body)}</div></div></div>`,
     )
     .join("");
-  return `<div class="row-extra" data-thread="${t.index}">${t.resolved ? `<details class="thread"><summary class="th-collapsed"><b>✓ Resolved</b><span class="th-snip">${esc(t.comments[0]?.body)}</span>${t.comments.length} comment${t.comments.length === 1 ? "" : "s"} ▸</summary>${comments}</details>` : `<aside class="thread">${comments}</aside>`}</div>`;
+  return `<div class="row-extra" data-thread="${t.index}">${t.resolved ? `<details class="thread"><summary class="th-collapsed"><span class="th-av">${esc(t.comments[0]?.author.slice(0, 1).toUpperCase())}</span><b>Resolved</b><span class="th-snip">${esc(t.comments[0]?.body)}</span>${t.comments.length} comment${t.comments.length === 1 ? "" : "s"} ▸</summary>${comments}</details>` : `<aside class="thread">${comments}</aside>`}</div>`;
 }
 const gutter = (n, side, empty) => `<span class="ln ${side}${empty ? " empty" : ""}">${n ?? ""}</span>`;
 function code(r, lang) {
@@ -118,7 +118,7 @@ function code(r, lang) {
 }
 function row(l, r, split, lang, extra = "") {
   const only = r ?? l;
-  return `<div class="drow ${extra} ${split ? "srow" : only.t}">${gutter(l?.o, "o", split && !l)}${split ? code(l, lang) : ""}${gutter(r?.n, "n", split && !r)}${code(split ? r : only, lang)}</div>`;
+  return `<div data-o="${l?.o ?? ""}" data-n="${r?.n ?? ""}" class="drow ${extra} ${split ? "srow" : only.t}">${gutter(l?.o, "o", split && !l)}${split ? code(l, lang) : ""}${gutter(r?.n, "n", split && !r)}${code(split ? r : only, lang)}</div>`;
 }
 export function contextRows(lines, o, n, split, path) {
   return lines
