@@ -29,7 +29,6 @@ function tokens(text, lang) {
 
 export const langOf = (path) => (/\.css$/.test(path) ? "css" : /\.md$/.test(path) ? "md" : "js");
 
-/** Highlighted HTML for one line; `range` marks the changed middle of a paired line. */
 export function codeHtml(text, lang, range) {
   if (text.length > 2000) return esc(text);
   if (!text) return "&#8203;";
@@ -52,7 +51,6 @@ function changedRange(a, b) {
   ];
 }
 
-/** Rows of a hunk with numbers and word ranges: {t: ctx|add|del, o, n, text, range}. */
 export function hunkRows(h) {
   const rows = [];
   let o = h.oldStart,
@@ -97,7 +95,7 @@ function hunks(diff) {
   }
   return out;
 }
-function thread(t) {
+export function thread(t) {
   return `<aside class="rv-thread"><b>${t.resolved ? "Resolved thread" : t.outdated ? "Outdated thread" : "Review thread"}</b>${t.comments.map((c) => `<p><strong>${esc(c.author)}</strong> ${esc(c.body)}</p>`).join("")}</aside>`;
 }
 export function renderDiff(diff, path, split, threads) {
@@ -129,5 +127,7 @@ export function renderDiff(diff, path, split, threads) {
       else if (!r.pair) html += row(null, r);
     }
   }
+  if (html && !diff.includes("\n+++ /dev/null\n"))
+    html += `<button class="link-btn rv-gap" data-start="${next}">Read following context</button>`;
   return (html || `<pre>${esc(diff || "No textual changes")}</pre>`) + Array.from(pending, thread).join("");
 }

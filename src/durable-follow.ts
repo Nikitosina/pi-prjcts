@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { defineDoc, type Conversation } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { recordReviewHeads } from "./pr-review.ts";
 import { githubCli } from "./github-authorization.ts";
 import { failedCheckDetail } from "./github-prs.ts";
 import { githubPublishedPullRequests, settleClosedGithubWrites, type GithubWriteWait } from "./github-worker.ts";
@@ -534,7 +535,15 @@ export function followRuntime(
         return found.record;
       };
       for (const repo of repos.filter(() => !waiting.has("github"))) {
-        const seen = await observe(repo, prior("github", repo.repositoryId), controller.signal);
+        const previous = prior("github", repo.repositoryId),
+          seen = await observe(repo, previous, controller.signal);
+        await recordReviewHeads(
+          root,
+          repo.repositoryId,
+          Object.entries(seen.state.prs)
+            .filter(([id, p]) => p.head !== previous?.prs[id]?.head && /^[a-f0-9]{40}$/.test(p.head))
+            .map(([id, p]) => ({ id, head: p.head })),
+        );
         repoStates[repoKey("github", repo.repositoryId)] = { ...seen.state, provider: "github", repositoryId: repo.repositoryId };
         for (const item of seen.items) origin.set(item, "github");
         items.push(...seen.items);

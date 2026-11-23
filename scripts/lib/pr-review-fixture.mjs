@@ -13,7 +13,9 @@ export function reviewFixture(root, workspace, core) {
     }).trim();
   git(root, "clone", "-q", "--bare", workspace, bare);
   git(root, "clone", "-q", bare, builder);
-  const url = "https://github.com/acme/review.git";
+  const url = "git@github.com:acme/review.git";
+  const ssh = join(root, "ssh-stub");
+  writeFileSync(ssh, `#!/bin/sh\nexec /usr/bin/git-upload-pack "${bare}"\n`, { mode: 0o755 });
   git(workspace, "remote", "add", "origin", url);
   const base = git(builder, "rev-parse", "HEAD");
   git(builder, "checkout", "-qb", "topic");
@@ -59,7 +61,9 @@ export function reviewFixture(root, workspace, core) {
       FAKE_GH_STATE: state,
       FAKE_GH_CALLS: join(root, "calls.jsonl"),
       FAKE_GH_BARE: bare,
-      GIT_ALLOW_PROTOCOL: "file",
+      GIT_SSH_COMMAND: `"${ssh}"`,
+      GIT_SSH_VARIANT: "ssh",
+      GIT_ALLOW_PROTOCOL: "ssh:file",
     },
   };
 }

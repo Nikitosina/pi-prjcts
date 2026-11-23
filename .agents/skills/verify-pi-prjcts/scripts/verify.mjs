@@ -320,7 +320,6 @@ async function launch() {
       expectedRevision: settings.revision,
       changes: { models: { worker: "fake/fake-model", scout: "fake/fake-model", reviewer: "fake/fake-model" } },
     });
-    if (run.review) git("config", `url.${run.review.bare}.insteadOf`, run.review.url);
     run.projectId = project.id;
     run.webUrl = (await rpc(run, { action: "web" })).url;
     saveRun(run);

@@ -1,7 +1,7 @@
 import { call } from "./api.js";
 import { esc } from "./format.js";
 import { state } from "./state.js";
-import { renderDiff } from "./diff.js";
+import { renderDiff, thread } from "./diff.js";
 const generated = (path) => /(?:^|\/)(?:dist|vendor|generated)\/|(?:\.lock|[-.]lock\.json|\.min\.(?:css|js)|\.generated\.\w+)$/.test(path);
 const button = (attr, label, extra = "") => `<button type="button" class="ghost-btn small" ${attr} ${extra}>${label}</button>`;
 export async function renderReview(root, focus) {
@@ -26,7 +26,8 @@ export async function renderReview(root, focus) {
       const rev = ++version;
       observer?.disconnect();
       const range = { head, ...(since ? { since: snapshot.previous } : {}) };
-      room.innerHTML = `<div class="focus-head">${back}<span class="scope">#${esc(focus.id)}</span><h1>${esc(snapshot.title)}</h1></div><div class="rv-toolbar"><span class="small muted">${esc(snapshot.author)}</span><select data-iteration aria-label="Iteration">${snapshot.iterations.map((it, i) => `<option value="${esc(it.head)}" ${it.head === head ? "selected" : ""}>${i + 1} · ${esc(short(it.head))}</option>`).join("")}</select>${button("data-all", "All changes", `aria-pressed="${!since}"`)}${button("data-since", "Since you looked", `aria-pressed="${since}" ${!snapshot.previous || snapshot.previous === head ? "disabled" : ""}`)}${button("data-split", split ? "Split" : "Unified", `aria-pressed="${split}"`)}${button("data-wrap", "Wrap", `aria-pressed="${wrap}"`)}</div><div class="rv-meta">${snapshot.checks.map((c) => `<span class="badge">${esc(c.name)} · ${esc(c.result)}</span>`).join("")} <span class="muted">${snapshot.threads.length} threads · read-only</span></div><div class="rv-listing">Loading changed files…</div>`;
+      const checks = snapshot.iterations.find((it) => it.head === head)?.checks;
+      room.innerHTML = `<div class="focus-head">${back}<span class="scope">#${esc(focus.id)}</span><h1>${esc(snapshot.title)}</h1></div><div class="rv-toolbar"><span class="small muted">${esc(snapshot.author)}</span><select data-iteration aria-label="Iteration">${snapshot.iterations.map((it, i) => `<option value="${esc(it.head)}" ${it.head === head ? "selected" : ""}>${i + 1} · ${esc(short(it.head))}</option>`).join("")}</select>${button("data-all", "All changes", `aria-pressed="${!since}"`)}${button("data-since", "Since you looked", `aria-pressed="${since}" ${!snapshot.previous || snapshot.previous === head ? "disabled" : ""}`)}${button("data-split", split ? "Split" : "Unified", `aria-pressed="${split}"`)}${button("data-wrap", "Wrap", `aria-pressed="${wrap}"`)}</div><div class="rv-meta">${checks ? checks.map((c) => `<span class="badge">${esc(c.name)} · ${esc(c.result)}</span>`).join("") : "Checks unavailable for this head"} <details><summary>${snapshot.threads.length} threads · read-only</summary>${snapshot.threads.map((t) => `<b>${esc(t.path)}</b>${thread(t)}`).join("")}</details>${esc(snapshot.notice)}</div><div class="rv-listing">Loading changed files…</div>`;
       const listing = room.querySelector(".rv-listing");
       try {
         const { files, baseMoved } = await rpc("files", range);
@@ -112,16 +113,16 @@ export async function renderReview(root, focus) {
               }
             } else if (el.hasAttribute("data-start")) {
               const from = +el.dataset.start,
-                end = +el.dataset.end;
+                end = el.dataset.end ? +el.dataset.end : Infinity;
               el.disabled = true;
               const { lines } = await rpc("lines", { ...range, path: file.path, from, count: Math.min(100, end - from) });
               const pre = document.createElement("pre");
               pre.textContent = lines.join("\n");
               el.before(pre);
-              if (!lines.length || from + lines.length >= end) el.remove();
+              if (lines.length < Math.min(100, end - from) || from + lines.length >= end) el.remove();
               else {
                 el.dataset.start = from + lines.length;
-                el.textContent = `Expand ${end - from - lines.length} context lines`;
+                el.textContent = Number.isFinite(end) ? `Expand ${end - from - lines.length} context lines` : "Read following context";
                 el.disabled = false;
               }
             }
@@ -140,6 +141,8 @@ export async function renderReview(root, focus) {
       else if (e.target.closest("[data-wrap]")) {
         wrap = !wrap;
         room.classList.toggle("rv-nowrap", !wrap);
+        e.target.closest("button").setAttribute("aria-pressed", String(wrap));
+        return;
       } else if (e.target.closest("[data-all]")) since = false;
       else if (e.target.closest("[data-since]")) since = true;
       else return;

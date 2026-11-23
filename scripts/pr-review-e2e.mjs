@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createKit } from "./lib/e2e-kit.mjs";
 import { reviewFixture, advanceReview } from "./lib/pr-review-fixture.mjs";
@@ -9,16 +9,27 @@ const f = reviewFixture(kit.root, kit.workspace, kit.core);
 Object.assign(kit.hostEnv, f.env);
 await kit.run(async () => {
   const id = await kit.createProject("Review");
-  kit.git(kit.workspace, "config", `url.${f.bare}.insteadOf`, f.url);
+
   const read = (action, opts = {}) => kit.rpc({ action: `pr-review-${action}`, id, provider: "github", pr: "7", ...opts });
   for (const [action, opts] of [
     ["open", { pr: "-7" }],
     ["file", { head: f.first, path: "../secret" }],
   ])
-    await assert.rejects(read(action, opts), /invalid|validation|schema/i);
+    await assert.rejects(read(action, { ...opts, id: "00000000-0000-0000-0000-000000000000" }), /Invalid data:/);
   writeFileSync(join(kit.workspace, "untracked"), "unchanged");
   const status = () => kit.git(kit.workspace, "status", "--porcelain=v1", "-b");
-  const before = status();
+  const tracked = join(kit.workspace, "README.md");
+  writeFileSync(tracked, "staged");
+  kit.git(kit.workspace, "add", "README.md");
+  writeFileSync(tracked, "unstaged");
+  const fingerprint = () => [
+    status(),
+    kit.git(kit.workspace, "rev-parse", "HEAD"),
+    kit.git(kit.workspace, "show", ":README.md"),
+    readFileSync(tracked, "utf8"),
+    readFileSync(join(kit.workspace, "untracked"), "utf8"),
+  ];
+  const before = fingerprint();
   assert.equal((await read("open", { seen: true })).head, f.first);
   const files = await read("files", { head: f.first });
   assert.deepEqual(
@@ -43,6 +54,8 @@ await kit.run(async () => {
   const moved = { head: f.moved, since: f.second };
   assert.equal((await read("files", moved)).baseMoved, true);
   await assert.rejects(read("file", { ...moved, path }), /base moved/i);
-  assert.equal(status(), before);
+  assert.deepEqual(fingerprint(), before);
+  kit.git(kit.workspace, "config", `url.${f.bare}.insteadOf`, f.url);
+  await assert.rejects(read("file", { head: f.first, path }), /origin|checkout/i);
   kit.check("exact revisions, interdiff, viewed marks and checkout isolation", true);
 });

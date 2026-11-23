@@ -172,11 +172,12 @@ if (method === "POST" && parts[0] === "graphql") {
       latestOpinionatedReviews: { nodes: (item.opinions ?? []).map((value) => ({ state: value })) },
       reviewThreads: {
         nodes: (item.threads ?? []).map((thread) => ({
+          diffSide: "RIGHT",
           isResolved: thread.resolved === true,
           isOutdated: false,
           path: thread.path ?? "a.txt",
           line: thread.line ?? 1,
-          comments: { nodes: [{ author: { login: thread.user ?? "rev" }, body: thread.body ?? "" }] },
+          comments: { nodes: [{ author: { login: thread.user ?? "rev" }, commit: { oid: item.sha }, body: thread.body ?? "" }] },
         })),
       },
       commits: {

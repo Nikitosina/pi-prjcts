@@ -259,6 +259,8 @@ export function validateCall(action: string, input: unknown): RequestData {
         .join("; ")
         .slice(0, 1500)}`,
     );
+  if (action === "pr-review-open" && "seen" in request && request.seen === true)
+    throw Error("Only the owner can advance the last seen PR head");
   return request as RequestData;
 }
 

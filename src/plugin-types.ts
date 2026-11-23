@@ -329,7 +329,8 @@ export type PrDetailData = {
   draft?: boolean;
   review?: PrCardData["review"];
 };
-export type PrIteration = { head: string; base: string };
+export type PrCheck = { name: string; result: string };
+export type PrIteration = { head: string; base: string; checks?: PrCheck[] };
 export type PrRange = { base: string; head: string };
 export type PrFile = { path: string; status: string; blob: string };
 export type PrReviewThread = {
@@ -346,12 +347,13 @@ export type PrReviewSnapshot = {
   author: string;
   head: string;
   iterations: PrIteration[];
-  checks: { name: string; result: string }[];
+  notice?: string;
   threads: PrReviewThread[];
 };
 export type PrReviewSource = {
   capabilities: { viewedSync: boolean; annotations: boolean; issues: boolean; suggestions: boolean };
-  snapshot(project: Project, id: PrId): Promise<PrReviewSnapshot>;
+  authorize(project: Project): Promise<string>;
+  snapshot(project: Project, id: PrId, observed: readonly string[]): Promise<PrReviewSnapshot>;
   files(project: Project, id: PrId, range: PrRange): Promise<PrFile[]>;
   fileDiff(project: Project, id: PrId, path: string, range: PrRange): Promise<string>;
   fileLines(project: Project, id: PrId, path: string, sha: string, from: number, count: number): Promise<string[]>;

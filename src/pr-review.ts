@@ -3,7 +3,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { PrFile, PrIteration, PrRange, PrReviewSource } from "./plugin-types.ts";
 import type { Project, Request } from "./state.ts";
 type Input = Extract<Request, { action: `pr-review-${string}` }>;
-type History = { iterations: PrIteration[]; previous: string | null; marks: Record<string, string> };
+type History = { iterations: PrIteration[]; observed?: string[]; seenAt?: number; previous: string | null; marks: Record<string, string> };
 const Review = defineDoc<{ prs: Record<string, History> }>({
   kind: "projects.pr-review",
   version: 1,
@@ -13,34 +13,60 @@ const Review = defineDoc<{ prs: Record<string, History> }>({
   checkpointWhen: () => false,
   initial: () => ({ prs: {} }),
 });
-const cache = new Map<string, string>();
-async function cached<T>(key: string, load: () => Promise<T>): Promise<T> {
-  const hit = cache.get(key);
-  if (hit) return JSON.parse(hit);
-  const value = await load(),
-    s = JSON.stringify(value);
-  if (s.length > 512000) throw Error("Review data exceeds the display limit");
-  if (cache.size >= 40) cache.delete(cache.keys().next().value!);
-  cache.set(key, s);
-  return value;
+const empty = (): History => ({ iterations: [], previous: null, marks: {} });
+const keyOf = (provider: string, id: string, repo: string) => JSON.stringify([provider, id, repo]);
+export async function recordReviewHeads(root: Conversation, repo: string, heads: { id: string; head: string }[]) {
+  if (!heads.length) return;
+  await root.commit(async (tx) => {
+    const d = await tx.doc(Review, root.id);
+    for (const { id, head } of heads) {
+      const key = keyOf("github", id, repo);
+      const h = (d.prs[key] ??= empty());
+      h.observed = [...new Set([...(h.observed ?? []), head])].slice(-32);
+    }
+  }, BACKGROUND_CONTEXT);
 }
+const indexes = new WeakMap<PrFile[], Map<string, PrFile>>();
+function cache<T>() {
+  const entries = new Map<string, T>();
+  return async (key: string, load: () => Promise<T>) => {
+    const hit = entries.get(key);
+    if (hit !== undefined) return hit;
+    const value = await load();
+    if (JSON.stringify(value).length > 512000) throw Error("Review data exceeds the display limit");
+    if (entries.size >= 40) entries.delete(entries.keys().next().value!);
+    entries.set(key, value);
+    return value;
+  };
+}
+const fileLists = cache<PrFile[]>(),
+  diffs = cache<string>(),
+  contexts = cache<string[]>();
 export async function reviewRead(root: Conversation, p: Project, source: PrReviewSource, i: Input) {
-  const key = `${i.provider}:${i.pr}`,
-    docKey = `${key}:${p.githubAuthorization?.[0]?.repositoryId ?? p.cwd}`;
+  const started = performance.timeOrigin + performance.now(),
+    docKey = keyOf(i.provider, i.pr, await source.authorize(p));
   const history = <T>(fn: (h: History) => T) =>
     root.commit(async (tx) => {
       const doc = await tx.doc(Review, root.id);
-      doc.prs[docKey] ??= { iterations: [], previous: null, marks: {} };
+      doc.prs[docKey] ??= empty();
       return fn(doc.prs[docKey]!);
     }, BACKGROUND_CONTEXT);
   if (i.action === "pr-review-open") {
-    const snapshot = await source.snapshot(p, i.pr);
+    const snapshot = await source.snapshot(p, i.pr, await history((h) => [...(h.observed ?? [])]));
     if (JSON.stringify(snapshot).length > 512000) throw Error("Review snapshot exceeds the display limit");
     const stored = await history((h) => {
-      const iterations = Array.from(new Map([...h.iterations, ...snapshot.iterations].map((x) => [x.head, x])).values()).slice(-100);
+      const byHead = new Map(h.iterations.map((x) => [x.head, x]));
+      for (const it of snapshot.iterations) {
+        const prior = byHead.get(it.head);
+        byHead.set(it.head, { ...prior, ...it });
+      }
+      const iterations = Array.from(byHead.values()).slice(-100);
       const previous = h.previous;
       h.iterations = iterations;
-      if (i.seen) h.previous = snapshot.head;
+      if (i.seen && started > (h.seenAt ?? 0)) {
+        h.previous = snapshot.head;
+        h.seenAt = started;
+      }
       return { previous, iterations: JSON.parse(JSON.stringify(iterations)) as PrIteration[] };
     });
     return { ...snapshot, ...stored, capabilities: source.capabilities };
@@ -56,18 +82,22 @@ export async function reviewRead(root: Conversation, p: Project, source: PrRevie
     baseMoved = !!since && since.base !== head.base;
   const range = { base: since && !baseMoved ? since.head : head.base, head: head.head };
   const cacheKey = (...parts: unknown[]) => JSON.stringify([p.id, docKey, ...parts]);
-  const list = (r: PrRange) => cached<PrFile[]>(cacheKey("files", r.base, r.head), () => source.files(p, i.pr, r));
-  let files = await list(range);
-  if (since && !baseMoved) {
-    const paths = new Set(
-      (await Promise.all([list({ base: head.base, head: head.head }), list({ base: since.base, head: since.head })]))
-        .flat()
-        .map((f) => f.path),
-    );
-    files = files.filter((f) => paths.has(f.path));
-  }
-  if (i.action === "pr-review-files") return { baseMoved, files: files.map((f) => ({ ...f, viewed: h.marks[`:${f.path}`] === f.blob })) };
-  const file = files.find((f) => f.path === i.path);
+  const list = (r: PrRange) => fileLists(cacheKey("files", r.base, r.head), () => source.files(p, i.pr, r));
+  const files = await list(range);
+  const find = (list: PrFile[], path: string) => {
+    let byPath = indexes.get(list);
+    if (!byPath) {
+      byPath = new Map(list.map((f) => [f.path, f]));
+      indexes.set(list, byPath);
+    }
+    return byPath.get(path);
+  };
+  const scoped = since && !baseMoved ? await Promise.all([list(head), list(since)]) : null;
+  const inScope = (f: PrFile) => !scoped || scoped.some((list) => find(list, f.path));
+  if (i.action === "pr-review-files")
+    return { baseMoved, files: files.filter(inScope).map((f) => ({ ...f, viewed: h.marks[`:${f.path}`] === f.blob })) };
+  const entry = find(files, i.path),
+    file = entry && inScope(entry) ? entry : null;
   if (!file) throw Error("Not a changed PR file");
   if (i.action === "pr-review-viewed") {
     await history((h) => {
@@ -78,9 +108,9 @@ export async function reviewRead(root: Conversation, p: Project, source: PrRevie
   }
   if (baseMoved) throw Error("Base moved; compare the file list instead");
   if (i.action === "pr-review-file")
-    return { diff: await cached(cacheKey("diff", range, file.path), () => source.fileDiff(p, i.pr, file.path, range)) };
+    return { diff: await diffs(cacheKey("diff", range, file.path), () => source.fileDiff(p, i.pr, file.path, range)) };
   return {
-    lines: await cached(cacheKey("lines", i.head, file.path, i.from, i.count), () =>
+    lines: await contexts(cacheKey("lines", i.head, file.path, i.from, i.count), () =>
       source.fileLines(p, i.pr, file.path, i.head, i.from, i.count),
     ),
   };
