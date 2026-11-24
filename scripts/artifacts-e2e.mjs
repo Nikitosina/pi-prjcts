@@ -379,7 +379,7 @@ try {
     await delay(100);
   }
   await waitFor(
-    `(() => { const slot = document.querySelector('#feed .tool-row.open [data-media]'); slot?.scrollIntoView(); return slot?.querySelector('.media-img')?.complete; })()`,
+    `(() => { const slot = document.querySelector('#feed .tool-row.open [data-media]'); slot?.scrollIntoView(); const img = slot?.querySelector('.media-img'); return img?.complete && img.naturalWidth === 320; })()`,
     s,
     "tool image after expanding",
   );
