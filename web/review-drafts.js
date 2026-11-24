@@ -14,7 +14,7 @@ export function reviewDrafts({ room, panel, s, files, currentFiles, range, threa
       count = drafts.filter(
         (d) => !d.sent && !d.published && !s.uncertain?.draftIds.includes(d.id) && d.destination === (s.chat ? "worker" : "provider"),
       ).length;
-    bar.innerHTML = `<b data-count="${count}">${count} pending ${s.chat ? "worker" : "provider"} draft${count === 1 ? "" : "s"}</b><span class="grow"></span>${!s.uncertain && s.capabilities.publish ? '<button class="ghost-btn small" data-publish>Publish review…</button>' : ""} ${s.chat ? `<button class="primary" data-batch ${s.preview && count ? "" : "disabled"}>Ask worker to fix</button>` : "<span data-provider-bar></span>"}`;
+    bar.innerHTML = `<b data-count="${count}">${count} pending ${s.chat ? "worker" : "provider"} draft${count === 1 ? "" : "s"}</b><span class="grow"></span>${!s.uncertain && s.capabilities.publish && s.capabilities.verdicts?.length !== 0 ? '<button class="ghost-btn small" data-publish>Publish review…</button>' : ""} ${s.chat ? `<button class="primary" data-batch ${s.preview && count ? "" : "disabled"}>Ask worker to fix</button>` : "<span data-provider-bar></span>"}`;
     list.innerHTML =
       `<h2>Drafts <span class="count">${drafts.length}</span></h2>` +
       drafts

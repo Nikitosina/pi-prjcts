@@ -22,6 +22,8 @@ export async function publishReview(
   const op = i.operation;
   if (!source.publish || !source.capabilities[op.kind === "review" ? "publish" : op.kind === "reply" ? "reply" : "resolve"])
     throw Error("Provider does not support this review action");
+  if (op.kind === "review" && source.capabilities.verdicts && !source.capabilities.verdicts.includes(op.verdict))
+    throw Error("Provider does not support this verdict");
   const snapshot = await source.snapshot(p, i.pr, []);
   if (!snapshot.url || !/^https?:\/\//i.test(snapshot.url)) throw Error("Provider must supply a PR link");
   const urlOfPr = snapshot.url;
