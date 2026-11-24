@@ -604,6 +604,17 @@
     border-bottom: 1px solid var(--line);
     color: var(--muted);
   }
+  .rv-write {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px 16px;
+    overflow-wrap: anywhere;
+  }
+  .thread .ghost-btn {
+    margin: 3px 4px;
+  }
   .since-note b {
     color: var(--text);
     font-weight: 600;

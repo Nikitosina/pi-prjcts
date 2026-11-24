@@ -3,13 +3,11 @@ import type { PrPublish, PrReviewSource, PrIteration } from "./plugin-types.ts";
 import type { Project, Request } from "./state.ts";
 import type { DraftBook } from "./pr-review-drafts.ts";
 
-export function uncertainRoom(h: DraftBook) {
-  const u = h.uncertain;
-  return u ? { uncertain: { description: u.description, at: u.at }, url: u.url, head: u.head, revision: h.revision } : null;
-}
 const inFlight = new Set<string>();
+export const publishing = (h: DraftBook) => !!h.revision && inFlight.has(h.revision);
 export function checkedReview(h: DraftBook, revision: string, found: boolean) {
-  if (inFlight.has(revision) || !h.uncertain || h.revision !== revision) throw Error("Review is still in progress or changed. Reopen it.");
+  if (publishing(h) || h.sendingTo || !h.uncertain || h.revision !== revision)
+    throw Error("Review is still in progress or changed. Reopen it.");
   if (found) for (const d of h.drafts ?? []) if (h.uncertain.draftIds.includes(d.id)) d.published = h.uncertain.url;
   delete h.uncertain;
   h.revision = randomUUID();
@@ -28,7 +26,8 @@ export async function publishReview(
   if (!snapshot.url || !/^https?:\/\//i.test(snapshot.url)) throw Error("Provider must supply a PR link");
   const urlOfPr = snapshot.url;
   if (snapshot.head !== i.head) throw Error("PR head changed. Reopen the review.");
-  if (op.kind !== "review" && !snapshot.threads.some((t) => t.id === op.threadId)) throw Error("Thread not found on this PR");
+  const target = op.kind === "review" ? null : snapshot.threads.find((t) => t.id === op.threadId);
+  if (op.kind !== "review" && !target) throw Error("Thread not found on this PR");
   if (
     (op.kind === "reply" && !op.body.trim()) ||
     (op.kind === "review" && !op.summary.trim() && (op.verdict === "REQUEST_CHANGES" || (op.verdict === "COMMENT" && !op.draftIds.length)))
@@ -65,7 +64,10 @@ export async function publishReview(
         head: i.head,
         url: urlOfPr,
         draftIds: op.kind === "review" ? [...op.draftIds] : [],
-        description: op.kind === "review" ? `${op.verdict} · ${op.draftIds.length} inline comments` : `${op.kind} · ${op.threadId}`,
+        description:
+          op.kind === "review"
+            ? `Review (${op.verdict}) · ${op.draftIds.length} inline comments`
+            : `${op.kind} · ${target?.path}:${target?.line ?? "—"} (${op.threadId})`,
         at: new Date().toISOString(),
       };
       return intent;
@@ -75,7 +77,7 @@ export async function publishReview(
       ({ url } = await source.publish(p, i.pr, snapshot, intent));
       if (!/^https?:\/\//i.test(url)) throw Error("Missing provider receipt");
     } catch {
-      return history((h) => uncertainRoom(h));
+      return { uncertain: true };
     }
     return await history((h) => {
       if (h.revision !== revision) throw Error("Review changed during publish");

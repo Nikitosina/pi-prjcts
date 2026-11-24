@@ -111,8 +111,8 @@ export function discussion(t) {
 }
 export function threadActions(t) {
   return (
-    (t.canReply ? `<button data-reply="${t.index}">Reply…</button>` : "") +
-    (t.canResolve ? `<button data-resolve="${t.index}">${t.resolved ? "Unresolve" : "Resolve"}…</button>` : "")
+    (t.canReply ? `<button class="ghost-btn small" data-reply="${t.index}">Reply…</button>` : "") +
+    (t.canResolve ? `<button class="ghost-btn small" data-resolve="${t.index}">${t.resolved ? "Unresolve" : "Resolve"}…</button>` : "")
   );
 }
 function thread(t) {

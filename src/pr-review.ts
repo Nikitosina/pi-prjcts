@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { publishReview, checkedReview, uncertainRoom } from "./pr-review-publish.ts";
+import { publishReview, checkedReview } from "./pr-review-publish.ts";
 import { defineDoc, type Conversation } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { PrFile, PrIteration, PrRange, PrReviewSource } from "./plugin-types.ts";
@@ -65,9 +65,27 @@ export async function reviewRead(root: Conversation, p: Project, source: PrRevie
   if (i.action === "pr-review-send") return sendDrafts(history, i, delivery);
   if (i.action === "pr-review-edit" || i.action === "pr-review-delete") return history((h) => changeDraft(h, i, delivery.chat));
   if (i.action === "pr-review-open") {
-    const uncertain = await history(uncertainRoom);
-    if (uncertain) return uncertain;
-    const snapshot = await source.snapshot(p, i.pr, await history((h) => [...(h.observed ?? [])]));
+    let snapshot;
+    try {
+      snapshot = await source.snapshot(p, i.pr, await history((h) => [...(h.observed ?? [])]));
+    } catch (err) {
+      const fallback = await history(
+        (h) =>
+          h.uncertain && {
+            ...draftView(h, i.pr, delivery.chat),
+            title: `PR #${i.pr}`,
+            url: h.uncertain.url,
+            head: h.uncertain.head,
+            iterations: JSON.parse(JSON.stringify(h.iterations)) as PrIteration[],
+            previous: h.previous,
+            threads: [],
+            capabilities: source.capabilities,
+            notice: "Provider unavailable — thread updates could not be loaded.",
+          },
+      );
+      if (fallback) return fallback;
+      throw err;
+    }
     if (
       !snapshot.iterations.some((it) => it.head === snapshot.head) ||
       !snapshot.iterations.every((it) => [it.head, it.base].every((s) => typeof s === "string" && /^[0-9a-f]{40}$/.test(s)))

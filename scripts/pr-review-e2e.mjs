@@ -96,7 +96,11 @@ await kit.run(async () => {
   writeFileSync(f.state, JSON.stringify(faulty));
   const attempt = () => publish(room.revision, { ...op, draftIds: [lost] }, f.second);
   await attempt();
-  assert.ok((await read("open")).uncertain);
+  const blocked = await read("open");
+  assert.ok(blocked.uncertain && blocked.threads.length && blocked.drafts.length);
+  await assert.rejects(read("delete", { draftId: lost, revision: blocked.revision }));
+  const local = await read("add", { head: f.second, path, side: "RIGHT", from: 1, to: 1, comment: "Still drafting" });
+  await read("edit", { draftId: local.drafts.at(-1).id, revision: local.revision, comment: "Updated locally" });
   await assert.rejects(attempt(), /uncertain|changed/i);
   assert.equal(writes().length, 5);
   const unavailable = JSON.parse(readFileSync(f.state));
@@ -111,6 +115,7 @@ await kit.run(async () => {
   room = await read("open");
   assert.equal(room.drafts.find((d) => d.id === lost).published, offline.url);
   assert.ok(!room.drafts[2].published);
+  assert.equal(writes().length, 5);
   assert.equal((await read("open", { seen: true })).previous, f.first);
   const range = { head: f.second, since: f.first };
   assert.deepEqual(

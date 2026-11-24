@@ -4,7 +4,7 @@ import { state } from "./state.js";
 import { renderDiff, contextRows } from "./diff.js";
 import { context, header, fileHeader, fileTree } from "./review-parts.js";
 import { reviewDrafts } from "./review-drafts.js";
-import { providerBar, providerDialog } from "./review-publish.js";
+import { writeBanner } from "./review-publish.js";
 import { typing } from "./hotkeys.js";
 const generated = (path) => /(?:^|\/)(?:dist|vendor|generated)\/|(?:\.lock|[-.]lock\.json|\.min\.(?:css|js)|\.generated\.\w+)$/.test(path);
 const back = `<button class="back" data-cmd="leave-focus" aria-label="Back to chat">← <kbd>Esc</kbd></button>`;
@@ -48,22 +48,17 @@ export async function renderReview(root, focus) {
   };
   room.innerHTML = `<div class="rv-head">${back}<h1>Reading PR #${esc(focus.id)}…</h1></div>`;
   try {
-    function uncertain(s) {
-      observer?.disconnect();
-      panel.replaceChildren();
-      keys = null;
-      room.innerHTML = `<div class="rv-head">${back}<h1>Check the provider write</h1></div><section class="ctx-section">${providerBar(s)}</section>`;
-      room.onclick = null;
-      room.querySelector("[data-checked]").onclick = () =>
-        providerDialog({ room, s, key: "checked", rpc, reload: () => room.isConnected && renderReview(root, focus) });
-    }
     const s = await rpc("open", { seen: true });
-    if (s.uncertain) return uncertain(s);
     let currentFiles;
     async function show(head = s.head, since = false) {
       const gen = ++version;
       const range = { head, ...(since ? { since: s.previous } : {}) };
-      const { files, baseMoved } = await rpc("files", range);
+      let fileNotice = "";
+      const { files, baseMoved } = await rpc("files", range).catch((err) => {
+        if (!s.uncertain) throw err;
+        fileNotice = "File list unavailable.";
+        return { files: [], baseMoved: false };
+      });
       if (!room.isConnected || gen !== version) return;
       observer?.disconnect();
       const listed = new Set(files.map((f) => f.path));
@@ -83,7 +78,8 @@ export async function renderReview(root, focus) {
         checks = s.iterations.find((it) => it.head === head)?.checks;
       room.innerHTML =
         header(s, focus, head, since, split, wrap, files, checks, open, back) +
-        `${s.notice || baseMoved ? `<div class="since-note">${esc(s.notice)} ${baseMoved ? "Base moved — file list only." : ""}</div>` : ""}<div class="rv-body"><nav class="rv-files"><div class="ft-head"><span class="ft-title">Files</span><button data-tree aria-expanded="false">Files ▸</button><span class="grow"></span><span data-progress class="mono"></span></div><div class="bar ft-bar"><span></span></div><input class="ft-filter" type="search" placeholder="Filter files…" aria-label="Filter files"><div class="rv-paths"></div></nav><div class="rv-scroll">${files.map((f, i) => fileHeader(f, i, baseMoved || generated(f.path), baseMoved)).join("")}<p class="rv-end muted small">End of changes · ${files.length} files</p></div></div><footer class="rv-bar small"></footer>`;
+        writeBanner(s) +
+        `${s.notice || fileNotice || baseMoved ? `<div class="since-note">${esc(s.notice)} ${fileNotice} ${baseMoved ? "Base moved — file list only." : ""}</div>` : ""}<div class="rv-body"><nav class="rv-files"><div class="ft-head"><span class="ft-title">Files</span><button data-tree aria-expanded="false">Files ▸</button><span class="grow"></span><span data-progress class="mono"></span></div><div class="bar ft-bar"><span></span></div><input class="ft-filter" type="search" placeholder="Filter files…" aria-label="Filter files"><div class="rv-paths"></div></nav><div class="rv-scroll">${files.map((f, i) => fileHeader(f, i, baseMoved || generated(f.path), baseMoved)).join("")}<p class="rv-end muted small">End of changes · ${files.length} files</p></div></div><footer class="rv-bar small"></footer>`;
       panel.innerHTML = context(
         s,
         head,
@@ -104,11 +100,9 @@ export async function renderReview(root, focus) {
         range,
         threads,
         rpc,
-        reload: async (result) => {
+        reload: async () => {
           if (!room.isConnected) return;
-          if (result.uncertain) return uncertain(result);
           Object.assign(s, await rpc("open"));
-          if (s.uncertain) return uncertain(s);
           if (room.isConnected) await show();
         },
       });

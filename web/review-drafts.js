@@ -1,4 +1,4 @@
-import { providerDialog, providerBar } from "./review-publish.js";
+import { providerDialog } from "./review-publish.js";
 import { esc } from "./format.js";
 
 export function reviewDrafts({ room, panel, s, files, currentFiles, range, threads, rpc, reload }) {
@@ -11,8 +11,10 @@ export function reviewDrafts({ room, panel, s, files, currentFiles, range, threa
   const label = (d) => `${d.path}:${d.from}${d.to === d.from ? "" : "–" + d.to} · ${d.side === "LEFT" ? "old" : "new"}`;
   function refresh() {
     const drafts = s.drafts,
-      count = drafts.filter((d) => !d.sent && !d.published && d.destination === (s.chat ? "worker" : "provider")).length;
-    bar.innerHTML = `<b data-count="${count}">${count} pending ${s.chat ? "worker" : "provider"} draft${count === 1 ? "" : "s"}</b><span class="grow"></span>${providerBar(s)} ${s.chat ? `<button class="primary" data-batch ${s.preview && !s.uncertain ? "" : "disabled"}>Ask worker to fix</button>` : "<span data-provider-bar></span>"}`;
+      count = drafts.filter(
+        (d) => !d.sent && !d.published && !s.uncertain?.draftIds.includes(d.id) && d.destination === (s.chat ? "worker" : "provider"),
+      ).length;
+    bar.innerHTML = `<b data-count="${count}">${count} pending ${s.chat ? "worker" : "provider"} draft${count === 1 ? "" : "s"}</b><span class="grow"></span>${!s.uncertain && s.capabilities.publish ? '<button class="ghost-btn small" data-publish>Publish review…</button>' : ""} ${s.chat ? `<button class="primary" data-batch ${s.preview && count ? "" : "disabled"}>Ask worker to fix</button>` : "<span data-provider-bar></span>"}`;
     list.innerHTML =
       `<h2>Drafts <span class="count">${drafts.length}</span></h2>` +
       drafts
@@ -23,7 +25,7 @@ export function reviewDrafts({ room, panel, s, files, currentFiles, range, threa
               (d.side === "LEFT"
                 ? (d.since ?? s.iterations.find((it) => it.head === d.head)?.base) !== s.iterations.find((it) => it.head === s.head)?.base
                 : currentFiles.get(d.path) !== d.blob));
-          return `<article class="rv-draft"><small class="mono muted">${esc(label(d))}</small>${outdated ? "<small data-outdated>Outdated</small>" : ""}<p>${esc(d.comment)}</p>${d.published ? `<a href="${esc(d.published)}" target="_blank" rel="noopener" data-published>Published ↗</a>` : d.sent ? `<small data-sent>Sent · ${esc(new Date(d.sent).toLocaleString())}</small>` : `<small>${d.destination === "provider" ? "Provider draft" : "Fix list"}</small> <button data-edit-draft="${d.id}">Edit</button> <button data-delete-draft="${d.id}">Delete</button>`}</article>`;
+          return `<article class="rv-draft"><small class="mono muted">${esc(label(d))}</small>${outdated ? "<small data-outdated>Outdated</small>" : ""}<p>${esc(d.comment)}</p>${d.published ? `<a href="${esc(d.published)}" target="_blank" rel="noopener" data-published>Published ↗</a>` : d.sent ? `<small data-sent>Sent · ${esc(new Date(d.sent).toLocaleString())}</small>` : s.uncertain?.draftIds.includes(d.id) ? "<small>Awaiting PR check</small>" : `<small>${d.destination === "provider" ? "Provider draft" : "Fix list"}</small> <button data-edit-draft="${d.id}">Edit</button> <button data-delete-draft="${d.id}">Delete</button>`}</article>`;
         })
         .join("");
     list.hidden = !drafts.length;

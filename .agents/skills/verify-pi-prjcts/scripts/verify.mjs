@@ -1246,8 +1246,27 @@ const journeys = {
     await page.cdp("Input.insertText", { text: "Thanks for the context." });
     await page.click("[data-confirm-provider]");
     await wait("[data-uncertain]");
-    await page.shot(dir, "06-uncertain");
-    record("visible", "One selected provider draft published; worker draft retained. Lost answer shown.");
+    await wait(".rv-code .drow");
+    await wait(".rv-draft [data-published]");
+    await wait("[data-batch]:enabled");
+    await page.waitFor(`!document.querySelector('[data-publish],[data-reply],[data-resolve]')`, "provider writes blocked");
+    await page.shot(dir, "06-uncertain-light");
+    await page.evaluate(`document.documentElement.dataset.theme='claude'`);
+    await page.shot(dir, "07-uncertain-dark");
+    await add("Local draft while checking the PR.");
+    await page.click("[data-batch]");
+    await page.click("[data-send-batch]");
+    await wait("[data-sent]");
+    await page.click("[data-checked]");
+    await page.select("dialog select", "found");
+    await page.click("[data-confirm-provider]");
+    await wait("[data-publish]");
+    await wait(".rv-code [data-reply]");
+    await page.shot(dir, "08-checked");
+    record(
+      "visible",
+      "Lost reply shown in the room; local draft and worker batch sent before owner reconciliation restored provider actions.",
+    );
   },
   async "review-drafts"(run, page, record, dir) {
     const q = (s) => `document.querySelector(${JSON.stringify(s)})`;
