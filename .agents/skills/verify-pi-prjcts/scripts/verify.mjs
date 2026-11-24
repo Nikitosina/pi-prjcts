@@ -1289,6 +1289,18 @@ const journeys = {
     await wait("[data-outdated]");
     await page.evaluate(`document.documentElement.dataset.theme='light'`);
     await page.shot(dir, "04-light");
+    await page.click("[data-since]");
+    await wait('[data-since][aria-pressed="true"]');
+    await wait(".rv-code .drow.del");
+    await page.click(".rv-code .drow.del .ln.o");
+    await page.click(".rv-compose textarea");
+    await page.cdp("Input.insertText", { text: "Interdiff left anchor" });
+    await page.click("[data-save-draft]");
+    await wait('[data-count="3"]');
+    if (await page.evaluate(`Array.from(document.querySelectorAll('.rv-draft')).at(-1).querySelector('[data-outdated]')!==null`))
+      throw Error("Fresh interdiff anchor marked outdated");
+    await page.evaluate(`Array.from(document.querySelectorAll('[data-delete-draft]')).at(-1).click()`);
+    await wait('[data-count="2"]');
     await page.click(`[data-iteration="${run.review.first}"]`);
     await wait(`[data-head="true"] [data-iteration="${run.review.first}"]`);
     await wait("[data-outdated]");
