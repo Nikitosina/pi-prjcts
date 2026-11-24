@@ -4,13 +4,14 @@ export function reviewTour(snapshot, chatId, rpc, live, show) {
     touring = false,
     selected = "",
     timer;
-  const changed = (map, current, path) => map.blobs[":" + path] !== current.get(path)?.blob;
+  const changed = (map, current, path) => map.blobs[":" + path] !== (current.get(path)?.patchId ?? current.get(path)?.blob);
+  const stale = (m) => m.head !== snapshot.head || m.base !== snapshot.base;
   const mode = () => status.map?.steps.find((s) => s.title === selected) ?? status.map?.steps[0];
   function controls() {
     const m = status.map;
     return (
       (m
-        ? `<div class="seg"><button data-tour-mode="files" aria-pressed="${!touring}">Files</button><button data-tour-mode="tour" aria-pressed="${touring}">✦ Tour ${m.steps.indexOf(mode()) + 1}/${m.steps.length}${m.head !== snapshot.head ? " •" : ""}</button></div>`
+        ? `<div class="seg"><button data-tour-mode="files" aria-pressed="${!touring}">Files</button><button data-tour-mode="tour" aria-pressed="${touring}">✦ Tour ${m.steps.indexOf(mode()) + 1}/${m.steps.length}${stale(m) ? " •" : ""}</button></div>`
         : "") +
       (status.building
         ? '<span data-tour-building class="small muted">✦ Scout is drawing the review map…</span>'
@@ -32,7 +33,7 @@ export function reviewTour(snapshot, chatId, rpc, live, show) {
       if (status.building) return poll();
       const control = live().querySelector("[data-tour-control]");
       if (!control?.childElementCount) return;
-      if (live().querySelector(".rv-compose") || status.error) {
+      if (live().querySelector(".rv-compose,dialog[open]") || status.error) {
         control.innerHTML = controls();
         return;
       }
@@ -60,16 +61,16 @@ export function reviewTour(snapshot, chatId, rpc, live, show) {
               `<button data-step="${i}" class="tour-step ${s.files.some(modified) ? "changed" : ""}" aria-current="${s === step}"><span>${i + 1}</span><b>${esc(s.title)}</b><small>${s.files.some(modified) ? "↻" : esc(s.risk)}</small></button>`,
           )
           .join(""),
-      intro: `${m.head !== snapshot.head ? `<div class="stale-map">↻ Map built on ${esc(m.head.slice(0, 8))}. Marked files changed; notes may be outdated. ${status.building ? "" : "<button data-tour-request>↻ Rebuild map</button>"}</div>` : ""}<section class="tour-card"><small>STEP ${idx + 1} OF ${m.steps.length} · ${esc(step.risk.toUpperCase())} RISK</small><h2>${esc(step.title)}</h2><small>✦ Scout’s map · ${m.ours ? "diff + Ready report" : "diff + PR description"}</small><p>${esc(step.why)}</p>${step.checks.map((c) => `<label><input type="checkbox"> ${esc(c)}</label>`).join("")}<button data-approve-step ${stepFiles.length ? "" : "disabled"}>✓ Approve step</button></section>`,
+      intro: `${stale(m) ? `<div class="stale-map">↻ Map built on ${esc(m.head.slice(0, 8))}. Marked files changed; notes may be outdated. ${status.building ? "" : "<button data-tour-request>↻ Rebuild map</button>"}</div>` : ""}<section class="tour-card"><small>STEP ${idx + 1} OF ${m.steps.length} · ${esc(step.risk.toUpperCase())} RISK</small><h2>${esc(step.title)}</h2><small>✦ Scout’s map · ${m.ours ? "diff + Ready report" : "diff + PR description"}</small><p>${esc(step.why)}</p>${step.checks.map((c) => `<label><input type="checkbox"> ${esc(c)}</label>`).join("")}<button data-approve-step ${stepFiles.length ? "" : "disabled"}>✓ Approve step</button></section>`,
     };
   }
-  async function click(el, files) {
+  async function click(el) {
     const d = el.dataset;
     if ("tourRequest" in d) {
       if (status.building) return true;
       el.disabled = true;
       try {
-        status = await rpc("tour", { head: snapshot.head, chatId });
+        status = await rpc("tour", { head: snapshot.head, base: snapshot.base, chatId });
         if (!live()) return;
         live().querySelector("[data-tour-control]").innerHTML = controls();
         if (status.building) poll();
@@ -84,7 +85,13 @@ export function reviewTour(snapshot, chatId, rpc, live, show) {
     else if ("approveStep" in d) {
       el.disabled = true;
       try {
-        for (const f of files) if (!f.viewed) await rpc("viewed", { head: snapshot.head, path: f.path, viewed: true });
+        await rpc("approve-step", {
+          head: snapshot.head,
+          base: snapshot.base,
+          mapHead: status.map.head,
+          mapBase: status.map.base,
+          title: mode().title,
+        });
       } finally {
         el.disabled = false;
       }

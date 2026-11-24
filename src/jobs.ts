@@ -867,7 +867,8 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
         }
         if (report !== undefined && reportRef === undefined) {
           const agent = (await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext))?.agents[reporter.input.agentId];
-          const summary = agent?.mapRequestId && host.reviewMapReport ? await host.reviewMapReport(agent, report) : report;
+          const summary =
+            !reporter.input.seq && agent?.mapRequestId && host.reviewMapReport ? await host.reviewMapReport(agent, report) : report;
           const drift = agent?.readHead ? await host.readDrift?.(agent as Agent) : null;
           const read = agent?.reads?.find((item) => item.seq === (reporter.input.seq ?? 0));
           const notes = [

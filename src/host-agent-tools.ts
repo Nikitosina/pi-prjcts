@@ -154,6 +154,7 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
   "follow-poll": allow("Poll followed pull requests now."),
   prs: allow("A project's pull requests."),
   "pr-review-open": allow("Read a PR review snapshot. Leave seen unset."),
+  "pr-review-approve-step": exclude("Viewed files belong to the owner."),
   "pr-review-tour": exclude("Owner-requested scout."),
   "pr-review-tour-status": allow("Read the local review map."),
   "pr-review-files": allow("List files at an observed PR head."),

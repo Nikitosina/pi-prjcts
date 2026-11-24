@@ -332,7 +332,7 @@ export type PrDetailData = {
 export type PrCheck = { name: string; result: string };
 export type PrIteration = { head: string; base: string; checks?: PrCheck[] };
 export type PrRange = { base: string; head: string };
-export type PrFile = { path: string; status: string; blob: string; stats?: { additions: number; deletions: number } };
+export type PrFile = { patchId?: string; path: string; status: string; blob: string; stats?: { additions: number; deletions: number } };
 export type PrReviewThread = {
   id?: string;
   path: string;

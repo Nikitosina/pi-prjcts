@@ -12,6 +12,7 @@ type History = DraftBook &
   MapBook & {
     iterations: PrIteration[];
     observed?: string[];
+    liveRange?: PrRange;
     seenAt?: number;
     previous: string | null;
     marks: Record<string, string>;
@@ -113,7 +114,7 @@ export async function reviewRead(root: Conversation, p: Project, source: PrRevie
     if (!route) throw Error("No tour destination");
     const snap = await source.snapshot(p, i.pr, []),
       range = snap.iterations.find((it) => it.head === i.head);
-    if (snap.head !== i.head || !range) throw Error("PR head changed. Reopen the room.");
+    if (snap.head !== i.head || !range || (i.base && range.base !== i.base)) throw Error("PR range changed. Reopen the room.");
     const files = await source.files(p, i.pr, range);
     if (!files.length || files.length > 500) throw Error("Tour requires 1–500 changed files");
     const req: MapRequest = {
@@ -128,7 +129,7 @@ export async function reviewRead(root: Conversation, p: Project, source: PrRevie
     const text = requestText(req, (route.ready ?? snap.description ?? "").slice(0, 16000), files);
     if (text.length > 64000) throw Error("Tour brief exceeds size limit");
     const send = await history((h) => {
-      if (tourView(h).building || (h.map?.head === i.head && !h.mapError)) return false;
+      if (tourView(h).building || (h.map?.head === i.head && h.map.base === range.base && !h.mapError)) return false;
       h.request = req;
       delete h.mapError;
       return true;
@@ -187,13 +188,15 @@ export async function reviewRead(root: Conversation, p: Project, source: PrRevie
         byHead.set(it.head, { ...prior, ...it, base: prior?.base ?? it.base });
       }
       const iterations = Array.from(byHead.values()).slice(-100);
+      const base = snapshot.iterations.find((it) => it.head === snapshot.head)!.base;
+      h.liveRange = { head: snapshot.head, base };
       const previous = h.previous;
       h.iterations = iterations;
       if (i.seen && started > (h.seenAt ?? 0)) {
         h.previous = snapshot.head;
         h.seenAt = started;
       }
-      return { ...draftView(h, i.pr, delivery.chat), previous, iterations: JSON.parse(JSON.stringify(iterations)) as PrIteration[] };
+      return { ...draftView(h, i.pr, delivery.chat), base, previous, iterations: JSON.parse(JSON.stringify(iterations)) as PrIteration[] };
     });
     return { ...snapshot, ...stored, tour: await history(tourView), capabilities: source.capabilities };
   }
@@ -201,11 +204,15 @@ export async function reviewRead(root: Conversation, p: Project, source: PrRevie
     const iteration = (sha: string) => {
       const it = h.iterations.find((x) => x.head === sha);
       if (!it) throw Error("Unknown PR iteration. Open the review first.");
+      if (i.base && sha === i.head && i.base !== it.base) {
+        if (h.liveRange?.head !== sha || h.liveRange.base !== i.base) throw Error("Review base changed. Reopen the room.");
+        return { head: sha, base: i.base };
+      }
       return { head: it.head, base: it.base };
     };
     return {
       head: iteration(i.head),
-      since: i.since ? iteration(i.since) : null,
+      since: "since" in i && i.since ? iteration(i.since) : null,
       marks: i.action === "pr-review-files" ? { ...h.marks } : {},
     };
   });
@@ -214,6 +221,15 @@ export async function reviewRead(root: Conversation, p: Project, source: PrRevie
   const cacheKey = (...parts: unknown[]) => JSON.stringify([p.id, docKey, ...parts]);
   const list = (r: PrRange) => fileLists(cacheKey("files", r.base, r.head), () => source.files(p, i.pr, r));
   const files = await list(range);
+  if (i.action === "pr-review-approve-step")
+    return history((h) => {
+      if (h.map?.head !== i.mapHead || h.map.base !== i.mapBase) throw Error("Map changed. Reopen the tour.");
+      const step = h.map.steps.find((s) => s.title === i.title);
+      if (!step) throw Error("Unknown map step");
+      const paths = new Set(step.files);
+      for (const f of files) if (paths.has(f.path)) h.marks[":" + f.path] = f.blob;
+      return { viewed: true };
+    });
   const find = (list: PrFile[], path: string) => {
     let byPath = indexes.get(list);
     if (!byPath) {

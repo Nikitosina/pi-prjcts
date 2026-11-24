@@ -26,7 +26,7 @@ const step = Type.Object(
   closed,
 );
 const shape = Type.Object({ steps: Type.Array(step, { minItems: 1, maxItems: 64 }) }, closed);
-export type ReviewMap = Static<typeof shape> & { head: string; blobs: Record<string, string>; ours: boolean };
+export type ReviewMap = Static<typeof shape> & { head: string; base: string; blobs: Record<string, string>; ours: boolean };
 export type MapRequest = { id: string; pr: string; provider: string; range: PrRange; chat: number; at: number; ours: boolean };
 export type MapBook = { map?: ReviewMap; request?: MapRequest; mapError?: string };
 export function tourView(h: MapBook) {
@@ -72,7 +72,7 @@ export async function validateMap(
       }
     }
   }
-  return { head: req.range.head, ours: req.ours, steps, blobs: Object.fromEntries(files.map((f) => [":" + f.path, f.blob])) };
+  return { ...req.range, ours: req.ours, steps, blobs: Object.fromEntries(files.map((f) => [":" + f.path, f.patchId ?? f.blob])) };
 }
 export function requestText(r: MapRequest, context: string, files: PrFile[]) {
   return (

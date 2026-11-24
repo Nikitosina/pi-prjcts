@@ -1228,9 +1228,19 @@ const journeys = {
     await open();
     await page.click('[data-tour-mode="tour"]');
     await wait(".stale-map");
-    if (await page.evaluate(`document.querySelectorAll('[data-step].changed').length!==1`)) throw Error("wrong stale steps");
+    if (
+      await page.evaluate(`document.querySelectorAll('[data-step].changed').length!==1||!document.querySelector('[data-step="0"].changed')`)
+    )
+      throw Error("wrong stale steps");
     await page.shot(dir, "04-stale");
+    await page.click('[data-step="1"]');
+    await wait('[data-step="1"][aria-current="true"]');
     await page.click("[data-tour-request]");
+    await page.waitFor(
+      `!document.querySelector(".stale-map") && !!document.querySelector(\'[data-step="1"][aria-current="true"]\')`,
+      "selection after rebuild",
+    );
+    await page.click('[data-step="0"]');
     await wait(".tour-note");
     await page.shot(dir, "05-step");
     await page.evaluate(`document.documentElement.dataset.theme='light'`);

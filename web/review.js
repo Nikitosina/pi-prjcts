@@ -63,7 +63,7 @@ export async function renderReview(root, focus, afterWrite = "") {
     );
     async function show(head = s.head, since = false) {
       const gen = ++version;
-      const range = { head, ...(since ? { since: s.previous } : {}) };
+      const range = { head, ...(head === s.head && s.base ? { base: s.base } : {}), ...(since ? { since: s.previous } : {}) };
       let fileNotice = "";
       const { files: allFiles, baseMoved } = await rpc("files", range).catch((err) => {
         if (!s.uncertain) throw err;
@@ -291,7 +291,7 @@ export async function renderReview(root, focus, afterWrite = "") {
         const d = el.dataset,
           b = el.closest(".fblock"),
           i = +(b?.dataset.idx ?? 0);
-        if (el.matches("[data-tour-request],[data-tour-mode],[data-step],[data-approve-step]")) return tour.click(el, files);
+        if (el.matches("[data-tour-request],[data-tour-mode],[data-step],[data-approve-step]")) return tour.click(el);
         if ("tree" in d) {
           const open = q(".rv-files").classList.toggle("open");
           el.setAttribute("aria-expanded", open);

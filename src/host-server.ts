@@ -1629,6 +1629,7 @@ async function dispatchRequest(input: RequestData, literalMessage = false): Prom
         unloaded: granted && granted !== "github" && !plugins.workspaceProvider(granted) ? [granted] : [],
       };
     }
+    case "pr-review-approve-step":
     case "pr-review-tour":
     case "pr-review-tour-status":
     case "pr-review-open":
