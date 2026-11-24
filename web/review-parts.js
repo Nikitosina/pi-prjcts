@@ -1,4 +1,4 @@
-import { discussion } from "./diff.js";
+import { discussion, threadActions } from "./diff.js";
 import { esc } from "./format.js";
 const counts = (a, d) => `<span class="plus">+${esc(a)}</span> <span class="minus">−${esc(d)}</span>`;
 const pathParts = (p) => [p.slice(0, p.lastIndexOf("/") + 1), p.slice(p.lastIndexOf("/") + 1)];
@@ -41,12 +41,12 @@ export function header(s, focus, head, since, split, wrap, files, checks, open, 
   )}</span><span class="muted">${files.length} files</span><span class="grow"></span><ol class="iter-dots">${s.iterations.map((it) => `<li data-head="${it.head === head}"><button title="${esc(it.head)}" data-iteration="${esc(it.head)}"><span>${v(it.head)}</span></button></li>`).join("")}</ol><div class="seg range-seg">${choice("all", "All changes " + v(head), !since)}${choice("since", "Since you looked", since, !s.previous || s.iterations.findIndex((it) => it.head === s.previous) >= s.iterations.findIndex((it) => it.head === head))}</div></div>${since ? `<div class="since-note">↻ Showing changes between <b>${v(s.previous)}</b> (you looked here) and <b>${v(head)}</b>. Viewed marks reset for files that changed.</div>` : ""}`;
 }
 export function context(s, head, checks, open) {
-  return `<section class="ctx-section"><h2>Checks <span class="count">${checks?.length ?? "—"}</span></h2>${checks?.map((c) => `<div class="ck-row"><span>${pass(c) ? "✓" : "·"}</span><span>${esc(c.name)}</span><span class="grow"></span><small class="muted mono">${esc(c.result)}</small></div>`).join("") || '<small class="muted">No checks reported</small>'}</section><section class="ctx-section"><h2>Open threads <span class="count">${open.length}</span></h2>${open
+  return `<section class="ctx-section"><h2>Checks <span class="count">${checks?.length ?? "—"}</span></h2>${checks?.map((c) => `<div class="ck-row"><span>${pass(c) ? "✓" : "·"}</span><span>${esc(c.name)}</span><span class="grow"></span><small class="muted mono">${esc(c.result)}</small></div>`).join("") || '<small class="muted">No checks reported</small>'}</section><section class="ctx-section"><h2>Threads <span class="count">${open.length}</span></h2>${open
     .map((t) => {
-      const label = `<span class="th-tag">${esc(t.severity || "◌")}</span><span class="ct-text">${esc(t.comments[0]?.body)}</span><span class="ct-loc mono muted">${esc(t.path)}:${esc(t.line ?? "—")}${t.jumpable ? "" : " · Outside diff"}</span>`;
+      const label = `<span class="th-tag">${esc(t.severity || "◌")}</span><span class="ct-text">${esc(t.comments[0]?.body)}</span><span class="ct-loc mono muted">${esc(t.path)}:${esc(t.line ?? "—")}${t.resolved ? " · Resolved" : ""}${t.jumpable ? "" : " · Outside diff"}</span>`;
       return t.jumpable
         ? `<button class="ctx-thread" data-jump="${t.index}">${label}</button>`
-        : `<details class="thread"><summary class="ctx-thread">${label}</summary>${discussion(t)}</details>`;
+        : `<details class="thread"><summary class="ctx-thread">${label}</summary>${discussion(t)}${threadActions(t)}</details>`;
     })
     .join("")}</section><section class="ctx-section"><h2>Iterations</h2><ol class="iter-list">${s.iterations
     .map(

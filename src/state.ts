@@ -1431,7 +1431,7 @@ export const Request = Type.Union([
     { additionalProperties: false },
   ),
   Type.Object(
-    { action: Type.Literal("pr-review-checked"), ...reviewId, revision: Id, confirmed: Type.Literal(true) },
+    { action: Type.Literal("pr-review-checked"), ...reviewId, revision: Id, confirmed: Type.Literal(true), found: Type.Boolean() },
     { additionalProperties: false },
   ),
   Type.Object({ action: Type.Literal("pr-review-send"), ...reviewId, revision: Id, chatId: ChatId }, { additionalProperties: false }),

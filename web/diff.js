@@ -109,11 +109,16 @@ export function discussion(t) {
     )
     .join("");
 }
+export function threadActions(t) {
+  return (
+    (t.canReply ? `<button data-reply="${t.index}">Reply…</button>` : "") +
+    (t.canResolve ? `<button data-resolve="${t.index}">${t.resolved ? "Unresolve" : "Resolve"}…</button>` : "")
+  );
+}
 function thread(t) {
   const comments =
     discussion(t) +
-    (t.canReply ? `<button data-reply="${t.index}">Reply…</button>` : "") +
-    (t.canResolve ? `<button data-resolve="${t.index}">${t.resolved ? "Unresolve" : "Resolve"}…</button>` : "") +
+    threadActions(t) +
     (t.fixable ? `<button class="ghost-btn small" data-fix-thread="${t.index}">Add to fix list</button>` : "");
   return `<div class="row-extra" data-thread="${t.index}">${t.resolved ? `<details class="thread"><summary class="th-collapsed"><span class="th-av">${esc(t.comments[0]?.author.slice(0, 1).toUpperCase())}</span><b>Resolved</b><span class="th-snip">${esc(t.comments[0]?.body)}</span>${t.comments.length} comment${t.comments.length === 1 ? "" : "s"} ▸</summary>${comments}</details>` : `<aside class="thread">${comments}</aside>`}</div>`;
 }

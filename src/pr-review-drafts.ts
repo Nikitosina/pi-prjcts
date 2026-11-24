@@ -10,7 +10,12 @@ type Draft = Pick<Add, "head" | "since" | "path" | "side" | "from" | "to" | "com
   sent?: string;
   published?: string;
 };
-export type DraftBook = { uncertain?: { description: string; at: string }; drafts?: Draft[]; revision?: string; sendingTo?: string };
+export type DraftBook = {
+  uncertain?: { description: string; at: string; draftIds: string[]; url: string; head: string };
+  drafts?: Draft[];
+  revision?: string;
+  sendingTo?: string;
+};
 export type ReviewChat = { id: string; title: string };
 export type ReviewDelivery = { chat: ReviewChat | null; send: (text: string, id: string, chatId: string) => Promise<unknown> };
 const pending = (h: DraftBook) => h.drafts?.filter((d) => d.destination === "worker" && !d.sent && !d.published) ?? [];
@@ -29,7 +34,7 @@ export function draftView(h: DraftBook, pr: string, chat: ReviewChat | null) {
   return {
     drafts: structuredClone(Array.from(h.drafts ?? [], (d) => ({ ...d }))),
     revision: h.revision,
-    uncertain: h.uncertain ? { ...h.uncertain } : null,
+    uncertain: h.uncertain ? { ...h.uncertain, draftIds: [...h.uncertain.draftIds] } : null,
     chat,
     preview: chat && pending(h).length ? message(pr, pending(h)) : null,
   };

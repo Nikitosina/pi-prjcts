@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { publishReview, checkedReview } from "./pr-review-publish.ts";
+import { publishReview, checkedReview, uncertainRoom } from "./pr-review-publish.ts";
 import { defineDoc, type Conversation } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { PrFile, PrIteration, PrRange, PrReviewSource } from "./plugin-types.ts";
@@ -61,10 +61,12 @@ export async function reviewRead(root: Conversation, p: Project, source: PrRevie
       return fn(doc.prs[docKey]!);
     }, BACKGROUND_CONTEXT);
   if (i.action === "pr-review-publish") return publishReview(history, source, p, i);
-  if (i.action === "pr-review-checked") return history((h) => checkedReview(h, i.revision));
+  if (i.action === "pr-review-checked") return history((h) => checkedReview(h, i.revision, i.found));
   if (i.action === "pr-review-send") return sendDrafts(history, i, delivery);
   if (i.action === "pr-review-edit" || i.action === "pr-review-delete") return history((h) => changeDraft(h, i, delivery.chat));
   if (i.action === "pr-review-open") {
+    const uncertain = await history(uncertainRoom);
+    if (uncertain) return uncertain;
     const snapshot = await source.snapshot(p, i.pr, await history((h) => [...(h.observed ?? [])]));
     if (
       !snapshot.iterations.some((it) => it.head === snapshot.head) ||

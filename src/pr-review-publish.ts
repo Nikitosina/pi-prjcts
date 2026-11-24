@@ -3,9 +3,14 @@ import type { PrPublish, PrReviewSource, PrIteration } from "./plugin-types.ts";
 import type { Project, Request } from "./state.ts";
 import type { DraftBook } from "./pr-review-drafts.ts";
 
+export function uncertainRoom(h: DraftBook) {
+  const u = h.uncertain;
+  return u ? { uncertain: { description: u.description, at: u.at }, url: u.url, head: u.head, revision: h.revision } : null;
+}
 const inFlight = new Set<string>();
-export function checkedReview(h: DraftBook, revision: string) {
+export function checkedReview(h: DraftBook, revision: string, found: boolean) {
   if (inFlight.has(revision) || !h.uncertain || h.revision !== revision) throw Error("Review is still in progress or changed. Reopen it.");
+  if (found) for (const d of h.drafts ?? []) if (h.uncertain.draftIds.includes(d.id)) d.published = h.uncertain.url;
   delete h.uncertain;
   h.revision = randomUUID();
   return { checked: true };
@@ -20,6 +25,8 @@ export async function publishReview(
   if (!source.publish || !source.capabilities[op.kind === "review" ? "publish" : op.kind === "reply" ? "reply" : "resolve"])
     throw Error("Provider does not support this review action");
   const snapshot = await source.snapshot(p, i.pr, []);
+  if (!snapshot.url || !/^https?:\/\//i.test(snapshot.url)) throw Error("Provider must supply a PR link");
+  const urlOfPr = snapshot.url;
   if (snapshot.head !== i.head) throw Error("PR head changed. Reopen the review.");
   if (op.kind !== "review" && !snapshot.threads.some((t) => t.id === op.threadId)) throw Error("Thread not found on this PR");
   if (
@@ -55,6 +62,9 @@ export async function publishReview(
           : op;
       h.revision = revision;
       h.uncertain = {
+        head: i.head,
+        url: urlOfPr,
+        draftIds: op.kind === "review" ? [...op.draftIds] : [],
         description: op.kind === "review" ? `${op.verdict} · ${op.draftIds.length} inline comments` : `${op.kind} · ${op.threadId}`,
         at: new Date().toISOString(),
       };
@@ -65,7 +75,7 @@ export async function publishReview(
       ({ url } = await source.publish(p, i.pr, snapshot, intent));
       if (!/^https?:\/\//i.test(url)) throw Error("Missing provider receipt");
     } catch {
-      return { uncertain: true };
+      return history((h) => uncertainRoom(h));
     }
     return await history((h) => {
       if (h.revision !== revision) throw Error("Review changed during publish");
