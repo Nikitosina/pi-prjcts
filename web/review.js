@@ -59,9 +59,9 @@ export async function renderReview(root, focus, afterWrite = "") {
       openingChat,
       rpc,
       () => room.isConnected && room,
-      () => show(),
+      (automatic = false) => show(s.head, false, automatic),
     );
-    async function show(head = s.head, since = false) {
+    async function show(head = s.head, since = false, automatic = false) {
       const gen = ++version;
       const range = { head, ...(head === s.head && s.base ? { base: s.base } : {}), ...(since ? { since: s.previous } : {}) };
       let fileNotice = "";
@@ -71,6 +71,11 @@ export async function renderReview(root, focus, afterWrite = "") {
         return { files: [], baseMoved: false };
       });
       if (!room.isConnected || gen !== version) return;
+      if (automatic && room.querySelector(".rv-compose,dialog[open]")) {
+        const control = room.querySelector("[data-tour-control]");
+        if (control) control.innerHTML = tour.controls();
+        return;
+      }
       observer?.disconnect();
       const enabled = head === s.head && !since,
         guided = tour.view(allFiles, enabled),

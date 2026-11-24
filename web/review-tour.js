@@ -38,7 +38,7 @@ export function reviewTour(snapshot, chatId, rpc, live, show) {
         return;
       }
       touring = !!status.map;
-      await show();
+      await show(true);
     }, 1200);
   }
   function view(files, enabled) {
@@ -61,7 +61,7 @@ export function reviewTour(snapshot, chatId, rpc, live, show) {
               `<button data-step="${i}" class="tour-step ${s.files.some(modified) ? "changed" : ""}" aria-current="${s === step}"><span>${i + 1}</span><b>${esc(s.title)}</b><small>${s.files.some(modified) ? "↻" : esc(s.risk)}</small></button>`,
           )
           .join(""),
-      intro: `${stale(m) ? `<div class="stale-map">↻ Map built on ${esc(m.head.slice(0, 8))}. Marked files changed; notes may be outdated. ${status.building ? "" : "<button data-tour-request>↻ Rebuild map</button>"}</div>` : ""}<section class="tour-card"><small>STEP ${idx + 1} OF ${m.steps.length} · ${esc(step.risk.toUpperCase())} RISK</small><h2>${esc(step.title)}</h2><small>✦ Scout’s map · ${m.ours ? "diff + Ready report" : "diff + PR description"}</small><p>${esc(step.why)}</p>${step.checks.map((c) => `<label><input type="checkbox"> ${esc(c)}</label>`).join("")}<button data-approve-step ${stepFiles.length ? "" : "disabled"}>✓ Approve step</button></section>`,
+      intro: `${stale(m) ? `<div class="stale-map">↻ Map built on ${esc(m.head.slice(0, 8))}. Marked files changed; notes may be outdated. ${status.building ? "" : "<button data-tour-request>↻ Rebuild map</button>"}</div>` : ""}<section class="tour-card"><small>STEP ${idx + 1} OF ${m.steps.length} · ${esc(step.risk.toUpperCase())} RISK</small><h2>${esc(step.title)}</h2><small>✦ Scout’s map · ${m.ours ? "diff + Ready report" : "diff + PR description"}</small><p>${esc(step.why)}</p>${step.checks.map((c) => `<label><input type="checkbox"> ${esc(c)}</label>`).join("")}<button data-approve-step data-map-head="${esc(m.head)}" data-map-base="${esc(m.base)}" data-title="${esc(step.title)}" ${stepFiles.length ? "" : "disabled"}>✓ Approve step</button></section>`,
     };
   }
   async function click(el) {
@@ -88,9 +88,9 @@ export function reviewTour(snapshot, chatId, rpc, live, show) {
         await rpc("approve-step", {
           head: snapshot.head,
           base: snapshot.base,
-          mapHead: status.map.head,
-          mapBase: status.map.base,
-          title: mode().title,
+          mapHead: d.mapHead,
+          mapBase: d.mapBase,
+          title: d.title,
         });
       } finally {
         el.disabled = false;

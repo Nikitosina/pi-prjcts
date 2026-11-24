@@ -1,6 +1,13 @@
 import { esc } from "./format.js";
 const link = (s) =>
   /^https?:\/\//i.test(s.url) ? `<a target="_blank" rel="noopener" href="${esc(s.url)}">${esc(s.url)} ↗</a>` : esc(s.title);
+export function oldBase(d, s) {
+  return (
+    d.side === "LEFT" &&
+    (d.since ?? d.base ?? s.iterations.find((it) => it.head === d.head)?.base) !==
+      (s.base ?? s.iterations.find((it) => it.head === s.head)?.base)
+  );
+}
 export function writeBanner(s) {
   const u = s.uncertain;
   return u
@@ -26,7 +33,7 @@ export function providerDialog({ room, s, key, thread, rpc, reload }) {
   const drafts = (s.drafts ?? []).filter((d) => !d.sent && !d.published);
   const choices = drafts
     .map((d) => {
-      const outdated = d.head !== head || (d.side === "LEFT" && d.since && d.since !== s.iterations.find((it) => it.head === head)?.base);
+      const outdated = d.head !== head || oldBase(d, s);
       return `<label class="rv-pick"><input type="checkbox" value="${esc(d.id)}" ${outdated ? "disabled" : d.destination === "provider" ? "checked" : ""}><span><small class="mono">${esc(d.path)}:${d.from}–${d.to} · ${d.side}${outdated ? " · Outdated" : ""}</small><span>${esc(d.comment)}</span></span></label>`;
     })
     .join("");

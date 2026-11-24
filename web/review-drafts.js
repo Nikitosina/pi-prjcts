@@ -1,4 +1,4 @@
-import { providerDialog } from "./review-publish.js";
+import { providerDialog, oldBase } from "./review-publish.js";
 import { esc } from "./format.js";
 
 export function reviewDrafts({ room, panel, s, files, currentFiles, range, threads, rpc, reload }) {
@@ -20,11 +20,8 @@ export function reviewDrafts({ room, panel, s, files, currentFiles, range, threa
       drafts
         .map((d) => {
           const outdated =
-            d.head !== s.head &&
-            (!currentFiles.has(d.path) ||
-              (d.side === "LEFT"
-                ? (d.since ?? d.base ?? s.iterations.find((it) => it.head === d.head)?.base) !== s.base
-                : currentFiles.get(d.path) !== d.blob));
+            (!d.since && oldBase(d, s)) ||
+            (d.head !== s.head && (!currentFiles.has(d.path) || (d.side === "LEFT" ? oldBase(d, s) : currentFiles.get(d.path) !== d.blob)));
           return `<article class="rv-draft"><small class="mono muted">${esc(label(d))}</small>${outdated ? "<small data-outdated>Outdated</small>" : ""}<p>${esc(d.comment)}</p>${d.published ? `<a href="${esc(d.published)}" target="_blank" rel="noopener" data-published>Published ↗</a>` : d.sent ? `<small data-sent>Sent · ${esc(new Date(d.sent).toLocaleString())}</small>` : s.uncertain?.draftIds.includes(d.id) ? "<small>Awaiting PR check</small>" : `<small>${d.destination === "provider" ? "Provider draft" : "Fix list"}</small> <button data-edit-draft="${d.id}">Edit</button> <button data-delete-draft="${d.id}">Delete</button>`}</article>`;
         })
         .join("");
