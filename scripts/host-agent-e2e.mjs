@@ -211,6 +211,10 @@ await kit.run(async () => {
   );
 
   // A dangerous call becomes a pending approval and does not run.
+  check(
+    "review publishing is unavailable to host_call",
+    /not available/i.test((await send(`HA-CALL host_call {"action":"pr-review-publish","input":{}}`)).at(-1).text),
+  );
   const gated = await send(`HA-CALL host_call {"action":"archive","input":{"id":"${id}"},"summary":"Archive the fixture"}`);
   check("dangerous call answers pending", /pending/i.test(gated.at(-1).text), gated.at(-1).text);
   const pending = await eventually(

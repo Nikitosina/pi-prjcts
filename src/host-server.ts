@@ -1636,6 +1636,8 @@ async function dispatchRequest(input: RequestData, literalMessage = false): Prom
     case "pr-review-add":
     case "pr-review-edit":
     case "pr-review-delete":
+    case "pr-review-publish":
+    case "pr-review-checked":
     case "pr-review-send":
     case "pr-review-viewed": {
       const project = loadProject(input.id),

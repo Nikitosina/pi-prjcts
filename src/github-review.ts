@@ -1,3 +1,4 @@
+import { publishGithubReview } from "./github-review-publish.ts";
 import { checkoutRepository } from "./github-authorization.ts";
 import { githubGraphql } from "./github-prs.ts";
 import { Type, type TSchema } from "typebox";
@@ -27,7 +28,7 @@ async function checkout(p: Project) {
   return git;
 }
 const checksFields = `statusCheckRollup{contexts(first:100){totalCount nodes{... on CheckRun{name status conclusion} ... on StatusContext{context state}}}}`;
-const query = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){databaseId pullRequest(number:$number){title state isDraft headRefName baseRefName author{login} headRefOid baseRefOid timelineItems(last:50,itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT]){nodes{... on HeadRefForcePushedEvent{beforeCommit{oid} afterCommit{oid}}}} commits(last:1){nodes{commit{${checksFields}}}} reviewThreads(first:100){totalCount nodes{path line diffSide isResolved isOutdated comments(first:20){totalCount nodes{author{login} createdAt body commit{oid}}}}}}}}`;
+const query = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){databaseId pullRequest(number:$number){id title state isDraft headRefName baseRefName author{login} headRefOid baseRefOid timelineItems(last:50,itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT]){nodes{... on HeadRefForcePushedEvent{beforeCommit{oid} afterCommit{oid}}}} commits(last:1){nodes{commit{${checksFields}}}} reviewThreads(first:100){totalCount nodes{id path line diffSide isResolved isOutdated comments(first:20){totalCount nodes{author{login} createdAt body commit{oid}}}}}}}}`;
 const nullable = <T extends TSchema>(t: T) => Type.Union([t, Type.Null()]);
 const str = Type.String(),
   oid = Type.String({ pattern: "^[a-f0-9]{40}$" }),
@@ -43,6 +44,7 @@ const check = Type.Object({
 });
 const checks = Type.Object({ statusCheckRollup: nullable(Type.Object({ contexts: nodes(check) })) });
 const metadata = Type.Object({
+  id: str,
   title: str,
   state: str,
   isDraft: Type.Boolean(),
@@ -55,6 +57,7 @@ const metadata = Type.Object({
   commits: nodes(Type.Object({ commit: checks })),
   reviewThreads: nodes(
     Type.Object({
+      id: str,
       path: str,
       line: nullable(Type.Integer()),
       diffSide: Type.Union([Type.Literal("LEFT"), Type.Literal("RIGHT")]),
@@ -66,7 +69,8 @@ const metadata = Type.Object({
 });
 const diffArgs = ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color"];
 export const githubReview: PrReviewSource = {
-  capabilities: { viewedSync: false, annotations: false, issues: false, suggestions: false },
+  publish: publishGithubReview,
+  capabilities: { publish: true, reply: true, resolve: true, viewedSync: false, annotations: false, issues: false, suggestions: false },
   async authorize(p) {
     await checkout(p);
     return String(p.githubAuthorization![0]!.numericId);
@@ -146,6 +150,7 @@ export const githubReview: PrReviewSource = {
     if (pr.reviewThreads.nodes.some((t) => (t.comments.totalCount ?? 0) > t.comments.nodes.length))
       notices.add("Long discussions show their first 20 comments.");
     return {
+      providerId: pr.id,
       title: pr.title.slice(0, 300),
       author: pr.author?.login ?? "",
       head,
@@ -156,6 +161,7 @@ export const githubReview: PrReviewSource = {
       iterations,
       notice: [...notices].join(" "),
       threads: pr.reviewThreads.nodes.map((t) => ({
+        id: t.id,
         path: t.path,
         line: t.line,
         side: t.diffSide ?? "RIGHT",

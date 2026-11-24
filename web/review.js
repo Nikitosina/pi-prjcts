@@ -4,6 +4,7 @@ import { state } from "./state.js";
 import { renderDiff, contextRows } from "./diff.js";
 import { context, header, fileHeader, fileTree } from "./review-parts.js";
 import { reviewDrafts } from "./review-drafts.js";
+import { writeBanner } from "./review-publish.js";
 import { typing } from "./hotkeys.js";
 const generated = (path) => /(?:^|\/)(?:dist|vendor|generated)\/|(?:\.lock|[-.]lock\.json|\.min\.(?:css|js)|\.generated\.\w+)$/.test(path);
 const back = `<button class="back" data-cmd="leave-focus" aria-label="Back to chat">← <kbd>Esc</kbd></button>`;
@@ -12,7 +13,7 @@ export function closeReview() {
   cleanup?.();
   cleanup = null;
 }
-export async function renderReview(root, focus) {
+export async function renderReview(root, focus, afterWrite = "") {
   closeReview();
   const room = document.createElement("section"),
     panel = document.createElement("div");
@@ -47,21 +48,28 @@ export async function renderReview(root, focus) {
   };
   room.innerHTML = `<div class="rv-head">${back}<h1>Reading PR #${esc(focus.id)}…</h1></div>`;
   try {
-    const s = await rpc("open", { seen: true });
+    const s = await rpc("open", { seen: !afterWrite });
     let currentFiles;
     async function show(head = s.head, since = false) {
       const gen = ++version;
       const range = { head, ...(since ? { since: s.previous } : {}) };
-      const { files, baseMoved } = await rpc("files", range);
+      let fileNotice = "";
+      const { files, baseMoved } = await rpc("files", range).catch((err) => {
+        if (!s.uncertain) throw err;
+        fileNotice = "File list unavailable.";
+        return { files: [], baseMoved: false };
+      });
       if (!room.isConnected || gen !== version) return;
       observer?.disconnect();
       const listed = new Set(files.map((f) => f.path));
       const threads = s.threads
         .map((t, index) => ({
           ...t,
+          canReply: t.id && s.capabilities.reply && !s.uncertain,
+          canResolve: t.id && s.capabilities.resolve && !s.uncertain,
           fixable: !!s.chat && !!t.line && !t.outdated && !(since && t.side === "LEFT") && head === s.head,
           index,
-          jumpable: !baseMoved && listed.has(t.path),
+          jumpable: !baseMoved && !t.outdated && !!t.line && listed.has(t.path),
           outdated: t.outdated || (since && t.side === "LEFT"),
         }))
         .filter((t) => head === s.head || t.commit === head);
@@ -70,14 +78,30 @@ export async function renderReview(root, focus) {
         checks = s.iterations.find((it) => it.head === head)?.checks;
       room.innerHTML =
         header(s, focus, head, since, split, wrap, files, checks, open, back) +
-        `${s.notice || baseMoved ? `<div class="since-note">${esc(s.notice)} ${baseMoved ? "Base moved — file list only." : ""}</div>` : ""}<div class="rv-body"><nav class="rv-files"><div class="ft-head"><span class="ft-title">Files</span><button data-tree aria-expanded="false">Files ▸</button><span class="grow"></span><span data-progress class="mono"></span></div><div class="bar ft-bar"><span></span></div><input class="ft-filter" type="search" placeholder="Filter files…" aria-label="Filter files"><div class="rv-paths"></div></nav><div class="rv-scroll">${files.map((f, i) => fileHeader(f, i, baseMoved || generated(f.path), baseMoved)).join("")}<p class="rv-end muted small">End of changes · ${files.length} files</p></div></div><footer class="rv-bar small"></footer>`;
-      panel.innerHTML = context(s, head, checks, open);
+        writeBanner(s) +
+        `${s.notice || fileNotice || baseMoved ? `<div class="since-note">${esc(s.notice)} ${fileNotice} ${baseMoved ? "Base moved — file list only." : ""}</div>` : ""}<div class="rv-body"><nav class="rv-files"><div class="ft-head"><span class="ft-title">Files</span><button data-tree aria-expanded="false">Files ▸</button><span class="grow"></span><span data-progress class="mono"></span></div><div class="bar ft-bar"><span></span></div><input class="ft-filter" type="search" placeholder="Filter files…" aria-label="Filter files"><div class="rv-paths"></div></nav><div class="rv-scroll">${files.map((f, i) => fileHeader(f, i, baseMoved || generated(f.path), baseMoved)).join("")}<p class="rv-end muted small">End of changes · ${files.length} files</p></div></div><footer class="rv-bar small"></footer>`;
+      panel.innerHTML = context(
+        s,
+        head,
+        checks,
+        threads.filter((t) => !t.resolved || !t.jumpable),
+      );
       const q = (sel) => room.querySelector(sel),
         stack = q(".rv-scroll"),
         blocks = [...stack.querySelectorAll(".fblock")],
         filter = q(".ft-filter");
       if (head === s.head && !since) currentFiles = new Map(files.map((f) => [f.path, f.blob]));
-      const drafts = reviewDrafts({ room, panel, s, files, currentFiles, range, threads, rpc });
+      const drafts = reviewDrafts({
+        room,
+        panel,
+        s,
+        files,
+        currentFiles,
+        range,
+        threads,
+        rpc,
+        reload: (status) => room.isConnected && renderReview(root, focus, status),
+      });
       let current = 0;
       const tree = () => {
         const viewed = files.filter((f) => f.viewed).length;
@@ -214,6 +238,7 @@ export async function renderReview(root, focus) {
         return load(i);
       }
       panel.onclick = async (e) => {
+        if (e.target.closest("[data-reply],[data-resolve]")) return drafts.click(e);
         const el = e.target.closest("[data-jump]");
         if (!el || baseMoved) return;
         const t = threads.find((t) => t.index === +el.dataset.jump),
@@ -306,6 +331,7 @@ export async function renderReview(root, focus) {
     await show();
   } catch (e) {
     room.innerHTML = `<div class="rv-head">${back}<h1>Review unavailable</h1></div>`;
+    if (afterWrite) room.insertAdjacentHTML("beforeend", `<div class="since-note">${esc(afterWrite)}</div>`);
     error(e, room);
   }
 }

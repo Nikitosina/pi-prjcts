@@ -341,6 +341,9 @@ export const plugins = {
           review: provider.review
             ? {
                 capabilities: provider.review.capabilities,
+                publish: provider.review.publish
+                  ? (p, id, snapshot, intent) => run(p, () => provider.review!.publish!(p, id, snapshot, intent))
+                  : undefined,
                 authorize: (p) => run(p, () => provider.review!.authorize(p)),
                 snapshot: (p, id, observed) => run(p, () => provider.review!.snapshot(p, id, observed)),
                 files: (p, id, r) => run(p, () => provider.review!.files(p, id, r)),

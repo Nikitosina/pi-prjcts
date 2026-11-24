@@ -1394,6 +1394,46 @@ export const Request = Type.Union([
     { additionalProperties: false },
   ),
   Type.Object({ action: Type.Literal("pr-review-delete"), ...reviewId, draftId: Id, revision: Id }, { additionalProperties: false }),
+  Type.Object(
+    {
+      action: Type.Literal("pr-review-publish"),
+      ...reviewId,
+      confirmed: Type.Literal(true),
+      revision: Id,
+      head: reviewSha,
+      operation: Type.Union([
+        Type.Object(
+          {
+            kind: Type.Literal("review"),
+            verdict: Type.Union([Type.Literal("APPROVE"), Type.Literal("COMMENT"), Type.Literal("REQUEST_CHANGES")]),
+            summary: Type.String({ maxLength: 12000 }),
+            draftIds: Type.Array(Id, { uniqueItems: true, maxItems: 100 }),
+          },
+          { additionalProperties: false },
+        ),
+        Type.Object(
+          {
+            kind: Type.Literal("reply"),
+            threadId: Type.String({ minLength: 1, maxLength: 256 }),
+            body: Type.String({ minLength: 1, maxLength: 4000 }),
+          },
+          { additionalProperties: false },
+        ),
+        Type.Object(
+          {
+            kind: Type.Union([Type.Literal("resolve"), Type.Literal("unresolve")]),
+            threadId: Type.String({ minLength: 1, maxLength: 256 }),
+          },
+          { additionalProperties: false },
+        ),
+      ]),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { action: Type.Literal("pr-review-checked"), ...reviewId, revision: Id, confirmed: Type.Literal(true), found: Type.Boolean() },
+    { additionalProperties: false },
+  ),
   Type.Object({ action: Type.Literal("pr-review-send"), ...reviewId, revision: Id, chatId: ChatId }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("pr-review-files"), ...reviewRange }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("pr-review-file"), ...reviewRange, path: reviewPath }, { additionalProperties: false }),

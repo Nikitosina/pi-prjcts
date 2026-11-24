@@ -160,6 +160,8 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
   "pr-review-add": exclude("Owner review draft."),
   "pr-review-edit": exclude("Owner review draft."),
   "pr-review-delete": exclude("Owner review draft."),
+  "pr-review-publish": exclude("Only the owner may confirm a provider write."),
+  "pr-review-checked": exclude("Only the owner may inspect an uncertain review."),
   "pr-review-send": exclude("Requires owner confirmation."),
   "pr-review-viewed": exclude("Viewed files belong to the owner."),
   "pr-watch": allow("Watch or unwatch a pull request."),
