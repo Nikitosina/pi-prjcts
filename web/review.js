@@ -13,7 +13,7 @@ export function closeReview() {
   cleanup?.();
   cleanup = null;
 }
-export async function renderReview(root, focus) {
+export async function renderReview(root, focus, afterWrite = "") {
   closeReview();
   const room = document.createElement("section"),
     panel = document.createElement("div");
@@ -48,7 +48,7 @@ export async function renderReview(root, focus) {
   };
   room.innerHTML = `<div class="rv-head">${back}<h1>Reading PR #${esc(focus.id)}…</h1></div>`;
   try {
-    const s = await rpc("open", { seen: true });
+    const s = await rpc("open", { seen: !afterWrite });
     let currentFiles;
     async function show(head = s.head, since = false) {
       const gen = ++version;
@@ -100,11 +100,7 @@ export async function renderReview(root, focus) {
         range,
         threads,
         rpc,
-        reload: async () => {
-          if (!room.isConnected) return;
-          Object.assign(s, await rpc("open"));
-          if (room.isConnected) await show();
-        },
+        reload: (status) => room.isConnected && renderReview(root, focus, status),
       });
       let current = 0;
       const tree = () => {
@@ -335,6 +331,7 @@ export async function renderReview(root, focus) {
     await show();
   } catch (e) {
     room.innerHTML = `<div class="rv-head">${back}<h1>Review unavailable</h1></div>`;
+    if (afterWrite) room.insertAdjacentHTML("beforeend", `<div class="since-note">${esc(afterWrite)}</div>`);
     error(e, room);
   }
 }

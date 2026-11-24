@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { publishReview, checkedReview } from "./pr-review-publish.ts";
 import { defineDoc, type Conversation } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { PrFile, PrIteration, PrRange, PrReviewSource } from "./plugin-types.ts";
+import type { PrFile, PrIteration, PrRange, PrReviewSnapshot, PrReviewSource } from "./plugin-types.ts";
 import type { Project, Request } from "./state.ts";
 import { addDraft, changeDraft, draftView, sendDrafts, type DraftBook, type ReviewDelivery } from "./pr-review-drafts.ts";
 type Input = Extract<Request, { action: `pr-review-${string}` }>;
@@ -65,9 +65,15 @@ export async function reviewRead(root: Conversation, p: Project, source: PrRevie
   if (i.action === "pr-review-send") return sendDrafts(history, i, delivery);
   if (i.action === "pr-review-edit" || i.action === "pr-review-delete") return history((h) => changeDraft(h, i, delivery.chat));
   if (i.action === "pr-review-open") {
-    let snapshot;
+    let snapshot: PrReviewSnapshot;
     try {
       snapshot = await source.snapshot(p, i.pr, await history((h) => [...(h.observed ?? [])]));
+      if (
+        !snapshot.iterations.some((it) => it.head === snapshot.head) ||
+        !snapshot.iterations.every((it) => [it.head, it.base].every((s) => typeof s === "string" && /^[0-9a-f]{40}$/.test(s)))
+      )
+        throw Error("Provider returned invalid review iterations");
+      if (JSON.stringify(snapshot).length > 512000) throw Error("Review snapshot exceeds the display limit");
     } catch (err) {
       const fallback = await history(
         (h) =>
@@ -86,12 +92,6 @@ export async function reviewRead(root: Conversation, p: Project, source: PrRevie
       if (fallback) return fallback;
       throw err;
     }
-    if (
-      !snapshot.iterations.some((it) => it.head === snapshot.head) ||
-      !snapshot.iterations.every((it) => [it.head, it.base].every((s) => typeof s === "string" && /^[0-9a-f]{40}$/.test(s)))
-    )
-      throw Error("Provider returned invalid review iterations");
-    if (JSON.stringify(snapshot).length > 512000) throw Error("Review snapshot exceeds the display limit");
     const stored = await history((h) => {
       h.revision ??= randomUUID();
       const byHead = new Map(h.iterations.map((x) => [x.head, x]));

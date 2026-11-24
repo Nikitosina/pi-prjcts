@@ -51,12 +51,18 @@ export function providerDialog({ room, s, key, thread, rpc, reload }) {
           : { kind: thread.resolved ? "unresolve" : "resolve", threadId: thread.id };
     for (const el of form.elements) el.disabled = true;
     try {
-      await rpc(checked ? "checked" : "publish", {
+      const receipt = await rpc(checked ? "checked" : "publish", {
         confirmed: true,
         revision,
         ...(operation ? { head, operation } : { found: form.querySelector("select").value === "found" }),
       });
-      await reload();
+      await reload(
+        checked
+          ? "Your PR check was recorded."
+          : receipt.uncertain
+            ? "Write uncertain. Check the PR before another write."
+            : "Provider write completed.",
+      );
       dialog.remove();
     } catch (err) {
       const alert = form.querySelector("[role=alert]");
