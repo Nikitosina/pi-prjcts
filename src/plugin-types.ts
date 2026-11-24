@@ -359,10 +359,11 @@ export type PrReviewSnapshot = {
   notice?: string;
   threads: PrReviewThread[];
 };
+export type PrVerdict = "COMMENT" | "APPROVE" | "REQUEST_CHANGES";
 export type PrPublish =
   | {
       kind: "review";
-      verdict: "COMMENT" | "APPROVE" | "REQUEST_CHANGES";
+      verdict: PrVerdict;
       summary: string;
       comments: { path: string; side: "LEFT" | "RIGHT"; from: number; to: number; body: string; head: string }[];
     }
@@ -374,6 +375,8 @@ export type PrReviewSource = {
     publish?: boolean;
     reply?: boolean;
     resolve?: boolean;
+    /** Verdicts the provider can publish; every verdict when absent. */
+    verdicts?: PrVerdict[];
     viewedSync: boolean;
     annotations: boolean;
     issues: boolean;
