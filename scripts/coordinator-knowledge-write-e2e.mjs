@@ -232,6 +232,7 @@ try {
     mutation.every((name) => offered.available.includes(name)),
     `coordinator tools: ${offered.available}`,
   );
+  assert(!offered.available.some((name) => /review_publish|publish_review|host_call/.test(name)), "Coordinator can publish reviews");
   assert(/projects_knowledge_write/.test(offered.system), "coordinator instructions do not mention knowledge writes");
   result.checks.push("K1 unset (read-only) project offers coordinator write/note and instructs it to maintain knowledge");
 

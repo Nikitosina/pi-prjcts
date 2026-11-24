@@ -988,3 +988,38 @@
 .rv-room dialog {
   max-width: min(720px, 94vw);
 }
+.rv-publish {
+  width: min(34rem, 78vw);
+  display: grid;
+  gap: 0.8rem;
+}
+.rv-publish fieldset {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  max-height: 30vh;
+  overflow: auto;
+}
+.rv-publish label:not(.rv-pick),
+.rv-pick span span {
+  display: block;
+}
+.rv-publish textarea,
+.rv-publish select {
+  display: block;
+  width: 100%;
+  margin-top: 0.3rem;
+}
+.rv-publish textarea {
+  min-height: 5rem;
+}
+.rv-pick {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.45rem 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.rv-publish p {
+  overflow-wrap: anywhere;
+}

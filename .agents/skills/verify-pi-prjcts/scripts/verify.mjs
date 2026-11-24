@@ -1191,6 +1191,64 @@ async function ui2Prompts(run, page, record, dir, sinks) {
 const EXPAND_HISTORY = `document.querySelector('#workers [data-worker-history][aria-expanded="false"]')?.click()`;
 
 const journeys = {
+  async "review-publish"(run, page, record, dir) {
+    const wait = (s) => page.waitFor(`!!document.querySelector(${JSON.stringify(s)})`, s);
+    async function open() {
+      await wait("[data-review-pr]");
+      await page.click("[data-review-pr]");
+      await wait(".drow");
+    }
+    async function add(text) {
+      await page.click('.drow[data-n="1"] .ln.n');
+      await page.click(".rv-compose textarea");
+      await page.cdp("Input.insertText", { text });
+      await page.click("[data-save-draft]");
+      await page.waitFor(`!document.querySelector('.rv-compose')`, "draft saved");
+    }
+    await page.navigate(run.webUrl);
+    await open();
+    await add("Please document the regional calendar.");
+    await page.click("[data-publish]");
+    await wait("dialog[open]");
+    await page.shot(dir, "01-colleague");
+    await page.click("dialog [data-cancel]");
+    await page.click(".rv-room .back");
+    const chat = await rpc(run, { action: "chat-create", id: run.projectId, title: "Calendar maintenance" });
+    await rpc(run, { action: "message", id: run.projectId, chatId: chat.id, text: "VERIFY-JOB review fixture" });
+    await until(
+      async () =>
+        (await rpc(run, { action: "jobs-snapshot", id: run.projectId })).jobs.some((j) => j.pr === "https://github.com/acme/review/pull/7"),
+      "fixture Job",
+      60000,
+    );
+    await open();
+    await add("Keep this change in the worker batch.");
+    await page.click("[data-publish]");
+    await page.click("dialog textarea");
+    await page.cdp("Input.insertText", { text: "One documentation request." });
+    await page.shot(dir, "02-our-pr");
+    await page.evaluate(`document.documentElement.dataset.theme='light'`);
+    await page.shot(dir, "03-light");
+    await page.click("[data-confirm-provider]");
+    await wait("[data-published]");
+    await page.waitFor(
+      `document.querySelector('.rv-code').textContent.includes('Please document the regional calendar.') && document.querySelector('[data-count="1"]')`,
+      "refreshed inline review, worker draft retained",
+    );
+    await page.shot(dir, "04-inline");
+    await page.click("[data-reply]");
+    await wait("dialog textarea");
+    await page.shot(dir, "05-reply");
+    const data = JSON.parse(readFileSync(run.review.state, "utf8"));
+    data.loseReviewAnswer = true;
+    writeFileSync(run.review.state, JSON.stringify(data));
+    await page.click("dialog textarea");
+    await page.cdp("Input.insertText", { text: "Thanks for the context." });
+    await page.click("[data-confirm-provider]");
+    await wait("[data-uncertain]");
+    await page.shot(dir, "06-uncertain");
+    record("visible", "One selected provider draft published; worker draft retained. Lost answer shown.");
+  },
   async "review-drafts"(run, page, record, dir) {
     const q = (s) => `document.querySelector(${JSON.stringify(s)})`;
     const wait = (s) => page.waitFor(`!!${q(s)}`, s);

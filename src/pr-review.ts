@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { publishReview, checkedReview } from "./pr-review-publish.ts";
 import { defineDoc, type Conversation } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { PrFile, PrIteration, PrRange, PrReviewSource } from "./plugin-types.ts";
@@ -58,6 +60,8 @@ export async function reviewRead(root: Conversation, p: Project, source: PrRevie
       doc.prs[docKey] ??= empty();
       return fn(doc.prs[docKey]!);
     }, BACKGROUND_CONTEXT);
+  if (i.action === "pr-review-publish") return publishReview(history, source, p, i);
+  if (i.action === "pr-review-checked") return history((h) => checkedReview(h, i.revision));
   if (i.action === "pr-review-send") return sendDrafts(history, i, delivery);
   if (i.action === "pr-review-edit" || i.action === "pr-review-delete") return history((h) => changeDraft(h, i, delivery.chat));
   if (i.action === "pr-review-open") {
@@ -69,6 +73,7 @@ export async function reviewRead(root: Conversation, p: Project, source: PrRevie
       throw Error("Provider returned invalid review iterations");
     if (JSON.stringify(snapshot).length > 512000) throw Error("Review snapshot exceeds the display limit");
     const stored = await history((h) => {
+      h.revision ??= randomUUID();
       const byHead = new Map(h.iterations.map((x) => [x.head, x]));
       for (const it of snapshot.iterations) {
         const prior = byHead.get(it.head);

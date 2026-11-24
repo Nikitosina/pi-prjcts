@@ -59,6 +59,8 @@ export async function renderReview(root, focus) {
       const threads = s.threads
         .map((t, index) => ({
           ...t,
+          canReply: t.id && s.capabilities.reply && !s.uncertain,
+          canResolve: t.id && s.capabilities.resolve && !s.uncertain,
           fixable: !!s.chat && !!t.line && !t.outdated && !(since && t.side === "LEFT") && head === s.head,
           index,
           jumpable: !baseMoved && listed.has(t.path),
@@ -77,7 +79,20 @@ export async function renderReview(root, focus) {
         blocks = [...stack.querySelectorAll(".fblock")],
         filter = q(".ft-filter");
       if (head === s.head && !since) currentFiles = new Map(files.map((f) => [f.path, f.blob]));
-      const drafts = reviewDrafts({ room, panel, s, files, currentFiles, range, threads, rpc });
+      const drafts = reviewDrafts({
+        room,
+        panel,
+        s,
+        files,
+        currentFiles,
+        range,
+        threads,
+        rpc,
+        reload: async () => {
+          Object.assign(s, await rpc("open"));
+          if (room.isConnected) await show();
+        },
+      });
       let current = 0;
       const tree = () => {
         const viewed = files.filter((f) => f.viewed).length;

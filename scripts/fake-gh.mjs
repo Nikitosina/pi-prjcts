@@ -94,6 +94,39 @@ if (method === "POST" && parts[0] === "graphql") {
     query = body.query ?? "",
     vars = body.variables ?? {},
     fault = state.graphql ?? {};
+  const mutation = /\b(addPullRequestReviewThreadReply|addPullRequestReview|resolveReviewThread|unresolveReviewThread)\(input:/.exec(
+    query,
+  )?.[1];
+  if (mutation) {
+    const input = vars.input;
+    const item = state.pulls.find(
+      (p) =>
+        input.pullRequestId === "PR_" + p.number ||
+        (p.threads ?? []).some((_, i) => (input.threadId ?? input.pullRequestReviewThreadId) === "T_" + p.number + "_" + i),
+    );
+    if (!item) fail(422, "Wrong target");
+    const url = "https://github.com/" + repo.full_name + "/pull/" + item.number + "#review";
+    let result;
+    if (mutation === "addPullRequestReview") {
+      if (input.commitOID !== item.sha) fail(422, "Wrong head");
+      for (const c of input.threads) (item.threads ??= []).push(c);
+      result = { pullRequestReview: { url } };
+    } else {
+      const id = input.threadId ?? input.pullRequestReviewThreadId,
+        t = item.threads[Number(id.split("_").at(-1))];
+      if (mutation === "addPullRequestReviewThreadReply") {
+        (t.replies ??= []).push(input.body);
+        result = { comment: { url } };
+      } else {
+        t.resolved = mutation === "resolveReviewThread";
+        result = { thread: { id, isResolved: t.resolved } };
+      }
+    }
+    saveState();
+    log({ mutation, input });
+    if (state.loseReviewAnswer) process.exit(1);
+    out({ data: { [mutation]: result } });
+  }
   const kind = /markPullRequestReadyForReview/.test(query)
     ? "mutation"
     : /pullRequests\(states:OPEN/.test(query)
@@ -154,6 +187,7 @@ if (method === "POST" && parts[0] === "graphql") {
       ];
     };
     const node = (item, rich) => ({
+      id: "PR_" + item.number,
       number: item.number,
       title: item.title,
       url: item.url ?? "https://github.com/" + repo.full_name + "/pull/" + item.number,
@@ -172,8 +206,9 @@ if (method === "POST" && parts[0] === "graphql") {
       autoMergeRequest: item.autoMerge ? { enabledAt: "2026-10-03T00:00:00Z" } : null,
       latestOpinionatedReviews: { nodes: (item.opinions ?? []).map((value) => ({ state: value })) },
       reviewThreads: {
-        nodes: (item.threads ?? []).map((thread) => ({
-          diffSide: "RIGHT",
+        nodes: (item.threads ?? []).map((thread, i) => ({
+          id: `T_${item.number}_${i}`,
+          diffSide: thread.side ?? "RIGHT",
           isResolved: thread.resolved === true,
           isOutdated: false,
           path: thread.path ?? "a.txt",
@@ -186,6 +221,12 @@ if (method === "POST" && parts[0] === "graphql") {
                 commit: { oid: item.sha },
                 body: thread.body ?? "",
               },
+              ...(thread.replies ?? []).map((body) => ({
+                author: login(),
+                createdAt: "2026-11-24T09:40:00Z",
+                commit: { oid: item.sha },
+                body,
+              })),
             ],
           },
         })),

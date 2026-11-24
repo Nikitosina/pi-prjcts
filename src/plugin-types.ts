@@ -334,6 +334,7 @@ export type PrIteration = { head: string; base: string; checks?: PrCheck[] };
 export type PrRange = { base: string; head: string };
 export type PrFile = { path: string; status: string; blob: string; stats?: { additions: number; deletions: number } };
 export type PrReviewThread = {
+  id?: string;
   path: string;
   side: "LEFT" | "RIGHT";
   line: number | null;
@@ -345,6 +346,7 @@ export type PrReviewThread = {
   kind?: "ai" | "human";
 };
 export type PrReviewSnapshot = {
+  providerId?: string;
   url?: string;
   branch?: string;
   baseBranch?: string;
@@ -356,8 +358,26 @@ export type PrReviewSnapshot = {
   notice?: string;
   threads: PrReviewThread[];
 };
+export type PrPublish =
+  | {
+      kind: "review";
+      verdict: "COMMENT" | "APPROVE" | "REQUEST_CHANGES";
+      summary: string;
+      comments: { path: string; side: "LEFT" | "RIGHT"; from: number; to: number; body: string; head: string }[];
+    }
+  | { kind: "reply"; threadId: string; body: string }
+  | { kind: "resolve" | "unresolve"; threadId: string };
 export type PrReviewSource = {
-  capabilities: { viewedSync: boolean; annotations: boolean; issues: boolean; suggestions: boolean };
+  publish?(project: Project, id: PrId, snapshot: PrReviewSnapshot, op: PrPublish): Promise<{ url: string }>;
+  capabilities: {
+    publish?: boolean;
+    reply?: boolean;
+    resolve?: boolean;
+    viewedSync: boolean;
+    annotations: boolean;
+    issues: boolean;
+    suggestions: boolean;
+  };
   authorize(project: Project): Promise<string>;
   snapshot(project: Project, id: PrId, observed: readonly string[]): Promise<PrReviewSnapshot>;
   files(project: Project, id: PrId, range: PrRange): Promise<PrFile[]>;
