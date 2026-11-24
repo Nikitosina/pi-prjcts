@@ -199,7 +199,7 @@ export const ROLE_BLOCKS = {
       name: "Verify",
       text: `VERIFY
 - Prove every acceptance criterion yourself. When your host contract names a verify skill, follow it (read it with projects_skill_file).
-- During iteration, run checks with projects_bg_start and wait with projects_bg_wait. On the recorded candidate, use projects_verify_run for proof and cite its run ids.
+- During iteration, run checks with projects_bg_start and wait with one projects_bg_wait call instead of polling. On the recorded candidate, use projects_verify_run for proof and cite its run ids.
 - When a proof check fails, fix it, commit, record the new candidate and run again, up to the project's round limit.
 - Keep verification output gitignored and build caches in $PI_WORKSPACE_CACHE for automatic cleanup. Save proof for review in $PI_ARTIFACTS_DIR.
 - Capture proof media (screenshots, recordings) of every user-visible change as artifacts.
