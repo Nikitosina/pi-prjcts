@@ -578,6 +578,8 @@ function inputHtml(message, who = "Coordinator") {
   if (message.origin === "owner") return ownerMessageHtml(message, "msg owner", "You", text);
   const report = reportPattern.exec(text);
   if (report) return reportRowHtml(message, report);
+  if (message.origin === "internal" && text.startsWith("[Guided tour request]\n"))
+    return `<div class="sys-row" data-tour-event><span class="sys-icon">✦</span> Guided tour requested</div>`;
   const event = /^\[Owner-local event ([\w.-]+)\]\n/.exec(text);
   if (event) return `<div class="sys-row"><span class="sys-icon" aria-hidden="true">⚑</span>Event <code>${esc(event[1])}</code></div>`;
   if (message.origin === "internal")

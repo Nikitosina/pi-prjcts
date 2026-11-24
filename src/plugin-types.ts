@@ -346,6 +346,7 @@ export type PrReviewThread = {
   kind?: "ai" | "human";
 };
 export type PrReviewSnapshot = {
+  description?: string;
   providerId?: string;
   url?: string;
   branch?: string;

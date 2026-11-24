@@ -193,6 +193,7 @@ if (method === "POST" && parts[0] === "graphql") {
       url: item.url ?? "https://github.com/" + repo.full_name + "/pull/" + item.number,
       state: item.merged ? "MERGED" : (item.state ?? "open") === "closed" ? "CLOSED" : "OPEN",
       merged: item.merged === true,
+      body: item.body ?? "",
       isDraft: item.draft === true,
       headRefName: item.head,
       baseRefName: item.base ?? "main",

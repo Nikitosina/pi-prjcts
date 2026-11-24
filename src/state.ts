@@ -1435,6 +1435,8 @@ export const Request = Type.Union([
     { additionalProperties: false },
   ),
   Type.Object({ action: Type.Literal("pr-review-send"), ...reviewId, revision: Id, chatId: ChatId }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("pr-review-tour"), ...reviewId, head: reviewSha, chatId: ChatId }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("pr-review-tour-status"), ...reviewId }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("pr-review-files"), ...reviewRange }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("pr-review-file"), ...reviewRange, path: reviewPath }, { additionalProperties: false }),
   Type.Object(

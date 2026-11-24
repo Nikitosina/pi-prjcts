@@ -218,6 +218,7 @@ export type Agent = {
   reported: EntryId[];
   /** Workspace scope, or a PR/commit ref a scout or reviewer reads. Set by the spawn; the host prepares them. */
   scopeId: string | null;
+  mapRequestId?: string;
   readRef: string | null;
   /** The commit of the agent worktree this reader reads, recorded when its current message started. */
   readHead?: string;
@@ -461,6 +462,7 @@ export type JobsHost = {
     frame: PromptFrame | null;
   }): Promise<(AgentChange & { prompt?: PreparedPrompt; readHead?: string }) | void>;
   /** For a reader of another agent's worktree: why its report does not match that worktree now, or null when it still does. */
+  reviewMapReport?(agent: Agent, report: string): Promise<string>;
   readDrift?(agent: Agent): Promise<string | null>;
   /** The behavior text this agent would get now, or null when its prompt is not built from blocks. */
   promptBehavior?(agent: Agent, job: Job | null): string | null;
@@ -865,6 +867,7 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
         }
         if (report !== undefined && reportRef === undefined) {
           const agent = (await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext))?.agents[reporter.input.agentId];
+          const summary = agent?.mapRequestId && host.reviewMapReport ? await host.reviewMapReport(agent, report) : report;
           const drift = agent?.readHead ? await host.readDrift?.(agent as Agent) : null;
           const read = agent?.reads?.find((item) => item.seq === (reporter.input.seq ?? 0));
           const notes = [
@@ -881,7 +884,7 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
               kind: "projects.agent-report",
               data: { text: flagged(details ?? report), at: runtime.now() },
             });
-            return { status: "running", checkpoint: { phase: "report", report: flagged(report), reportRef: entry.id } } as const;
+            return { status: "running", checkpoint: { phase: "report", report: flagged(summary), reportRef: entry.id } } as const;
           }, taskContext);
           return;
         }
@@ -1071,6 +1074,7 @@ export function createJobs(host: JobsHost) {
         reported: [],
         scopeId: (role === "worker" ? args.scopeId?.trim() || host.defaultScope?.() : args.scopeId?.trim()) || null,
         readRef,
+        ...(role === "scout" && requestId?.startsWith("tour:") ? { mapRequestId: requestId } : {}),
         ...(role !== "worker" && readRef && FULL_COMMIT.test(readRef) ? { reads: [{ seq: 0, sha: readRef }] } : {}),
         prepared: false,
         brief: "",
@@ -1775,6 +1779,8 @@ export function createJobs(host: JobsHost) {
         const agent = (await tx.doc(Jobs, ROOT_CONVERSATION_ID)).agents[id];
         if (agent) agent.endedAt = clock();
       }, context);
+    const scout = (await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context))?.agents[id];
+    if (scout?.mapRequestId) await host.reviewMapReport?.(scout, `Scout stopped: ${reason}`);
     return `Stopped ${id}.`;
   }
 

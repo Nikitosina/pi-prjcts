@@ -78,6 +78,7 @@ import { coordinatorJobReadTools } from "./job-read-tools.ts";
 import { resolveContinuationBranch } from "./branch-continuation.ts";
 import { workerChanges, type DiffPage } from "./code-diff.ts";
 import { prMonitorRuntime } from "./pr-monitor.ts";
+import { finishReviewMap } from "./pr-review.ts";
 import { plugins } from "./plugins.ts";
 import type { PrCardData } from "./plugin-types.ts";
 import type { PrNotice } from "./pr-notices.ts";
@@ -376,7 +377,7 @@ export type DurableProjectRuntime = {
   wait(submissionId: number): Promise<DurableSubmissionState>;
   say(text: string, options?: { requestId?: string; steer?: boolean }): Promise<DurableSubmissionState>;
   /** Internal input to a chat after its current turn (Main when the chat is gone or archived); `requestId` keeps it once. */
-  followUp(chatId: string, text: string, requestId: string): Promise<void>;
+  followUp(chatId: string, text: string, requestId: string, exact?: boolean): Promise<void>;
   /** Jobs and their agents with live status: what the UI and Telegram render. */
   jobs(): Promise<JobsSnapshot>;
   /** Start a worker, scout or reviewer for a chat (Main when omitted). The same `requestId` returns the same agent. */
@@ -1347,6 +1348,8 @@ export async function openDurableProject(input: {
       },
       refuseSend: (agent) => unscopedRefusal(agent),
       // R9: the worktree a reader read must still be where it was when the reader's message started.
+      reviewMapReport: (agent, report) =>
+        finishReviewMap(root, loadProject(project.id), agent, report, (key) => plugins.prProvider(key)?.review),
       readDrift: async (agent) => {
         const target = (await harness?.snapshot(Jobs, ROOT_CONVERSATION_ID, context))?.agents[agent.readRef ?? ""];
         const cwd = target ? await conversationCwd(target.conversationId) : undefined;
@@ -2576,9 +2579,10 @@ export async function openDurableProject(input: {
         );
         return wait(openedHarness, root, admitted.submissionId);
       },
-      followUp: async (id, text, requestId) => {
+      followUp: async (id, text, requestId, exact) => {
         assertOpen();
-        const target = (await chatList()).find((chat) => chat.id === id && !chat.archived)?.id ?? MAIN_CHAT;
+        const target = (await chatList()).find((chat) => chat.id === id && !chat.archived)?.id ?? (exact ? null : MAIN_CHAT);
+        if (!target) throw Error("Tour destination chat is unavailable");
         const { conversation } = await resolveChat(target);
         await conversation.submit(
           { type: "input", content: text, entry: { kind: "projects.internal-input" }, whenBusy: "followUp", requestId },

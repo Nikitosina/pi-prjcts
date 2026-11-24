@@ -1629,6 +1629,8 @@ async function dispatchRequest(input: RequestData, literalMessage = false): Prom
         unloaded: granted && granted !== "github" && !plugins.workspaceProvider(granted) ? [granted] : [],
       };
     }
+    case "pr-review-tour":
+    case "pr-review-tour-status":
     case "pr-review-open":
     case "pr-review-files":
     case "pr-review-file":
@@ -1649,7 +1651,12 @@ async function dispatchRequest(input: RequestData, literalMessage = false): Prom
       const owner = await durable(input.id);
       return owner.withRoot(async (root) => {
         let chat = null;
-        if (["pr-review-open", "pr-review-add", "pr-review-edit", "pr-review-delete", "pr-review-send"].includes(input.action)) {
+        let route;
+        if (
+          ["pr-review-tour", "pr-review-open", "pr-review-add", "pr-review-edit", "pr-review-delete", "pr-review-send"].includes(
+            input.action,
+          )
+        ) {
           const repo = project.githubAuthorization?.[0];
           const [plan, chats, receipts] = await Promise.all([
             owner.jobs(),
@@ -1660,8 +1667,18 @@ async function dispatchRequest(input: RequestData, literalMessage = false): Prom
           const url = provider.url(input.pr, project);
           const job = plan.jobs.find((j) => (receipt ? j.conversationId === receipt.conversationId : j.pr?.replace(/\/$/, "") === url));
           chat = chats.find((c) => c.conversationId === job?.chat) ?? null;
+          if (input.action === "pr-review-tour") {
+            const dest = job ? chat : chats.find((c) => c.id === input.chatId);
+            if (!dest || dest.archived) throw Error("Tour destination chat unavailable");
+            route = {
+              chat: Number(dest.conversationId),
+              ready: job ? JSON.stringify(job.ready) : null,
+              send: (text: string, id: string) => owner.followUp(dest.id, text, id, true),
+            };
+          }
         }
         return reviewRead(root, project, source, input, {
+          route,
           chat: chat ? { id: chat.id, title: chat.title } : null,
           send: (text, requestId, chatId) => dispatchRequest({ action: "message", id: input.id, text, requestId, chatId }, true),
         });

@@ -5,14 +5,17 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { PrFile, PrIteration, PrRange, PrReviewSnapshot, PrReviewSource } from "./plugin-types.ts";
 import type { Project, Request } from "./state.ts";
 import { addDraft, changeDraft, draftView, sendDrafts, type DraftBook, type ReviewDelivery } from "./pr-review-drafts.ts";
+import { requestText, tourView, validateMap, type MapBook, type MapRequest } from "./review-map.ts";
+import type { Agent } from "./jobs.ts";
 type Input = Extract<Request, { action: `pr-review-${string}` }>;
-type History = DraftBook & {
-  iterations: PrIteration[];
-  observed?: string[];
-  seenAt?: number;
-  previous: string | null;
-  marks: Record<string, string>;
-};
+type History = DraftBook &
+  MapBook & {
+    iterations: PrIteration[];
+    observed?: string[];
+    seenAt?: number;
+    previous: string | null;
+    marks: Record<string, string>;
+  };
 const Review = defineDoc<{ prs: Record<string, History> }>({
   kind: "projects.pr-review",
   version: 1,
@@ -51,6 +54,50 @@ function cache<T>() {
 const fileLists = cache<PrFile[]>(),
   diffs = cache<string>(),
   contexts = cache<string[]>();
+export async function finishReviewMap(
+  root: Conversation,
+  p: Project,
+  agent: Agent,
+  report: string,
+  sourceFor: (key: string) => PrReviewSource | undefined,
+) {
+  const pending = await root.commit(async (tx) => {
+    const doc = await tx.doc(Review, root.id);
+    for (const [key, h] of Object.entries(doc.prs)) {
+      if (h.request && h.request.id === agent.mapRequestId && h.request.chat === Number(agent.chat))
+        return { key, req: { ...h.request, range: { ...h.request.range } } };
+    }
+    return null;
+  }, BACKGROUND_CONTEXT);
+  if (!pending) return "No pending tour request for this scout.";
+  const { key, req } = pending;
+  let map, error: string | undefined;
+  try {
+    const source = sourceFor(req.provider);
+    if (!source || keyOf(req.provider, req.pr, await source.authorize(p)) !== key) throw Error("Review source changed");
+    if (
+      !agent.prepared ||
+      agent.readRef !== req.range.head ||
+      agent.reads?.[0]?.state !== "read" ||
+      !report.startsWith(`[scout ${agent.id} answered:`)
+    )
+      throw Error("Scout did not answer at the requested head: " + report.split("\n")[0]?.slice(0, 200));
+    map = await validateMap(report.slice(report.indexOf("\n") + 1), req, await source.files(p, req.pr, req.range), (path) =>
+      source.fileDiff(p, req.pr, path, req.range),
+    );
+  } catch (e) {
+    error = String(e).slice(0, 1000);
+  }
+  const result = map;
+  await root.commit(async (tx) => {
+    const h = (await tx.doc(Review, root.id)).prs[key];
+    if (h?.request?.id !== req.id) return;
+    if (result) h.map = result;
+    if (error) h.mapError = error;
+    delete h.request;
+  }, BACKGROUND_CONTEXT);
+  return `[scout ${agent.id} ${error ? "failed" : "answered"}: Guided tour]\n${error ?? "Stored review map at " + req.range.head}`;
+}
 export async function reviewRead(root: Conversation, p: Project, source: PrReviewSource, i: Input, delivery: ReviewDelivery) {
   const started = performance.timeOrigin + performance.now(),
     docKey = keyOf(i.provider, i.pr, await source.authorize(p));
@@ -60,6 +107,46 @@ export async function reviewRead(root: Conversation, p: Project, source: PrRevie
       doc.prs[docKey] ??= empty();
       return fn(doc.prs[docKey]!);
     }, BACKGROUND_CONTEXT);
+  if (i.action === "pr-review-tour-status") return history(tourView);
+  if (i.action === "pr-review-tour") {
+    const route = delivery.route;
+    if (!route) throw Error("No tour destination");
+    const snap = await source.snapshot(p, i.pr, []),
+      range = snap.iterations.find((it) => it.head === i.head);
+    if (snap.head !== i.head || !range) throw Error("PR head changed. Reopen the room.");
+    const files = await source.files(p, i.pr, range);
+    if (!files.length || files.length > 500) throw Error("Tour requires 1–500 changed files");
+    const req: MapRequest = {
+      id: "tour:" + randomUUID(),
+      pr: i.pr,
+      provider: i.provider,
+      range: { base: range.base, head: range.head },
+      chat: route.chat,
+      at: Date.now(),
+      ours: route.ready !== null,
+    };
+    const text = requestText(req, (route.ready ?? snap.description ?? "").slice(0, 16000), files);
+    if (text.length > 64000) throw Error("Tour brief exceeds size limit");
+    const send = await history((h) => {
+      if (tourView(h).building || (h.map?.head === i.head && !h.mapError)) return false;
+      h.request = req;
+      delete h.mapError;
+      return true;
+    });
+    if (send)
+      try {
+        await route.send(text, req.id);
+      } catch (e) {
+        await history((h) => {
+          if (h.request?.id === req.id) {
+            delete h.request;
+            h.mapError = String(e).slice(0, 1000);
+          }
+        });
+        throw e;
+      }
+    return history(tourView);
+  }
   if (i.action === "pr-review-publish") return publishReview(history, source, p, i);
   if (i.action === "pr-review-checked") return history((h) => checkedReview(h, i.revision, i.found));
   if (i.action === "pr-review-send") return sendDrafts(history, i, delivery);
@@ -108,7 +195,7 @@ export async function reviewRead(root: Conversation, p: Project, source: PrRevie
       }
       return { ...draftView(h, i.pr, delivery.chat), previous, iterations: JSON.parse(JSON.stringify(iterations)) as PrIteration[] };
     });
-    return { ...snapshot, ...stored, capabilities: source.capabilities };
+    return { ...snapshot, ...stored, tour: await history(tourView), capabilities: source.capabilities };
   }
   const { head, since, marks } = await history((h) => {
     const iteration = (sha: string) => {

@@ -18,7 +18,11 @@ export type DraftBook = {
   sendingTo?: string;
 };
 export type ReviewChat = { id: string; title: string };
-export type ReviewDelivery = { chat: ReviewChat | null; send: (text: string, id: string, chatId: string) => Promise<unknown> };
+export type ReviewDelivery = {
+  route?: { chat: number; ready: string | null; send: (text: string, id: string) => Promise<void> };
+  chat: ReviewChat | null;
+  send: (text: string, id: string, chatId: string) => Promise<unknown>;
+};
 const pending = (h: DraftBook) =>
   h.drafts?.filter((d) => d.destination === "worker" && !d.sent && !d.published && !h.uncertain?.draftIds.includes(d.id)) ?? [];
 function message(pr: string, drafts: Draft[]) {
