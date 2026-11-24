@@ -110,7 +110,8 @@ export function discussion(t) {
     .join("");
 }
 function thread(t) {
-  const comments = discussion(t);
+  const comments =
+    discussion(t) + (t.fixable ? `<button class="ghost-btn small" data-fix-thread="${t.index}">Add to fix list</button>` : "");
   return `<div class="row-extra" data-thread="${t.index}">${t.resolved ? `<details class="thread"><summary class="th-collapsed"><span class="th-av">${esc(t.comments[0]?.author.slice(0, 1).toUpperCase())}</span><b>Resolved</b><span class="th-snip">${esc(t.comments[0]?.body)}</span>${t.comments.length} comment${t.comments.length === 1 ? "" : "s"} ▸</summary>${comments}</details>` : `<aside class="thread">${comments}</aside>`}</div>`;
 }
 const gutter = (n, side, empty) => `<span class="ln ${side}${empty ? " empty" : ""}">${n ?? ""}</span>`;

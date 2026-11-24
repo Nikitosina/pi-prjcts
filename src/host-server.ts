@@ -1,3 +1,4 @@
+import { githubPublishedPullRequests } from "./github-worker.ts";
 import { reviewRead } from "./pr-review.ts";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { createServer } from "node:http";
@@ -545,7 +546,7 @@ async function projectActivity(id: string): Promise<ProjectActivity> {
   return value;
 }
 
-async function dispatchRequest(input: RequestData): Promise<unknown> {
+async function dispatchRequest(input: RequestData, literalMessage = false): Promise<unknown> {
   if (closing) throw new Error("Host is stopping");
   switch (input.action) {
     case "web":
@@ -1632,6 +1633,10 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "pr-review-files":
     case "pr-review-file":
     case "pr-review-lines":
+    case "pr-review-add":
+    case "pr-review-edit":
+    case "pr-review-delete":
+    case "pr-review-send":
     case "pr-review-viewed": {
       const project = loadProject(input.id),
         provider = plugins.prProvider(input.provider),
@@ -1639,7 +1644,26 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       if (!provider?.applies(project) || !source || project.archived || project.deleted)
         throw Error("Review not available for this project");
       provider.validateId?.(input.pr);
-      return (await durable(input.id)).withRoot((root) => reviewRead(root, project, source, input));
+      const owner = await durable(input.id);
+      return owner.withRoot(async (root) => {
+        let chat = null;
+        if (["pr-review-open", "pr-review-add", "pr-review-edit", "pr-review-delete", "pr-review-send"].includes(input.action)) {
+          const repo = project.githubAuthorization?.[0];
+          const [plan, chats, receipts] = await Promise.all([
+            owner.jobs(),
+            owner.chats(),
+            input.provider === "github" && repo ? githubPublishedPullRequests(root, repo.numericId) : [],
+          ]);
+          const receipt = receipts.find((r) => String(r.number) === input.pr);
+          const url = provider.url(input.pr, project);
+          const job = plan.jobs.find((j) => (receipt ? j.conversationId === receipt.conversationId : j.pr?.replace(/\/$/, "") === url));
+          chat = chats.find((c) => c.conversationId === job?.chat) ?? null;
+        }
+        return reviewRead(root, project, source, input, {
+          chat: chat ? { id: chat.id, title: chat.title } : null,
+          send: (text, requestId, chatId) => dispatchRequest({ action: "message", id: input.id, text, requestId, chatId }, true),
+        });
+      });
     }
     case "pr-watch":
     case "pr-hide": {
@@ -1803,14 +1827,16 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
             // The uploads are read once: the same reduced copies are checked here and handed to the runtime below.
             const built = saved
               ? undefined
-              : attachmentMessage(
-                  dir,
-                  (skillNames(job.text).length ? await expandSkillCommand(await configuredSkills(input.id), job.text) : job.text) +
-                    (await referencedItemsBlock(loadProject(input.id), dir, job.text)) +
-                    (await referencedPrBlock(loadProject(input.id), job.text)),
-                  job.attachments,
-                  owner.acceptsImages,
-                );
+              : literalMessage
+                ? { content: job.text, images: [] }
+                : attachmentMessage(
+                    dir,
+                    (skillNames(job.text).length ? await expandSkillCommand(await configuredSkills(input.id), job.text) : job.text) +
+                      (await referencedItemsBlock(loadProject(input.id), dir, job.text)) +
+                      (await referencedPrBlock(loadProject(input.id), job.text)),
+                    job.attachments,
+                    owner.acceptsImages,
+                  );
             const content = saved?.content ?? built!.content;
             // The limit applies to what the runtime receives, attachment block included, so a skill is never granted for a message it would refuse.
             if (content.length > 120_000)
@@ -1826,7 +1852,11 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
             if (!chat) throw new Error("Unknown chat for this project");
             if (chat.archived) throw new Error("Chat is archived; restore it before sending");
             return {
-              job: { ...job, origin, delivery: { content, images: images.map(({ id }) => id) } },
+              job: {
+                ...job,
+                origin,
+                delivery: { content, ...(literalMessage ? { literal: true as const } : {}), images: images.map(({ id }) => id) },
+              },
               parts: images.map(({ part }) => part),
             };
           });

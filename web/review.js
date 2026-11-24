@@ -3,6 +3,7 @@ import { esc } from "./format.js";
 import { state } from "./state.js";
 import { renderDiff, contextRows } from "./diff.js";
 import { context, header, fileHeader, fileTree } from "./review-parts.js";
+import { reviewDrafts } from "./review-drafts.js";
 import { typing } from "./hotkeys.js";
 const generated = (path) => /(?:^|\/)(?:dist|vendor|generated)\/|(?:\.lock|[-.]lock\.json|\.min\.(?:css|js)|\.generated\.\w+)$/.test(path);
 const back = `<button class="back" data-cmd="leave-focus" aria-label="Back to chat">← <kbd>Esc</kbd></button>`;
@@ -57,6 +58,7 @@ export async function renderReview(root, focus) {
       const threads = s.threads
         .map((t, index) => ({
           ...t,
+          fixable: !!s.chat && !!t.line && !t.outdated && !(since && t.side === "LEFT") && head === s.head,
           index,
           jumpable: !baseMoved && listed.has(t.path),
           outdated: t.outdated || (since && t.side === "LEFT"),
@@ -67,12 +69,13 @@ export async function renderReview(root, focus) {
         checks = s.iterations.find((it) => it.head === head)?.checks;
       room.innerHTML =
         header(s, focus, head, since, split, wrap, files, checks, open, back) +
-        `${s.notice || baseMoved ? `<div class="since-note">${esc(s.notice)} ${baseMoved ? "Base moved — file list only." : ""}</div>` : ""}<div class="rv-body"><nav class="rv-files"><div class="ft-head"><span class="ft-title">Files</span><button data-tree aria-expanded="false">Files ▸</button><span class="grow"></span><span data-progress class="mono"></span></div><div class="bar ft-bar"><span></span></div><input class="ft-filter" type="search" placeholder="Filter files…" aria-label="Filter files"><div class="rv-paths"></div></nav><div class="rv-scroll">${files.map((f, i) => fileHeader(f, i, baseMoved || generated(f.path), baseMoved)).join("")}<p class="rv-end muted small">End of changes · ${files.length} files</p></div></div><footer class="rv-bar muted small">Read-only review <span class="grow"></span><kbd>j</kbd><kbd>k</kbd> files <kbd>v</kbd> viewed <kbd>s</kbd> split</footer>`;
+        `${s.notice || baseMoved ? `<div class="since-note">${esc(s.notice)} ${baseMoved ? "Base moved — file list only." : ""}</div>` : ""}<div class="rv-body"><nav class="rv-files"><div class="ft-head"><span class="ft-title">Files</span><button data-tree aria-expanded="false">Files ▸</button><span class="grow"></span><span data-progress class="mono"></span></div><div class="bar ft-bar"><span></span></div><input class="ft-filter" type="search" placeholder="Filter files…" aria-label="Filter files"><div class="rv-paths"></div></nav><div class="rv-scroll">${files.map((f, i) => fileHeader(f, i, baseMoved || generated(f.path), baseMoved)).join("")}<p class="rv-end muted small">End of changes · ${files.length} files</p></div></div><footer class="rv-bar small"></footer>`;
       panel.innerHTML = context(s, head, checks, open);
       const q = (sel) => room.querySelector(sel),
         stack = q(".rv-scroll"),
         blocks = [...stack.querySelectorAll(".fblock")],
         filter = q(".ft-filter");
+      const drafts = reviewDrafts({ room, panel, s, files, range, threads, rpc });
       let current = 0;
       const tree = () => {
         const viewed = files.filter((f) => f.viewed).length;
@@ -137,7 +140,7 @@ export async function renderReview(root, focus) {
         if (next === split) return;
         const rect = stack.getBoundingClientRect(),
           hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + 68),
-          block = hit?.closest(".fblock") ?? blocks.find((b) => b.getBoundingClientRect().bottom >= rect.top) ?? blocks.at(-1),
+          block = hit?.closest(".fblock") ?? blocks.find((b) => b.getBoundingClientRect().bottom >= rect.top + 68) ?? blocks.at(-1),
           anchor = hit?.closest(".drow,.row-extra,.hunk-head") ?? block,
           hunk = anchor?.matches(".hunk-head") ? [...block.querySelectorAll(".hunk-head")].indexOf(anchor) : -1,
           offset = anchor?.getBoundingClientRect().top;
@@ -215,11 +218,19 @@ export async function renderReview(root, focus) {
         else await load(i);
         if (document.querySelector("#app").dataset.sheet === "context") document.querySelector("#app").dataset.sheet = "";
         if (!blocks[i].isConnected) return;
-        blocks[i].querySelector(`[data-thread="${t.index}"]`)?.scrollIntoView({ block: "center" });
+        const target = blocks[i].querySelector(`[data-thread="${t.index}"]`);
+        if (!target) {
+          goto(i);
+          error(new Error("Could not open this thread. Reopen the review to retry."), blocks[i].querySelector(".diff"));
+          return;
+        }
+        target.scrollIntoView({ block: "center" });
         selectedScroll = stack.scrollTop;
         select(i);
       };
       async function handle(e) {
+        const draftAction = drafts.click(e);
+        if (draftAction) return draftAction;
         const el = e.target.closest("button,input");
         if (!el) return;
         const d = el.dataset,

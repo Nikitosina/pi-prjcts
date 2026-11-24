@@ -2,8 +2,15 @@ import { defineDoc, type Conversation } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { PrFile, PrIteration, PrRange, PrReviewSource } from "./plugin-types.ts";
 import type { Project, Request } from "./state.ts";
+import { addDraft, changeDraft, draftView, sendDrafts, type DraftBook, type ReviewDelivery } from "./pr-review-drafts.ts";
 type Input = Extract<Request, { action: `pr-review-${string}` }>;
-type History = { iterations: PrIteration[]; observed?: string[]; seenAt?: number; previous: string | null; marks: Record<string, string> };
+type History = DraftBook & {
+  iterations: PrIteration[];
+  observed?: string[];
+  seenAt?: number;
+  previous: string | null;
+  marks: Record<string, string>;
+};
 const Review = defineDoc<{ prs: Record<string, History> }>({
   kind: "projects.pr-review",
   version: 1,
@@ -42,7 +49,7 @@ function cache<T>() {
 const fileLists = cache<PrFile[]>(),
   diffs = cache<string>(),
   contexts = cache<string[]>();
-export async function reviewRead(root: Conversation, p: Project, source: PrReviewSource, i: Input) {
+export async function reviewRead(root: Conversation, p: Project, source: PrReviewSource, i: Input, delivery: ReviewDelivery) {
   const started = performance.timeOrigin + performance.now(),
     docKey = keyOf(i.provider, i.pr, await source.authorize(p));
   const history = <T>(fn: (h: History) => T) =>
@@ -51,6 +58,8 @@ export async function reviewRead(root: Conversation, p: Project, source: PrRevie
       doc.prs[docKey] ??= empty();
       return fn(doc.prs[docKey]!);
     }, BACKGROUND_CONTEXT);
+  if (i.action === "pr-review-send") return sendDrafts(history, i, delivery);
+  if (i.action === "pr-review-edit" || i.action === "pr-review-delete") return history((h) => changeDraft(h, i, delivery.chat));
   if (i.action === "pr-review-open") {
     const snapshot = await source.snapshot(p, i.pr, await history((h) => [...(h.observed ?? [])]));
     if (
@@ -72,7 +81,7 @@ export async function reviewRead(root: Conversation, p: Project, source: PrRevie
         h.previous = snapshot.head;
         h.seenAt = started;
       }
-      return { previous, iterations: JSON.parse(JSON.stringify(iterations)) as PrIteration[] };
+      return { ...draftView(h, i.pr, delivery.chat), previous, iterations: JSON.parse(JSON.stringify(iterations)) as PrIteration[] };
     });
     return { ...snapshot, ...stored, capabilities: source.capabilities };
   }
@@ -116,6 +125,13 @@ export async function reviewRead(root: Conversation, p: Project, source: PrRevie
     return { viewed: i.viewed };
   }
   if (baseMoved) throw Error("Base moved; compare the file list instead");
+  if (i.action === "pr-review-add") {
+    const count = i.to - i.from + 1;
+    if (count < 1 || count > 100) throw Error("Choose between 1 and 100 lines");
+    const lines = await source.fileLines(p, i.pr, file.path, i.side === "LEFT" ? range.base : range.head, i.from, count);
+    if (lines.length !== count) throw Error("Line range no longer exists");
+    return history((h) => addDraft(h, i, lines.join("\n"), file.blob, delivery.chat));
+  }
   if (i.action === "pr-review-file")
     return { diff: await diffs(cacheKey("diff", range, file.path), () => source.fileDiff(p, i.pr, file.path, range)) };
   return {

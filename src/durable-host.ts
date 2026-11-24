@@ -53,7 +53,7 @@ export async function openDurableHost(
 
 /** Finishes the skill grant of a message the runtime holds. The saved content marks a grant not yet finished; a record without it was granted, or never owed one. */
 export function finishGrant(dir: string, job: Job): void {
-  if (job.delivery) for (const invoked of skillNames(job.text)) recordInvokedSkill(dir, invoked);
+  if (job.delivery && !job.delivery.literal) for (const invoked of skillNames(job.text)) recordInvokedSkill(dir, invoked);
 }
 
 // A message the host saved with its exact content but never marked admitted is continued under its own request id: the runtime's receipt is read

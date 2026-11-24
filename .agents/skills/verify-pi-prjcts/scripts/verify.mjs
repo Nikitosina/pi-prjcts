@@ -1191,6 +1191,99 @@ async function ui2Prompts(run, page, record, dir, sinks) {
 const EXPAND_HISTORY = `document.querySelector('#workers [data-worker-history][aria-expanded="false"]')?.click()`;
 
 const journeys = {
+  async "review-drafts"(run, page, record, dir) {
+    const q = (s) => `document.querySelector(${JSON.stringify(s)})`;
+    const wait = (s) => page.waitFor(`!!${q(s)}`, s);
+    const open = async () => {
+      if (await page.evaluate(`!!document.querySelector('.rv-room .back')`)) await page.click(".rv-room .back");
+      await wait("[data-review-pr]");
+      await page.click("[data-review-pr]");
+      await wait(".drow");
+    };
+    await page.navigate(run.webUrl);
+    await open();
+    // Put the layout probe halfway into the margin following the longest file.
+    await page.evaluate(
+      `document.querySelector('.rv-end').style.paddingBottom='100vh'; document.querySelector('.rv-scroll').scrollTop += document.querySelector('[data-idx="1"]').getBoundingClientRect().top-document.querySelector('.rv-scroll').getBoundingClientRect().top-75`,
+    );
+    const boundary = await page.evaluate(
+      `(() => { const top=()=>document.querySelector('[data-idx="1"]').getBoundingClientRect().top; const before=top(), start=performance.now(); document.querySelector('[data-split]').click(); return {before,after:top(),ms:performance.now()-start}; })()`,
+    );
+    record("boundary", JSON.stringify(boundary));
+    if (Math.abs(boundary.after - boundary.before) > 1) throw Error("File boundary moved: " + JSON.stringify(boundary));
+    await page.click('[data-goto="0"]');
+    await wait("[data-provider-bar]");
+    if (await page.evaluate(`!!document.querySelector('[data-batch],[data-fix-thread]')`)) throw Error("Colleague PR has worker controls");
+    await page.shot(dir, "01-colleague");
+    await rpc(run, { action: "message", id: run.projectId, text: "VERIFY-JOB review fixture" });
+    await until(
+      async () =>
+        (await rpc(run, { action: "jobs-snapshot", id: run.projectId })).jobs.some((j) => j.pr === "https://github.com/acme/review/pull/7"),
+      "fixture Job",
+      60000,
+    );
+    await open();
+    await wait("[data-batch]");
+    const messages = async () => (await rpc(run, { action: "show", id: run.projectId })).messages.filter((m) => m.role === "user");
+    const before = (await messages()).length;
+    await page.click('.drow[data-n="1"] .ln.n');
+    await page.evaluate(
+      `document.querySelector('.drow[data-n="3"] .ln.n').dispatchEvent(new MouseEvent('click',{bubbles:true,shiftKey:true}))`,
+    );
+    await page.click(".rv-compose textarea");
+    await page.cdp("Input.insertText", { text: "Check the working week." });
+    await page.shot(dir, "02-range");
+    await page.click("[data-save-draft]");
+    await wait("[data-edit-draft]");
+    await page.click("[data-edit-draft]");
+    await page.click(".rv-compose textarea");
+    await page.press("End");
+    await page.cdp("Input.insertText", { text: " Include weekends." });
+    await page.click("[data-save-draft]");
+    await page.waitFor(`document.querySelector('.rv-draft')?.textContent.includes('Include weekends.')`, "edit saved");
+    await page.reload();
+    await open();
+    await wait("[data-edit-draft]");
+    await page.click("[data-fix-thread]");
+    await wait('[data-count="2"]');
+    await page.click('.drow[data-n="4"] .ln.n');
+    await page.click(".rv-compose textarea");
+    await page.cdp("Input.insertText", { text: "Temporary" });
+    await page.click("[data-save-draft]");
+    await wait('[data-count="3"]');
+    await page.evaluate(`Array.from(document.querySelectorAll('[data-delete-draft]')).at(-1).click()`);
+    await wait('[data-count="2"]');
+    if ((await messages()).length !== before) throw Error("Draft CRUD sent a message");
+    await page.shot(dir, "03-drafts");
+    const { advanceReview } = await import("../../../../scripts/lib/pr-review-fixture.mjs");
+    advanceReview(run.review, run.review.second);
+    await open();
+    await wait("[data-outdated]");
+    await page.evaluate(`document.documentElement.dataset.theme='light'`);
+    await page.shot(dir, "04-light");
+    await page.click("[data-batch]");
+    await wait("dialog[open] .merge-text");
+    const preview = await page.evaluate(`${q("dialog[open] .merge-text")}.textContent`);
+    for (const part of [
+      "calendar.js",
+      "1–3",
+      "export const days = 7",
+      "Include weekends.",
+      "Should holidays count here?",
+      run.review.first,
+    ])
+      if (!preview.includes(part)) throw Error("Preview missing " + part);
+    await page.shot(dir, "05-confirm");
+    await page.click("[data-send-batch]");
+    await wait('[data-count="0"]');
+    await wait("[data-sent]");
+    await page.click(".rv-room .back");
+    await page.waitFor(`document.querySelector('#feed').innerText.includes('Include weekends.')`, "chat batch");
+    await page.shot(dir, "06-chat");
+    const after = await messages();
+    if (after.length !== before + 1 || !after.some((m) => m.text === preview)) throw Error("Expected exactly one confirmed message");
+    record("delivery", "One owner message, identical to the confirmed preview.");
+  },
   async "pr-review"(run, page, record, dir) {
     if (!run.review) throw Error("launch with --review-fixture");
     const { advanceReview } = await import("../../../../scripts/lib/pr-review-fixture.mjs");

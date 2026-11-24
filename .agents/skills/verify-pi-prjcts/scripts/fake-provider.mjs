@@ -209,7 +209,7 @@ const server = createServer((req, res) => {
               action: "spawn",
               role: "worker",
               title,
-              brief: `${title}: add a greeting.`,
+              brief: user.includes("review fixture") ? `${title}: review fixture` : `${title}: add a greeting.`,
               acceptance: ["It greets."],
               requestId: "verify-job",
             })
@@ -247,7 +247,7 @@ const server = createServer((req, res) => {
               ? call("job", {
                   action: "ready",
                   summary: "Added the greeting.",
-                  pr: "12",
+                  pr: user.includes("review fixture") ? "https://github.com/acme/review/pull/7" : "12",
                   candidate: "a".repeat(40),
                   proof: ["greeting printed"],
                 })

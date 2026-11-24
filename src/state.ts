@@ -264,6 +264,7 @@ export const Job = Type.Object(
       Type.Object(
         {
           content: Type.String({ minLength: 1, maxLength: 130_000 }),
+          literal: Type.Optional(Type.Literal(true)),
           /** Uploads whose reduced image copies went in with the content; recovery needs every one of them. */
           images: Type.Optional(Type.Array(Id, { maxItems: 10 })),
         },
@@ -1370,6 +1371,30 @@ export const Request = Type.Union([
     { action: Type.Literal("pr-review-open"), ...reviewId, seen: Type.Optional(Type.Boolean()) },
     { additionalProperties: false },
   ),
+  Type.Object(
+    {
+      action: Type.Literal("pr-review-add"),
+      ...reviewRange,
+      path: reviewPath,
+      side: Type.Union([Type.Literal("LEFT"), Type.Literal("RIGHT")]),
+      from: Type.Integer({ minimum: 1, maximum: 10000000 }),
+      to: Type.Integer({ minimum: 1, maximum: 10000000 }),
+      comment: Type.String({ minLength: 1, maxLength: 4000 }),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      action: Type.Literal("pr-review-edit"),
+      ...reviewId,
+      draftId: Id,
+      revision: Id,
+      comment: Type.String({ minLength: 1, maxLength: 4000 }),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object({ action: Type.Literal("pr-review-delete"), ...reviewId, draftId: Id, revision: Id }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("pr-review-send"), ...reviewId, revision: Id, chatId: ChatId }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("pr-review-files"), ...reviewRange }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("pr-review-file"), ...reviewRange, path: reviewPath }, { additionalProperties: false }),
   Type.Object(
