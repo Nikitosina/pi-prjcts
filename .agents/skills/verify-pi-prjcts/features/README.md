@@ -43,3 +43,5 @@ Each file: H1, one paragraph, then exactly four H2s in order: `Sub-features`, `H
 
 `review-drafts`: launch with `--review-fixture`. Measure the layout toggle at a file boundary, inspect a colleague PR, then link the fixture PR to a real fake-provider Job and exercise the draft and batch flow.
 Add `--review-stress` at launch to measure the toggle after loading 16 files. The draft journey reads from Main and checks delivery in the Job's separate Calendar maintenance chat.
+
+`review-publish`: launch with `--review-fixture`, doctor, then drive `review-publish`. The owner submits one selected draft and keeps a worker draft pending. The stub applies the reply but drops its receipt; the room shows the uncertain state.
