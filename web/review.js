@@ -48,6 +48,7 @@ export async function renderReview(root, focus) {
   room.innerHTML = `<div class="rv-head">${back}<h1>Reading PR #${esc(focus.id)}…</h1></div>`;
   try {
     const s = await rpc("open", { seen: true });
+    let currentFiles;
     async function show(head = s.head, since = false) {
       const gen = ++version;
       const range = { head, ...(since ? { since: s.previous } : {}) };
@@ -75,7 +76,8 @@ export async function renderReview(root, focus) {
         stack = q(".rv-scroll"),
         blocks = [...stack.querySelectorAll(".fblock")],
         filter = q(".ft-filter");
-      const drafts = reviewDrafts({ room, panel, s, files, range, threads, rpc });
+      if (head === s.head && !since) currentFiles = new Map(files.map((f) => [f.path, f.blob]));
+      const drafts = reviewDrafts({ room, panel, s, files, currentFiles, range, threads, rpc });
       let current = 0;
       const tree = () => {
         const viewed = files.filter((f) => f.viewed).length;
@@ -132,8 +134,10 @@ export async function renderReview(root, focus) {
         const opened = [...body.querySelectorAll("details[open]")].map((el) => el.parentElement.dataset.thread);
         body.classList.toggle("split", split);
         body.classList.toggle("nowrap", !wrap);
+        const form = body.querySelector(".rv-compose");
         body.innerHTML = renderDiff(patches.get(i), f.path, split, f.threads);
         for (const page of expansions.get(i) ?? []) appendContext(body, page, f.path);
+        if (form) drafts.restore(body, form);
         for (const id of opened) body.querySelector(`[data-thread="${id}"] details`)?.setAttribute("open", "");
       }
       function layout(next) {

@@ -1,6 +1,6 @@
 import { esc } from "./format.js";
 
-export function reviewDrafts({ room, panel, s, files, range, threads, rpc }) {
+export function reviewDrafts({ room, panel, s, files, currentFiles, range, threads, rpc }) {
   const q = (sel) => room.querySelector(sel),
     list = document.createElement("section"),
     bar = q(".rv-bar");
@@ -17,7 +17,10 @@ export function reviewDrafts({ room, panel, s, files, range, threads, rpc }) {
       drafts
         .map((d) => {
           const outdated =
-            d.head !== range.head && (range.since || files.find((f) => f.path === d.path)?.blob !== d.blob || d.side === "LEFT");
+            !currentFiles.has(d.path) ||
+            (d.side === "LEFT"
+              ? (d.since ?? s.iterations.find((it) => it.head === d.head)?.base) !== s.iterations.find((it) => it.head === s.head)?.base
+              : currentFiles.get(d.path) !== d.blob);
           return `<article class="rv-draft"><small class="mono muted">${esc(label(d))}</small>${outdated ? "<small data-outdated>Outdated</small>" : ""}<p>${esc(d.comment)}</p>${d.sent ? `<small data-sent>Sent · ${esc(new Date(d.sent).toLocaleString())}</small>` : `<small>${d.destination === "provider" ? "Provider draft" : "Fix list"}</small> <button data-edit-draft="${d.id}">Edit</button> <button data-delete-draft="${d.id}">Delete</button>`}</article>`;
         })
         .join("");
@@ -34,6 +37,7 @@ export function reviewDrafts({ room, panel, s, files, range, threads, rpc }) {
     const form = document.createElement("form");
     form.className = "rv-compose";
     form.innerHTML = `<label><b>${esc(label(d))}</b><textarea required maxlength="4000" placeholder="Write a review comment…"></textarea></label><div><button type="button" data-cancel-draft>Cancel</button> <button class="primary" data-save-draft>Save draft</button></div>`;
+    Object.assign(form.dataset, { side: d.side, from: d.from, to: d.to });
     if (after) after.after(form);
     else bar.before(form);
     const input = form.querySelector("textarea");
@@ -73,10 +77,7 @@ export function reviewDrafts({ room, panel, s, files, range, threads, rpc }) {
     const from = Math.min(start.line, p.line),
       to = Math.max(start.line, p.line);
     compose({ path: p.path, side: p.side, from, to }, p.row);
-    for (const row of p.block.querySelectorAll(".drow")) {
-      const n = Number(row.dataset[p.side === "LEFT" ? "o" : "n"]);
-      if (n >= from && n <= to) row.classList.add("rv-selected");
-    }
+    highlight(p.block, { side: p.side, from, to });
   }
   room.onpointerdown = (e) => {
     drag = e.target.closest(".ln") ? point(e.target) : null;
@@ -132,6 +133,12 @@ export function reviewDrafts({ room, panel, s, files, range, threads, rpc }) {
     dialog.showModal();
   }
   return {
+    restore(body, form) {
+      const d = form.dataset;
+      const row = body.querySelector(`[data-${d.side === "LEFT" ? "o" : "n"}="${d.to}"]`);
+      (row ?? body.lastElementChild).after(form);
+      highlight(body, d);
+    },
     click: (e) => {
       const p = point(e.target);
       if (p) {
@@ -147,6 +154,12 @@ export function reviewDrafts({ room, panel, s, files, range, threads, rpc }) {
       }
       if (el.hasAttribute("data-fix-thread")) {
         const t = threads.find((t) => t.index === Number(el.dataset.fixThread));
+        const comment = t.comments.map((c) => c.body).join("\n\n");
+        if (comment.length > 4000) {
+          compose({ path: t.path, side: t.side, from: t.line, to: t.line, comment }, el.closest(".row-extra"));
+          notice(q(".rv-compose"), new Error("Shorten the thread to 4,000 characters before saving."));
+          return true;
+        }
         el.disabled = true;
         return mutate("add", {
           ...range,
@@ -154,7 +167,7 @@ export function reviewDrafts({ room, panel, s, files, range, threads, rpc }) {
           from: t.line,
           to: t.line,
           side: t.side,
-          comment: t.comments.map((c) => c.body).join("\n\n"),
+          comment,
         }).finally(() => {
           el.disabled = false;
         });
@@ -162,6 +175,12 @@ export function reviewDrafts({ room, panel, s, files, range, threads, rpc }) {
       return false;
     },
   };
+}
+function highlight(block, { side, from, to }) {
+  for (const row of block.querySelectorAll(".drow")) {
+    const n = Number(row.dataset[side === "LEFT" ? "o" : "n"]);
+    if (n >= Number(from) && n <= Number(to)) row.classList.add("rv-selected");
+  }
 }
 function notice(root, err) {
   let msg = root.querySelector("[role=alert]");
