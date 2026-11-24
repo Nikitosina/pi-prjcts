@@ -49,6 +49,8 @@
     "src/durable-*.ts": ["durable-runtime-e2e", "jobs-e2e"],
     "src/task-worker-workspace.ts": ["worktree-lifecycle-e2e", "vcs-plugins-e2e", "jobs-e2e"],
     "src/github-*.ts": ["github-*", "follow-prs-e2e"],
+    "src/pr-review*.ts": ["pr-review-e2e"],
+    "src/review-map.ts": ["pr-review-e2e"],
     "src/pr-*.ts": ["github-pr-watch-e2e", "follow-prs-e2e"],
     "src/workspace-*.ts": ["workspace-*", "durable-workspace-*", "coordinator-workspace-e2e"],
     "src/worktree-*.ts": ["worktree-lifecycle-e2e", "workspace-*"],

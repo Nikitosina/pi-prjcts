@@ -1034,3 +1034,48 @@
 .rv-publish p {
   overflow-wrap: anywhere;
 }
+.rv-room .tour-step {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 12px 8px;
+  width: 100%;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+}
+.rv-room .tour-step[aria-current="true"],
+.rv-room .tour-note {
+  background: var(--hunk-bg);
+}
+.rv-room .tour-step small {
+  margin-left: auto;
+  color: var(--accent);
+}
+.rv-room .tour-card,
+.rv-room .stale-map {
+  margin-bottom: 12px;
+  padding: 16px 20px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.rv-room .tour-card small,
+.rv-room .tour-note {
+  color: var(--accent);
+}
+.rv-room .tour-card h2 {
+  margin: 6px 0 12px;
+}
+.rv-room .tour-card label {
+  display: block;
+  margin: 8px 0;
+}
+.rv-room .tour-card button,
+.rv-room .stale-map button {
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 4px 10px;
+}
+.rv-room .tour-note {
+  padding: 8px 16px;
+  font: var(--font-body);
+}

@@ -3,6 +3,7 @@ import { esc } from "./format.js";
 import { state } from "./state.js";
 import { renderDiff, contextRows } from "./diff.js";
 import { context, header, fileHeader, fileTree } from "./review-parts.js";
+import { reviewTour } from "./review-tour.js";
 import { reviewDrafts } from "./review-drafts.js";
 import { writeBanner } from "./review-publish.js";
 import { typing } from "./hotkeys.js";
@@ -23,7 +24,9 @@ export async function renderReview(root, focus, afterWrite = "") {
   document.querySelector("#context").append(panel);
   const rpc = (action, extra) => call(`pr-review-${action}`, { id: projectId, provider: focus.provider, pr: focus.id, ...extra }),
     projectId = state.projectId;
-  let observer,
+  const openingChat = state.chatId;
+  let tour,
+    observer,
     keys,
     version = 0,
     split = false,
@@ -43,6 +46,7 @@ export async function renderReview(root, focus, afterWrite = "") {
   window.addEventListener("keydown", keyHandler);
   cleanup = () => {
     observer?.disconnect();
+    tour?.stop();
     panel.remove();
     window.removeEventListener("keydown", keyHandler);
   };
@@ -50,17 +54,32 @@ export async function renderReview(root, focus, afterWrite = "") {
   try {
     const s = await rpc("open", { seen: !afterWrite });
     let currentFiles;
-    async function show(head = s.head, since = false) {
+    tour = reviewTour(
+      s,
+      openingChat,
+      rpc,
+      () => room.isConnected && room,
+      (automatic = false) => show(s.head, false, automatic),
+    );
+    async function show(head = s.head, since = false, automatic = false) {
       const gen = ++version;
-      const range = { head, ...(since ? { since: s.previous } : {}) };
+      const range = { head, ...(head === s.head && s.base ? { base: s.base } : {}), ...(since ? { since: s.previous } : {}) };
       let fileNotice = "";
-      const { files, baseMoved } = await rpc("files", range).catch((err) => {
+      const { files: allFiles, baseMoved } = await rpc("files", range).catch((err) => {
         if (!s.uncertain) throw err;
         fileNotice = "File list unavailable.";
         return { files: [], baseMoved: false };
       });
       if (!room.isConnected || gen !== version) return;
+      if (automatic && room.querySelector(".rv-compose,dialog[open]")) {
+        const control = room.querySelector("[data-tour-control]");
+        if (control) control.innerHTML = tour.controls();
+        return;
+      }
       observer?.disconnect();
+      const enabled = head === s.head && !since,
+        guided = tour.view(allFiles, enabled),
+        files = guided?.files ?? allFiles;
       const listed = new Set(files.map((f) => f.path));
       const threads = s.threads
         .map((t, index) => ({
@@ -79,7 +98,8 @@ export async function renderReview(root, focus, afterWrite = "") {
       room.innerHTML =
         header(s, focus, head, since, split, wrap, files, checks, open, back) +
         writeBanner(s) +
-        `${s.notice || fileNotice || baseMoved ? `<div class="since-note">${esc(s.notice)} ${fileNotice} ${baseMoved ? "Base moved — file list only." : ""}</div>` : ""}<div class="rv-body"><nav class="rv-files"><div class="ft-head"><span class="ft-title">Files</span><button data-tree aria-expanded="false">Files ▸</button><span class="grow"></span><span data-progress class="mono"></span></div><div class="bar ft-bar"><span></span></div><input class="ft-filter" type="search" placeholder="Filter files…" aria-label="Filter files"><div class="rv-paths"></div></nav><div class="rv-scroll">${files.map((f, i) => fileHeader(f, i, baseMoved || generated(f.path), baseMoved)).join("")}<p class="rv-end muted small">End of changes · ${files.length} files</p></div></div><footer class="rv-bar small"></footer>`;
+        `${s.notice || fileNotice || baseMoved ? `<div class="since-note">${esc(s.notice)} ${fileNotice} ${baseMoved ? "Base moved — file list only." : ""}</div>` : ""}<div class="rv-body"><nav class="rv-files"><div class="ft-head"><span class="ft-title">Files</span><button data-tree aria-expanded="false">Files ▸</button><span class="grow"></span><span data-progress class="mono"></span></div><div class="bar ft-bar"><span></span></div><input class="ft-filter" type="search" placeholder="Filter files…" aria-label="Filter files"><div class="rv-paths"></div></nav><div class="rv-scroll">${guided?.intro ?? ""}${files.map((f, i) => fileHeader(f, i, baseMoved || generated(f.path), baseMoved)).join("")}<p class="rv-end muted small">End of changes · ${files.length} files</p></div></div><footer class="rv-bar small"></footer>`;
+      room.querySelector(".rv-head .grow").insertAdjacentHTML("afterend", `<div data-tour-control>${enabled ? tour.controls() : ""}</div>`);
       panel.innerHTML = context(
         s,
         head,
@@ -90,7 +110,7 @@ export async function renderReview(root, focus, afterWrite = "") {
         stack = q(".rv-scroll"),
         blocks = [...stack.querySelectorAll(".fblock")],
         filter = q(".ft-filter");
-      if (head === s.head && !since) currentFiles = new Map(files.map((f) => [f.path, f.blob]));
+      if (head === s.head && !since) currentFiles = new Map(allFiles.map((f) => [f.path, f.blob]));
       const drafts = reviewDrafts({
         room,
         panel,
@@ -107,10 +127,15 @@ export async function renderReview(root, focus, afterWrite = "") {
         const viewed = files.filter((f) => f.viewed).length;
         q("[data-progress]").textContent = `${viewed}/${files.length} viewed`;
         q(".ft-bar span").style.width = `${(100 * viewed) / (files.length || 1)}%`;
-        q(".rv-paths").innerHTML = fileTree(files, filter.value, current);
+        q(".rv-paths").innerHTML = guided?.nav ?? fileTree(files, filter.value, current);
       };
       tree();
+      filter.hidden = !!guided;
       filter.oninput = tree;
+      blocks.forEach((b, i) => {
+        if (guided?.modified(files[i].path))
+          b.querySelector(".fh-path").insertAdjacentHTML("afterend", `<span class="badge">↻ changed</span>`);
+      });
       let selectedScroll;
       function select(i) {
         if (i === current) return;
@@ -161,6 +186,12 @@ export async function renderReview(root, focus, afterWrite = "") {
         const form = body.querySelector(".rv-compose");
         body.innerHTML = renderDiff(patches.get(i), f.path, split, f.threads);
         for (const page of expansions.get(i) ?? []) appendContext(body, page, f.path);
+        if (guided && !guided.modified(f.path))
+          for (const n of guided.step.notes.filter((n) => n.path === f.path)) {
+            body
+              .querySelector(`.drow[data-${n.side === "LEFT" ? "o" : "n"}="${n.line}"]`)
+              ?.insertAdjacentHTML("afterend", `<aside class="tour-note">✦ ${esc(n.text)}</aside>`);
+          }
         if (form) drafts.restore(body, form);
         for (const id of opened) body.querySelector(`[data-thread="${id}"] details`)?.setAttribute("open", "");
       }
@@ -265,6 +296,7 @@ export async function renderReview(root, focus, afterWrite = "") {
         const d = el.dataset,
           b = el.closest(".fblock"),
           i = +(b?.dataset.idx ?? 0);
+        if (el.matches("[data-tour-request],[data-tour-mode],[data-step],[data-approve-step]")) return tour.click(el);
         if ("tree" in d) {
           const open = q(".rv-files").classList.toggle("open");
           el.setAttribute("aria-expanded", open);

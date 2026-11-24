@@ -3,7 +3,7 @@ import type { Request } from "./state.ts";
 import { publishing } from "./pr-review-publish.ts";
 import { Refused } from "./state.ts";
 type Add = Extract<Request, { action: "pr-review-add" }>;
-type Draft = Pick<Add, "head" | "since" | "path" | "side" | "from" | "to" | "comment"> & {
+type Draft = Pick<Add, "head" | "since" | "base" | "path" | "side" | "from" | "to" | "comment"> & {
   id: string;
   quote: string;
   blob: string;
@@ -18,7 +18,11 @@ export type DraftBook = {
   sendingTo?: string;
 };
 export type ReviewChat = { id: string; title: string };
-export type ReviewDelivery = { chat: ReviewChat | null; send: (text: string, id: string, chatId: string) => Promise<unknown> };
+export type ReviewDelivery = {
+  route?: { chat: number; ready: string | null; send: (text: string, id: string) => Promise<void> };
+  chat: ReviewChat | null;
+  send: (text: string, id: string, chatId: string) => Promise<unknown>;
+};
 const pending = (h: DraftBook) =>
   h.drafts?.filter((d) => d.destination === "worker" && !d.sent && !d.published && !h.uncertain?.draftIds.includes(d.id)) ?? [];
 function message(pr: string, drafts: Draft[]) {
@@ -49,6 +53,7 @@ export function addDraft(h: DraftBook, i: Add, quote: string, blob: string, chat
     id: randomUUID(),
     path: i.path,
     head: i.head,
+    ...(i.base ? { base: i.base } : {}),
     ...(i.since ? { since: i.since } : {}),
     side: i.side,
     from: i.from,

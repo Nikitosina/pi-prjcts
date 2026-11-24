@@ -51,7 +51,7 @@ export async function publishReview(
                 if (
                   d.head !== i.head ||
                   (d.side === "LEFT" &&
-                    (d.since ?? h.iterations.find((x) => x.head === d.head)?.base) !==
+                    (d.since ?? d.base ?? h.iterations.find((x) => x.head === d.head)?.base) !==
                       snapshot.iterations.find((x) => x.head === d.head)?.base)
                 )
                   throw Error("Outdated anchor. Drop the draft from the review.");

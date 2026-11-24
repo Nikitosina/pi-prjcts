@@ -1,9 +1,32 @@
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { createKit } from "./lib/e2e-kit.mjs";
+import { reviewSteps } from "./lib/review-map-fixture.mjs";
+import { createKit, call, say } from "./lib/e2e-kit.mjs";
 import { reviewFixture, advanceReview } from "./lib/pr-review-fixture.mjs";
-const kit = await createKit("pr-review");
+let mutate = () => {};
+const kit = await createKit("pr-review", {
+  handler: ({ user, tools, results }) => {
+    if (tools.includes("agents") && user.startsWith("[Guided tour request]")) {
+      const req = JSON.parse(user.split("\n")[1]);
+      return results.length
+        ? say("Requested")
+        : call("agents", {
+            action: "spawn",
+            role: "scout",
+            requestId: req.requestId,
+            readRef: req.head,
+            brief: "Inspect the calendar at the requested head.",
+          });
+    }
+    if (user.includes("Inspect the calendar")) {
+      const steps = reviewSteps();
+      mutate(steps);
+      return say(JSON.stringify({ steps }));
+    }
+    return say("OK");
+  },
+});
 kit.initRepo();
 const f = reviewFixture(kit.root, kit.workspace, kit.core);
 Object.assign(kit.hostEnv, f.env);
@@ -31,6 +54,24 @@ await kit.run(async () => {
   ];
   const before = fingerprint();
   assert.equal((await read("open", { seen: true })).head, f.first);
+  const chat = await kit.rpc({ action: "chat-create", id, title: "Colleague review" });
+  const tour = () => read("tour", { head: f.first, chatId: chat.id });
+  const mapStatus = () => read("tour-status");
+  for (const [change, reason] of [
+    [(s) => s.pop(), /missing/i],
+    [(s) => s[1].files.push("calendar.js"), /duplicate/i],
+    [(s) => (s[0].notes[0].line = 9999), /diff/i],
+    [(s) => (s[0].why = "a".repeat(4000)), /size|invalid|long/i],
+  ]) {
+    mutate = change;
+    await tour();
+    await kit.eventually(async () => reason.test((await mapStatus()).error), "Expected refusal: " + reason, 150);
+  }
+  mutate = () => {};
+  await Promise.all([tour(), tour()]);
+  await kit.eventually(async () => (await mapStatus()).map?.head === f.first, "validated map", 150);
+  const tourRequests = kit.result.calls.filter((c) => c.user.startsWith("[Guided tour request]") && !c.results.length);
+  assert.equal(tourRequests.length, 5);
   const files = await read("files", { head: f.first });
   assert.deepEqual(
     files.files.map((x) => x.path),

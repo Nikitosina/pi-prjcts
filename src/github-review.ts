@@ -28,7 +28,7 @@ async function checkout(p: Project) {
   return git;
 }
 const checksFields = `statusCheckRollup{contexts(first:100){totalCount nodes{... on CheckRun{name status conclusion} ... on StatusContext{context state}}}}`;
-const query = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){databaseId pullRequest(number:$number){id title state isDraft headRefName baseRefName author{login} headRefOid baseRefOid timelineItems(last:50,itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT]){nodes{... on HeadRefForcePushedEvent{beforeCommit{oid} afterCommit{oid}}}} commits(last:1){nodes{commit{${checksFields}}}} reviewThreads(first:100){totalCount nodes{id path line diffSide isResolved isOutdated comments(first:20){totalCount nodes{author{login} createdAt body commit{oid}}}}}}}}`;
+const query = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){databaseId pullRequest(number:$number){id title body state isDraft headRefName baseRefName author{login} headRefOid baseRefOid timelineItems(last:50,itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT]){nodes{... on HeadRefForcePushedEvent{beforeCommit{oid} afterCommit{oid}}}} commits(last:1){nodes{commit{${checksFields}}}} reviewThreads(first:100){totalCount nodes{id path line diffSide isResolved isOutdated comments(first:20){totalCount nodes{author{login} createdAt body commit{oid}}}}}}}}`;
 const nullable = <T extends TSchema>(t: T) => Type.Union([t, Type.Null()]);
 const str = Type.String(),
   oid = Type.String({ pattern: "^[a-f0-9]{40}$" }),
@@ -46,6 +46,7 @@ const checks = Type.Object({ statusCheckRollup: nullable(Type.Object({ contexts:
 const metadata = Type.Object({
   id: str,
   title: str,
+  body: Type.Optional(str),
   state: str,
   isDraft: Type.Boolean(),
   headRefName: str,
@@ -151,6 +152,7 @@ export const githubReview: PrReviewSource = {
       notices.add("Long discussions show their first 20 comments.");
     return {
       providerId: pr.id,
+      description: pr.body?.slice(0, 12000),
       title: pr.title.slice(0, 300),
       author: pr.author?.login ?? "",
       head,
@@ -188,7 +190,13 @@ export const githubReview: PrReviewSource = {
     const files = [];
     for (let i = 0; i < raw.length - 1; i += 2) {
       const [, , old, blob, status] = raw[i]!.split(" ");
-      files.push({ stats: stats.get(raw[i + 1]!), path: raw[i + 1]!, status: status!, blob: status === "D" ? `deleted:${old}` : blob! });
+      files.push({
+        patchId: raw[i],
+        stats: stats.get(raw[i + 1]!),
+        path: raw[i + 1]!,
+        status: status!,
+        blob: status === "D" ? `deleted:${old}` : blob!,
+      });
     }
     return files;
   },

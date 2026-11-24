@@ -567,7 +567,7 @@ const scheduleTiming = {
 };
 const reviewId = { id: Id, provider: Provider, pr: Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$" }) };
 const reviewSha = Type.String({ pattern: "^[0-9a-f]{40}$" });
-const reviewRange = { ...reviewId, head: reviewSha, since: Type.Optional(reviewSha) };
+const reviewRange = { ...reviewId, head: reviewSha, base: Type.Optional(reviewSha), since: Type.Optional(reviewSha) };
 const reviewPath = Type.String({
   minLength: 1,
   maxLength: 1024,
@@ -1435,6 +1435,23 @@ export const Request = Type.Union([
     { additionalProperties: false },
   ),
   Type.Object({ action: Type.Literal("pr-review-send"), ...reviewId, revision: Id, chatId: ChatId }, { additionalProperties: false }),
+  Type.Object(
+    { action: Type.Literal("pr-review-tour"), ...reviewId, head: reviewSha, base: Type.Optional(reviewSha), chatId: ChatId },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      action: Type.Literal("pr-review-approve-step"),
+      ...reviewId,
+      head: reviewSha,
+      base: Type.Optional(reviewSha),
+      mapHead: reviewSha,
+      mapBase: reviewSha,
+      title: Type.String({ minLength: 1, maxLength: 160 }),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object({ action: Type.Literal("pr-review-tour-status"), ...reviewId }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("pr-review-files"), ...reviewRange }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("pr-review-file"), ...reviewRange, path: reviewPath }, { additionalProperties: false }),
   Type.Object(

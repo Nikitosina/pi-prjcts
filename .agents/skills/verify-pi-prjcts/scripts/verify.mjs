@@ -1191,6 +1191,70 @@ async function ui2Prompts(run, page, record, dir, sinks) {
 const EXPAND_HISTORY = `document.querySelector('#workers [data-worker-history][aria-expanded="false"]')?.click()`;
 
 const journeys = {
+  async "review-tour"(run, page, record, dir) {
+    const wait = (s) => page.waitFor(`!!document.querySelector(${JSON.stringify(s)})`, s);
+    const open = async () => {
+      await page.navigate(run.webUrl);
+      await wait("[data-review-pr]");
+      await page.click("[data-review-pr]");
+      await wait(".drow");
+    };
+    await open();
+    await page.shot(dir, "01-before");
+    await page.click("[data-tour-request]");
+    await wait("[data-tour-building]");
+    await page.shot(dir, "02-building");
+    await wait(".tour-note");
+    await page.shot(dir, "03-colleague");
+    await page.click("[data-approve-step]");
+    await until(
+      async () =>
+        (await rpc(run, { action: "pr-review-files", id: run.projectId, provider: "github", pr: "7", head: run.review.first })).files
+          .filter((f) => f.viewed)
+          .map((f) => f.path)
+          .join(",") === "calendar.js,src/workdays.js",
+      "step files viewed",
+    );
+    const chat = await rpc(run, { action: "chat-create", id: run.projectId, title: "Calendar maintenance" });
+    await rpc(run, { action: "message", id: run.projectId, chatId: chat.id, text: "VERIFY-JOB review fixture" });
+    await until(
+      async () =>
+        (await rpc(run, { action: "jobs-snapshot", id: run.projectId })).jobs.some((j) => j.pr === "https://github.com/acme/review/pull/7"),
+      "fixture Job",
+      60000,
+    );
+    const { advanceReview } = await import("../../../../scripts/lib/pr-review-fixture.mjs");
+    advanceReview(run.review, run.review.second);
+    await open();
+    await page.click('[data-tour-mode="tour"]');
+    await wait(".stale-map");
+    if (
+      await page.evaluate(`document.querySelectorAll('[data-step].changed').length!==1||!document.querySelector('[data-step="0"].changed')`)
+    )
+      throw Error("wrong stale steps");
+    await page.shot(dir, "04-stale");
+    await page.click('[data-step="1"]');
+    await wait('[data-step="1"][aria-current="true"]');
+    await page.click("[data-tour-request]");
+    await page.waitFor(
+      `!document.querySelector(".stale-map") && !!document.querySelector(\'[data-step="1"][aria-current="true"]\')`,
+      "selection after rebuild",
+    );
+    await page.click('[data-step="0"]');
+    await wait(".tour-note");
+    await page.shot(dir, "05-step");
+    await page.evaluate(`document.documentElement.dataset.theme='light'`);
+    await page.shot(dir, "06-light");
+    for (const id of ["main", chat.id]) {
+      const view = await rpc(run, { action: "show", id: run.projectId, chatId: id });
+      const msgs = view.messages.filter((m) => m.text?.startsWith("[Guided tour request]"));
+      if (msgs.length !== 1 || msgs[0].origin !== "internal") throw Error("request routing: " + id);
+    }
+    await page.navigate(`${new URL(run.webUrl).origin}/?project=${run.projectId}&chat=${chat.id}`);
+    await wait("[data-tour-event]");
+    await page.shot(dir, "07-event");
+    record("tour", "One internal request in each destination; manual rebuild and viewed step.");
+  },
   async "review-publish"(run, page, record, dir) {
     const wait = (s) => page.waitFor(`!!document.querySelector(${JSON.stringify(s)})`, s);
     async function open() {
