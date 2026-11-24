@@ -89,6 +89,9 @@ await kit.run(async () => {
     );
 
   const { networkRetryDelay, transientNetworkFailure } = await import("../src/provider-failure.ts");
+  for (const error of ["Codex stream ended without a stop reason", "WebSocket stream closed before response.completed"]) {
+    kit.check(error, transientNetworkFailure(`model_error: ${error}`));
+  }
   kit.check("bounded network backoff", [1, 2, 3, 4, 5, 6, 7].map((n) => networkRetryDelay(n, 1)).join() === "1,2,4,8,8,8,");
   for (const error of [
     "401 Connection error",
