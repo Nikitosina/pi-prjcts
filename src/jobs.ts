@@ -1573,7 +1573,7 @@ export function createJobs(host: JobsHost) {
           if (!pin || "refusal" in pin) throw none(`${pin ? pin.refusal : "The checkout was not confirmed"}.`);
           if (pin.sha !== job.candidate)
             throw none(
-              `The checkout is at ${pin.sha}, not the recorded candidate ${job.candidate ?? "(none)"}; verify it, then record it with job candidate.`,
+              `The checkout is at ${pin.sha}, not the recorded candidate ${job.candidate ?? "(none)"}; record the commit with job candidate, then verify it.`,
             );
           if (pin.sha === answered.sha)
             throw none(`Reviewer ${continues} already read ${answered.sha}; commit the fixes and record the new candidate first.`);
@@ -1591,7 +1591,7 @@ export function createJobs(host: JobsHost) {
           if (!pin || "refusal" in pin) throw none(`${pin ? pin.refusal : "The checkout was not confirmed"}.`);
           if (job.candidate && pin.sha !== job.candidate)
             throw none(
-              `The checkout is at ${pin.sha}, not the recorded candidate ${job.candidate}; verify it, then record it with job candidate.`,
+              `The checkout is at ${pin.sha}, not the recorded candidate ${job.candidate}; record the commit with job candidate, then verify it.`,
             );
           const spent = await countedReviews(tx, job);
           // Given-back re-checks still closed the full round.
@@ -1658,7 +1658,7 @@ export function createJobs(host: JobsHost) {
           const after = pinned ? await checkoutMoved(api.conversationId, cwd, pinned) : undefined;
           const note = after ? `\n\n[This review is not valid for the current checkout: it was confirmed at ${pinned}, and ${after}.]` : "";
           const hint = reviewer
-            ? `\n\n[reviewer ${child}: after fixing, commit, verify, record it with job candidate, then call subagent kind recheck with continues "${child}" to re-check in this conversation.]`
+            ? `\n\n[reviewer ${child}: after fixing, commit, record it with job candidate, verify it, then call subagent kind recheck with continues "${child}" to re-check in this conversation.]`
             : "";
           return { output: [{ type: "text" as const, text: textOfAnswer(entry) + note + hint }], details: { conversationId: child } };
         }

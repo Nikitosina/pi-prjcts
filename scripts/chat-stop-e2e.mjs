@@ -5,9 +5,13 @@ import { createKit, say } from "./lib/e2e-kit.mjs";
 
 let release;
 const hold = new Promise((ok) => (release = ok));
+const calls = [];
 const kit = await createKit("chat-stop", {
+  env: { PI_PROJECTS_NETWORK_RETRY_BASE_MS: "5000" },
   handler: ({ role, user }) => {
     if (role !== "coordinator") return undefined;
+    calls.push(user);
+    if (user.startsWith("NETWORK")) return { status: 502, body: { error: { message: "WebSocket connect timeout" } } };
     if (user.includes("HOLD"))
       return (async function* () {
         await hold;
@@ -90,6 +94,26 @@ await kit.run(async () => {
   // kit.ask waits for the whole project to go idle, so the other chat is released first.
   release();
   await eventually(async () => (await busy(other)) === false, "other chat finished");
+  await Promise.all(["main", other].map((chatId) => rpc({ action: "message", id, chatId, text: `NETWORK ${chatId}` })));
+  await eventually(
+    async () => (await rpc({ action: "show", id })).chats.filter((c) => c.networkRetryAt && !c.busy).length === 2,
+    "both chats awaiting network retry",
+    300,
+  );
+  const page = await kit.openPage(await kit.webUrl(id));
+  await page.waitFor(
+    `document.querySelector('#stop-btn')?.hidden === false && document.querySelector('#live-turn')?.textContent.includes('connection failed')`,
+    "pending retry has a Stop button",
+  );
+  await page.shot("pending-network-retry");
+  await page.evaluate(`document.querySelector('#stop-btn').click()`);
+  await eventually(
+    async () => !(await rpc({ action: "show", id })).chats.find((c) => c.id === "main").networkRetryAt,
+    "owner cancelled network retry",
+  );
+  await rpc({ action: "message", id, chatId: other, text: "replacement input" });
+  await new Promise((resolve) => setTimeout(resolve, 5500));
+  check("neither the stopped nor superseded chat sends a continuation", !calls.some((text) => text.includes("provider connection failed")));
   await kit.ask(id, "Reply exactly AFTERSTOP");
   check("S2 the chat answers the next message", JSON.stringify(await rpc({ action: "show", id })).includes("AFTERSTOP"));
   check(

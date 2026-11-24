@@ -259,7 +259,15 @@ const ProjectChats = defineDoc<{ mainTitle: string | null; chats: StoredChat[] }
   checkpointWhen: () => false,
   initial: () => ({ mainTitle: null, chats: [] }),
 });
-export type DurableChat = { id: string; title: string; conversationId: number; createdAt: number; archived: boolean; busy: boolean };
+export type DurableChat = {
+  id: string;
+  title: string;
+  conversationId: number;
+  createdAt: number;
+  archived: boolean;
+  busy: boolean;
+  networkRetryAt?: number;
+};
 const MAIN_CHAT = "main";
 const chatId = Type.String({ pattern: "^(main|[a-f0-9-]{36})$" });
 export const chatTitle = (text: string): string => {
@@ -1792,8 +1800,9 @@ export async function openDurableProject(input: {
       for (const change of publication.changes) {
         if (change.type !== "submission") continue;
         const record = change.value;
-        if (record.type !== "input" || record.status !== "unanswered" || !isCoordinator(record.conversationId)) continue;
-        if (transientNetworkFailure(unansweredReason(record))) network?.wake(record.conversationId);
+        if (record.type !== "input" || !isCoordinator(record.conversationId)) continue;
+        network?.observe(record);
+        if (record.status !== "unanswered") continue;
         const failure = providerFailure(unansweredReason(record));
         if (failure && chains.coordinator)
           void advanceCoordinator(record.conversationId, String(record.id), failure).catch((error) =>
@@ -2427,6 +2436,7 @@ export async function openDurableProject(input: {
     async function chatList(): Promise<DurableChat[]> {
       const stored = await storedChats();
       const active = (await openedHarness.inspect(context)).submissions.filter((item) => item.type === "input");
+      const waits = await network?.waits();
       const busy = (id: number) => active.some((item) => Number(item.conversationId) === id);
       return [
         {
@@ -2436,6 +2446,7 @@ export async function openDurableProject(input: {
           createdAt: 0,
           archived: false,
           busy: busy(Number(root.id)),
+          networkRetryAt: waits?.[root.id]?.at,
         },
         ...stored.chats.map((chat) => ({
           id: chat.id,
@@ -2444,6 +2455,7 @@ export async function openDurableProject(input: {
           createdAt: chat.createdAt,
           archived: chat.archivedAt !== undefined,
           busy: busy(chat.conversationId),
+          networkRetryAt: waits?.[chat.conversationId]?.at,
         })),
       ];
     }
@@ -2914,8 +2926,8 @@ export async function openDurableProject(input: {
             view.dispose();
           }
           await conversation.abort(context);
-          await network?.cancel(conversation.id);
-          return { stopped: running || chat.busy, chatId: chat.id };
+          const cancelled = await network?.cancel(conversation.id);
+          return { stopped: running || chat.busy || !!cancelled, chatId: chat.id };
         }),
       reset: (id) =>
         admitting(async () => {

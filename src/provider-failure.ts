@@ -48,7 +48,7 @@ export function transientNetworkFailure(reason: string): boolean {
     )
   )
     return false;
-  return /fetch failed|\bterminated\b|websocket (?:error|closed)|connection (?:error|refused|lost|reset)|\b(?:ECONNREFUSED|ECONNRESET|EAI_AGAIN|ENETUNREACH|ETIMEDOUT)\b|socket hang up/i.test(
+  return /fetch failed|\bterminated\b|websocket (?:error|closed|(?:connect|idle) timeout)|SSE response headers timed out|connection (?:error|refused|lost|reset)|\b(?:ECONNREFUSED|ECONNRESET|EAI_AGAIN|ENETUNREACH|ETIMEDOUT)\b|socket hang up/i.test(
     reason,
   );
 }
