@@ -61,7 +61,7 @@ import {
 } from "./skill-profiles.ts";
 import { readOnlyCodeTools } from "./durable-code-tools.ts";
 import { cleanupWorktrees, worktreeInventory, type WorktreeInventory, type WorktreeItem } from "./worktree-maintenance.ts";
-import { coordinatorArtifactTools } from "./artifacts.ts";
+import { coordinatorArtifactTools, ensureArtifactDir } from "./artifacts.ts";
 import { approvals } from "./approvals.ts";
 import { ownerApprovalTool } from "./host-agent-tools.ts";
 import { coordinatorRoutineTools } from "./routine-tools.ts";
@@ -148,7 +148,14 @@ import {
   type Project,
 } from "./state.ts";
 import { authorizationFingerprint, catalog } from "./workspace-authorization.ts";
-import { providerFailure, QUOTA_RETRY_BASE_MS, unansweredReason, type ProviderFailure } from "./provider-failure.ts";
+import { networkContinuations } from "./network-continuation.ts";
+import {
+  transientNetworkFailure,
+  providerFailure,
+  QUOTA_RETRY_BASE_MS,
+  unansweredReason,
+  type ProviderFailure,
+} from "./provider-failure.ts";
 import { AdmissionMutex, scheduleRuntime, type DurableScheduleSnapshot } from "./durable-schedule.ts";
 import { followRuntime } from "./durable-follow.ts";
 import { COORDINATOR_CONTEXT_RULES, type WorkerMode } from "./role-prompts.ts";
@@ -1038,6 +1045,7 @@ export async function openDurableProject(input: {
       ...pluginCoordinator.filter((item) => item.provider.applies(current)).flatMap((item) => item.tools),
     ];
     const standing = loadDurableStanding(project.cwd);
+    let network: ReturnType<typeof networkContinuations> | undefined;
     const policy = defineExtension({
       name: "projects.durable-policy",
       tools,
@@ -1052,6 +1060,14 @@ export async function openDurableProject(input: {
       ],
       hooks: [
         hook(GenerationTask, {
+          afterResponse: async (message, api) => {
+            if (
+              isCoordinator(api.conversationId) &&
+              message.stopReason === "error" &&
+              transientNetworkFailure(`model_error: ${message.errorMessage}`)
+            )
+              await network?.failed(api.conversationId, `${message.provider}/${message.model}`);
+          },
           beforeRequest: (request, api) => {
             const messages = request.messages.map((message) => {
               const instructions = message.role === "system" && message.sections?.instructions;
@@ -1086,7 +1102,23 @@ export async function openDurableProject(input: {
     const registry = createRegistry();
     // Scripts call only the tools their conversation already has; models.* (classifier and image calls) stays off.
     // No inline declarations: the model already has every tool's schema, and inlining them adds about 3k tokens to each request; scripts use describeTool().
-    const sandbox = new CodemodeSandbox();
+    const sandbox = new (class extends CodemodeSandbox {
+      override start(code: string, options: Parameters<CodemodeSandbox["start"]>[1]) {
+        const offered = options.tools ?? [],
+          prefix = "mcp__custom_tools__";
+        const aliases = offered
+          .map((tool) => ({ name: prefix + tool.name, jsName: prefix + (tool.jsName ?? tool.name) }))
+          .filter((alias) => !offered.some((tool) => tool.name === alias.name || tool.jsName === alias.jsName));
+        const names = new Set(aliases.map((tool) => tool.name));
+        return super.start(code, {
+          ...options,
+          tools: [...offered, ...aliases],
+          onCall(call) {
+            options.onCall(call.target === "tool" && names.has(call.name) ? { ...call, name: call.name.slice(prefix.length) } : call);
+          },
+        });
+      }
+    })();
     const codemode = createCodemodeExtension({ sandbox, models: false, inlineBudget: 0 });
     const codemodeTool = codemode.tools!.find((tool) => tool.name === "codemode")!;
     const web = webSearchTools(async () => (await models.getAuth("openai-codex").catch(() => undefined))?.auth.apiKey);
@@ -1183,6 +1215,15 @@ export async function openDurableProject(input: {
         return cwd;
       },
       () => loadProject(project.id),
+      async (api, context) => {
+        const state = await api.snapshot(Jobs, ROOT_CONVERSATION_ID, context);
+        const parent = state?.subagents[String(api.conversationId)];
+        const job = parent && state?.jobs[parent];
+        if (!job) return [];
+        const cwd = await conversationCwd(job.workerConversation);
+        const cache = cwd && (await caches.forCwd(cwd));
+        return [ensureArtifactDir(dir, job.id), ...(cache ? [cache] : [])];
+      },
     );
     /** The safe worktree rule and the cache sweep; caches the sweep could not remove are listed. */
     type WorktreeCleanup = Awaited<ReturnType<typeof cleanupWorktrees>> & { unremovedCaches: string[] };
@@ -1752,6 +1793,7 @@ export async function openDurableProject(input: {
         if (change.type !== "submission") continue;
         const record = change.value;
         if (record.type !== "input" || record.status !== "unanswered" || !isCoordinator(record.conversationId)) continue;
+        if (transientNetworkFailure(unansweredReason(record))) network?.wake(record.conversationId);
         const failure = providerFailure(unansweredReason(record));
         if (failure && chains.coordinator)
           void advanceCoordinator(record.conversationId, String(record.id), failure).catch((error) =>
@@ -2342,6 +2384,17 @@ export async function openDurableProject(input: {
       });
     }
 
+    network = networkContinuations(openedHarness, root, openedStorage, {
+      run: (operation) =>
+        schedules.mutex.run(async () => {
+          if (!closed && dispatchReady) await operation();
+        }),
+      chat: async (id) =>
+        (await storedChats()).chats.some((c) => c.conversationId === Number(id) && c.archivedAt)
+          ? undefined
+          : openedHarness.conversation(id, context),
+      report: (error) => report(input.onReport, project.id, error),
+    });
     const threadIdentities = async () =>
       (await jobs.snapshot(openedHarness)).agents.map((agent) => ({
         threadId: agent.id,
@@ -2565,7 +2618,11 @@ export async function openDurableProject(input: {
         assertOpen();
         await updateChat(id, change);
         const selected = await resolveChat(id);
-        if (change.archived) await selected.conversation.abort(context);
+        if (change.archived)
+          await schedules.mutex.run(async () => {
+            await selected.conversation.abort(context);
+            await network?.cancel(selected.conversation.id);
+          });
         return selected.chat;
       },
       result: async (submissionId) => result(openedHarness, root, submissionId),
@@ -2657,6 +2714,7 @@ export async function openDurableProject(input: {
         await schedules.mutex.run(async () => {
           dispatchReady = false;
           await jobs.pause(openedHarness, plugin);
+          for (const id of coordinatorIds) await network?.cancel(id as ConversationId);
         });
         await (await openedHarness.conversation(root.id, context))?.abort(context, { background: true });
         await abortChats(openedHarness);
@@ -2844,19 +2902,21 @@ export async function openDurableProject(input: {
           await conversation.compact(undefined, context);
           return { started: true as const, chatId: chat.id };
         }),
-      chatStop: async (id) => {
-        assertOpen();
-        const { conversation, chat } = await resolveChat(id);
-        const view = await conversation.viewState(context);
-        let running: boolean;
-        try {
-          running = liveFrame(view.value).running;
-        } finally {
-          view.dispose();
-        }
-        await conversation.abort(context);
-        return { stopped: running || chat.busy, chatId: chat.id };
-      },
+      chatStop: async (id) =>
+        schedules.mutex.run(async () => {
+          assertOpen();
+          const { conversation, chat } = await resolveChat(id);
+          const view = await conversation.viewState(context);
+          let running: boolean;
+          try {
+            running = liveFrame(view.value).running;
+          } finally {
+            view.dispose();
+          }
+          await conversation.abort(context);
+          await network?.cancel(conversation.id);
+          return { stopped: running || chat.busy, chatId: chat.id };
+        }),
       reset: (id) =>
         admitting(async () => {
           const { conversation, chat } = await resolveChat(id);
@@ -3208,6 +3268,7 @@ export async function openDurableProject(input: {
         stopFeed();
         stopSummaries();
         stopTierRecovery();
+        network?.close();
         for (const stop of [...liveWatchers]) stop();
         dispatchReady = false;
         if (wake !== undefined) clearTimeout(wake);
@@ -3244,6 +3305,7 @@ export async function openDurableProject(input: {
     };
     runtimeReference = runtime;
     openedHarness.resume();
+    await network.restore();
     await armWake();
     return runtime;
   } catch (error) {

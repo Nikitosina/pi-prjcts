@@ -7,6 +7,7 @@ import { Value } from "typebox/value";
 import {
   AgentDoc,
   AssistantEntry,
+  ConversationBusy,
   configure,
   defineDoc,
   defineExtension,
@@ -27,6 +28,9 @@ import {
 } from "@earendil-works/pi-durable";
 import {
   emptyAnswerFailure,
+  transientNetworkFailure,
+  networkRetryDelay,
+  NETWORK_CONTINUE,
   providerFailure,
   type ProviderFailure,
   QUOTA_RETRY_BASE_MS,
@@ -516,7 +520,7 @@ type Delivery = {
 };
 type DeliveryState =
   | { phase: "prepare" }
-  | { phase: "deliver"; attempt: number; checked?: boolean; boot?: string; note?: string }
+  | { phase: "deliver"; attempt: number; checked?: boolean; boot?: string; note?: string; network?: { count: number; model: string } }
   | { phase: "settle"; report?: string; details?: string; reportRef?: EntryId }
   | { phase: "report"; report?: string; details?: string; reportRef?: EntryId; waits?: number };
 
@@ -662,7 +666,7 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
       },
       deliver: async (reporter, runtime, taskContext) => {
         const { agentId, conversationId, message, followUp, requestId } = reporter.input;
-        const { attempt, checked, boot, note } = reporter.state.checkpoint;
+        const { attempt, checked, boot, note, network } = reporter.state.checkpoint;
         const deliveryRequestId = requestId ? `send:${requestId}:${attempt}` : `agent:${reporter.id}:${attempt}`;
         // A quota wait is stored, so a restart waits out the rest of it instead of resending at once.
         const waiting = (await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext))?.agents[agentId]?.quota;
@@ -683,23 +687,74 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
               record.latestInput = { seq: reporter.input.seq ?? 0, requestId: deliveryRequestId };
             return {
               status: "running",
-              checkpoint: { phase: "deliver", attempt, checked: true, boot: boot ?? host.boot ?? BOOT, note },
+              checkpoint: {
+                phase: "deliver",
+                attempt,
+                checked: true,
+                boot: boot ?? host.boot ?? BOOT,
+                note,
+                ...(network ? { network } : {}),
+              },
             } as const;
           }, taskContext);
           return;
         }
         const agent = (await runtime.conversation(conversationId, taskContext))!;
-        const submission = await agent.submit(
-          {
-            type: "input",
-            content: note ?? message,
-            whenBusy: followUp || note ? "followUp" : "steer",
-            requestId: deliveryRequestId,
-          },
-          taskContext,
-        );
+        if (network) {
+          const state = await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext);
+          const record = state?.agents[agentId];
+          const model = (await runtime.snapshot(AgentDoc, conversationId, taskContext))?.model;
+          if (
+            !record ||
+            state?.paused ||
+            record.endedAt !== null ||
+            (record.jobId && state?.jobs[record.jobId]?.status !== "running") ||
+            (record.sends ?? 0) !== (reporter.input.seq ?? 0) ||
+            `${model?.provider}/${model?.modelId}` !== network.model
+          ) {
+            await runtime.commit(() => ({ status: "running", checkpoint: { phase: "report" } }) as const, taskContext);
+            return;
+          }
+        }
+        const submission = await agent
+          .submit(
+            {
+              type: "input",
+              content: note ?? message,
+              whenBusy: network ? "reject" : followUp || note ? "followUp" : "steer",
+              requestId: deliveryRequestId,
+            },
+            taskContext,
+          )
+          .catch((error) => {
+            if (network && error instanceof ConversationBusy) return null;
+            throw error;
+          });
+        if (!submission) {
+          await runtime.commit(() => ({ status: "running", checkpoint: { phase: "report" } }) as const, taskContext);
+          return;
+        }
         const settled = await submission.wait(taskContext);
         const failure = await turnFailure(settled, async (at) => (await runtime.context(conversationId, taskContext, { at })).entries);
+        if (failure && transientNetworkFailure(failure)) {
+          const count = (network?.count ?? 0) + 1,
+            delay = networkRetryDelay(count);
+          const model = (await runtime.snapshot(AgentDoc, conversationId, taskContext))?.model;
+          if (delay !== undefined && model) {
+            const at = runtime.now() + delay;
+            await runtime.sleepUntil(
+              at,
+              {
+                phase: "deliver",
+                attempt: attempt + 1,
+                note: NETWORK_CONTINUE,
+                network: { count, model: `${model.provider}/${model.modelId}` },
+              },
+              taskContext,
+            );
+            return;
+          }
+        }
         // Quota (or a rate limit the host can route around): move to the next fallback model, otherwise wait for the allowance to recover and resend.
         const kind = failure ? providerFailure(failure) : undefined;
         if (failure && kind) {

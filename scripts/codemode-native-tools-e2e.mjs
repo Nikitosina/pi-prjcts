@@ -39,7 +39,7 @@ const coordinatorSteps = [
   [
     "codemode",
     {
-      code: `const art = await tools.projects_artifacts_list({});
+      code: `const art = await tools.mcp__custom_tools__projects_artifacts_list({});
 const written = await tools.projects_knowledge_write({ path: "runbooks/typed.md", text: "typed", expectedRevision: null });
 const noted = await tools.projects_note({ text: "typed note" });
 console.log(JSON.stringify({ art: Array.isArray(art?.threads), written: typeof written?.revision, noted: typeof noted?.id }));`,

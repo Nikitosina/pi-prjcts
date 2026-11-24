@@ -91,7 +91,8 @@ export const ROLE_BLOCKS = {
       name: "Delegation",
       text: `DELEGATION
 - Delegate substantial or independent work with agents. Do small changes yourself.
-- Brief: the owner's words verbatim, a title, evidence-based acceptance criteria, and refs (branch, commit, file paths, artifact and report refs). Do not paste source or logs.
+- Ask for the complete result in one brief: implementation, verification and proof, through PR and Ready for an independent Job. Split at a step only when it needs an owner decision.
+- Include the owner's words verbatim, a title, evidence-based acceptance criteria, and refs (branch, commit, file paths, artifact and report refs). Do not paste source or logs.
 - Choose the delivery:
   - Task helper (workspace shared or isolated): a subtask of this chat's task. It returns to you.
   - Independent Job (no workspace): a separate request that ends in its own PR.
@@ -198,9 +199,9 @@ export const ROLE_BLOCKS = {
       name: "Verify",
       text: `VERIFY
 - Prove every acceptance criterion yourself. When your host contract names a verify skill, follow it (read it with projects_skill_file).
-- Run each check with projects_verify_run on a commit, so every result has a run id.
-- Start a long build or test run with projects_bg_start, then wait for it with one projects_bg_wait call (up to 1800 seconds by default) instead of polling. A message for you ends the wait early.
-- When a check fails, fix it, commit and run again, up to the project's round limit.
+- During iteration, run checks with projects_bg_start and wait with projects_bg_wait. On the recorded candidate, use projects_verify_run for proof and cite its run ids.
+- When a proof check fails, fix it, commit, record the new candidate and run again, up to the project's round limit.
+- Keep verification output gitignored and build caches in $PI_WORKSPACE_CACHE for automatic cleanup. Save proof for review in $PI_ARTIFACTS_DIR.
 - Capture proof media (screenshots, recordings) of every user-visible change as artifacts.
 - When it names none, don't look for one: check the criteria the same way and list the gap "No verify skill".
 - Never call dirty changes pinned, or verified against HEAD alone.`,
@@ -213,7 +214,7 @@ export const ROLE_BLOCKS = {
 - 1000 lines or more: run the pr-review skill (Standards, Spec, Bugs/performance, each its own reviewer, all kind full).
 - Only P0 and P1 block Ready: fix them. Fix a P2 when it is cheap, without a round of its own; otherwise list it under Not fixed with the reason. List P3s there too.
 - After fixes, run re-checks with kind recheck: each covers the fix diff and the still-open findings. Your host contract gives the number.
-- To keep the reviewer's history, commit the fixes, verify them, record the commit with job candidate and pass the reviewer's id as continues. The host refuses a checkout that is dirty, is not the recorded candidate, or was already read; a full review is always a fresh reviewer.
+- To keep the reviewer's history, commit the fixes, record the commit with job candidate, verify it and pass the reviewer's id as continues. The host refuses a checkout that is dirty, is not the recorded candidate, or was already read; a full review is always a fresh reviewer.
 - When the budget is spent, finish your report with the still-open P0 and P1 findings as gaps for the owner.
 - Review is read-only. Never post findings to the PR.
 - Start a scout with the subagent tool for read-only questions along the way.`,

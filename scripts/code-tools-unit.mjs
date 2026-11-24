@@ -60,6 +60,12 @@ const bytes = (text) => Buffer.byteLength(text);
 const refused = async (name, args, what) => assert.rejects(() => run(name, args), /outside this thread's code root/, `${what} is refused`);
 
 try {
+  const evidence = join(base, "cache");
+  mkdirSync(evidence);
+  writeFileSync(join(evidence, "proof"), "job evidence");
+  const reader = readOnlyCodeTools(project, undefined, undefined, async () => [evidence]).tools;
+  assert.match(await runIn(reader, "code_read", { path: join(evidence, "proof") }), /job evidence/);
+  await assert.rejects(() => runIn(reader, "code_read", { path: join(outside, "secret.txt") }), /outside this thread/);
   // F1 /tmp and /private/tmp are readable by every reader.
   assert.match(await run("code_read", { path: "in.txt" }), /INSIDE-TOKEN/, "a project file reads");
   assert.match(await run("code_read", { path: join(shared, "brief.md") }), /TMP-BRIEF-TOKEN/, "F1 a /tmp file reads");
@@ -122,6 +128,7 @@ try {
 
   // F6 path is relative to the project directory, like code_read; F10 untracked files outside it are not listed.
   const one = await diff({ path: "a.txt" });
+  assert.ok(one.includes(git("rev-parse", "main").trim()), "base commit is visible");
   assert.match(one, /\+TWO/, "F6 the project-relative path narrows to app/a.txt");
   assert.doesNotMatch(one, /\+b1|\+uncommitted|\+n1|other\/x/, "F6/F10 only that file");
   const sub = await diff({ path: "deep" });

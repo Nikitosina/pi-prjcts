@@ -34,6 +34,8 @@ const { proofTools } = await import("../src/proof.ts");
 const { ResourceLeases } = await import("../src/resource-leases.ts");
 assert.ok((await loadPlugins()).every((item) => item.state === "loaded"));
 
+const { DEFAULT_ROLE_PROMPTS } = await import("../src/role-prompts.ts");
+assert.match(DEFAULT_ROLE_PROMPTS.worker, /recorded candidate.*projects_verify_run/i);
 const repo = join(base, "repo");
 mkdirSync(repo);
 const git = (...args) =>

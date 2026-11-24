@@ -47,6 +47,7 @@ export function readOnlyCodeTools(
   cwd: string,
   resolveRoot?: (api: ToolExecutionApi, context: Context) => Promise<string | undefined>,
   project?: () => Pick<Project, "id" | "disabledPlugins">,
+  evidenceRoots?: (api: ToolExecutionApi, context: Context) => Promise<string[]>,
 ): { tools: ToolRegistration[]; extension: ReturnType<typeof defineExtension> } {
   const fallback = realpathSync(cwd);
   const byRoot = new Map<string, Built>();
@@ -62,14 +63,14 @@ export function readOnlyCodeTools(
   const tools: ToolRegistration[] = built(fallback).map((template) =>
     defineTool({
       name: `code_${template.name}`,
-      description: `${template.description} Read-only and limited to this thread's code root (the PR head or worker worktree it was given, otherwise the project checkout ${fallback}) and /tmp. Without limit the answer is at most ${RESPONSE_LIMIT / 1024} KiB and ends with a note on how to continue.`,
+      description: `${template.description} Read-only and limited to this thread's code root (the PR head or worker worktree it was given, otherwise the project checkout ${fallback}) and /tmp. A Job's subagents may also read its artifacts and workspace cache. Without limit the answer is at most ${RESPONSE_LIMIT / 1024} KiB and ends with a note on how to continue.`,
       parameters: template.parameters,
       replay: "safe",
       async execute(args, api, context) {
         const root = await rootOf(api, context);
         const tool = built(root).find((item) => item.name === template.name)!;
         const path = (args as { path?: unknown }).path;
-        if (typeof path === "string") assertReadable(root, path);
+        if (typeof path === "string") assertReadable(root, path, (await evidenceRoots?.(api, context)) ?? []);
         const { content, ...result } = clipped(
           template.name,
           args as { limit?: unknown; offset?: unknown },
@@ -143,7 +144,7 @@ function realOr(path: string): string {
 }
 
 /** Both the path and its real path must be under the code root or /tmp, so a symlink cannot lead out of either. */
-function assertReadable(root: string, path: string): void {
+function assertReadable(root: string, path: string, evidence: readonly string[]): void {
   const denied = new Error(`Path ${path} is outside this thread's code root ${root} and /tmp; read-only code tools cannot escape them.`);
   // Pi's read tools strip a leading @ and open file:// URLs as paths, so the guard checks the path they open.
   let opened = path.replace(UNICODE_SPACES, " ");
@@ -160,5 +161,6 @@ function assertReadable(root: string, path: string): void {
     const rel = relative(dir, candidate);
     return !rel.startsWith("..") && !isAbsolute(rel);
   };
-  for (const candidate of [target, realOr(target)]) if (![root, ...SHARED_READ_ROOTS].some((dir) => inside(dir, candidate))) throw denied;
+  for (const candidate of [target, realOr(target)])
+    if (![root, ...SHARED_READ_ROOTS, ...evidence].some((dir) => inside(dir, candidate))) throw denied;
 }
