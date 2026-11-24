@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
-export function reviewFixture(root, workspace, core) {
+export function reviewFixture(root, workspace, core, stress = false) {
   const bare = join(root, "review.git"),
     builder = join(root, "contributor"),
     gh = join(root, "gh-stub"),
@@ -28,6 +28,7 @@ export function reviewFixture(root, workspace, core) {
   const calendar = (days, revised) =>
     [`export const days = ${days};`, "", "export const schedule = {", ...year(revised), "};", ""].join("\n");
   writeFileSync(join(builder, "calendar.js"), calendar(0, false));
+  if (stress) for (let i = 0; i < 12; i++) writeFileSync(join(builder, `src/year-${i}.js`), calendar(0, false));
   git(builder, "add", ".");
   git(builder, "commit", "-qm", "Seed calendar schedule");
   const base = git(builder, "rev-parse", "HEAD");
@@ -37,6 +38,7 @@ export function reviewFixture(root, workspace, core) {
   // Keep a mid-year gap unchanged across revisions.
   revised.splice(51, 18, ...calendar(0, false).split("\n").slice(50, 68));
   writeFileSync(join(builder, "calendar.js"), revised.join("\n"));
+  if (stress) for (let i = 0; i < 12; i++) writeFileSync(join(builder, `src/year-${i}.js`), revised.join("\n"));
   writeFileSync(join(builder, "docs/calendar.md"), "# Regional calendar\n\nUse local working days for capacity estimates.\n");
   writeFileSync(join(builder, "src/workdays.js"), "export const isWorkday = (schedule, date) => schedule[date] === 'workday';\n");
   writeFileSync(join(builder, "package-lock.json"), "{}\n");
@@ -73,7 +75,7 @@ export function reviewFixture(root, workspace, core) {
     checks: {},
   };
   writeFileSync(state, JSON.stringify(data));
-  const setup = { bare, url, builder, state, base, first, second, movedBase, moved };
+  const setup = { stress, bare, url, builder, state, base, first, second, movedBase, moved };
   advanceReview(setup, first);
   return {
     ...setup,

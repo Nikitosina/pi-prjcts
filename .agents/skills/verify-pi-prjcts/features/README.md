@@ -40,3 +40,6 @@ Each file: H1, one paragraph, then exactly four H2s in order: `Sub-features`, `H
 - [Storage and Clean up](./storage.md) — Settings → Storage rows and the Clean up button ending with its run summary. Scripted.
 
 `pr-review`: launch with `--review-fixture`, doctor, then drive `pr-review`. A local contributor checkout and stub gh supply two heads, four files across directories, a large multi-hunk patch, and open and resolved threads. Drive the PR row and chat #7, file navigation, Viewed and gap expansion; capture unified, split, resolved, expanded, context, since-you-looked, light and 390 px.
+
+`review-drafts`: launch with `--review-fixture`. Measure the layout toggle at a file boundary, inspect a colleague PR, then link the fixture PR to a real fake-provider Job and exercise the draft and batch flow.
+Add `--review-stress` at launch to measure the toggle after loading 16 files. The draft journey reads from Main and checks delivery in the Job's separate Calendar maintenance chat.
