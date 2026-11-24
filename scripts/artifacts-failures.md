@@ -30,6 +30,8 @@ Verified by `scripts/artifacts-e2e.mjs` unless marked (inspection).
 - A20 Untrusted markdown can craft an `artifact:` link that triggers a non-GET request or script execution (`javascript:`), or HTML injection through file names.
 - A24 A chat image stays thumbnail-sized with no way to see it larger; or the viewer does not fit the viewport (upscale or overflow), cannot be closed with Escape, the backdrop or a labelled close button, does not trap focus or return it to the image, animates when the owner asks for reduced motion, jumps when closed during the opening zoom, or reopens with the previous image.
 
+- A25 An image a tool call read shows in the chat while the call is collapsed, so the owner sees it twice when the answer attaches it too; or opening the call does not show it.
+
 ## Owner browsing
 - A21 The Activity thread pane does not show the thread's artifacts (names, sizes, inline previews).
 - A22 Artifacts of a stopped/failed/archived thread become invisible.

@@ -399,7 +399,7 @@ export function toolRowHtml({ call: item, result }, liveStatus) {
       : status === "error"
         ? `<span class="st err" aria-label="failed">✕</span>`
         : `<span class="st ok" aria-label="done">✓</span>`;
-  return `<div class="tool-row${open ? " open" : ""}" data-tool="${esc(item.name)}" data-status="${status}"><div class="tool-line"><button type="button" class="tool-head" data-toggle="${esc(item.callId)}" aria-expanded="${open}">${icon}<span class="tool-name">${esc(item.name)}</span><span class="tool-args">${esc(clip(oneLine(summary(item.name, args, item.argsPreview)), 140))}</span><span class="tool-dur">${esc(took)}</span></button>${worker ? `<button type="button" class="link-btn" data-open-worker="${esc(worker)}" aria-label="Open worker">worker ↗</button>` : ""}${approval ? `<button type="button" class="link-btn" data-review-approval="${esc(approval)}">Review approval ↗</button>` : ""}</div>${imagesHtml(result?.images)}${open ? toolDetailHtml(item, result, args) : ""}</div>`;
+  return `<div class="tool-row${open ? " open" : ""}" data-tool="${esc(item.name)}" data-status="${status}"><div class="tool-line"><button type="button" class="tool-head" data-toggle="${esc(item.callId)}" aria-expanded="${open}">${icon}<span class="tool-name">${esc(item.name)}</span><span class="tool-args">${esc(clip(oneLine(summary(item.name, args, item.argsPreview)), 140))}</span><span class="tool-dur">${esc(took)}</span></button>${worker ? `<button type="button" class="link-btn" data-open-worker="${esc(worker)}" aria-label="Open worker">worker ↗</button>` : ""}${approval ? `<button type="button" class="link-btn" data-review-approval="${esc(approval)}">Review approval ↗</button>` : ""}</div>${open ? `${imagesHtml(result?.images)}${toolDetailHtml(item, result, args)}` : ""}</div>`;
 }
 function toolDetailHtml(item, result, args) {
   const params = args ? JSON.stringify(args, null, 2) : item.argsPreview;
@@ -414,7 +414,7 @@ function groupHtml(run) {
     last = run.at(-1).result?.at ?? run.at(-1).call.at;
   const failed = run.filter(({ result }) => result?.isError).length;
   const label = [...counts].map(([name, count]) => `${name} ×${count}`).join(", ");
-  return `<div class="tool-group${open ? " open" : ""}"><button type="button" class="group-head" data-toggle="${esc(key)}" aria-expanded="${open}"><span class="st ${failed ? "err" : "ok"}" aria-hidden="true">${failed ? "✕" : "✓"}</span><span class="tool-name">${esc(label)}</span><span class="tool-args">${failed ? `${failed} failed` : ""}</span><span class="tool-dur">${esc(dur(last - first))}</span><span class="chev" aria-hidden="true">›</span></button>${open ? `<div class="group-body">${run.map((entry) => toolRowHtml(entry, entry.result ? undefined : "ok")).join("")}</div>` : imagesHtml(run.flatMap(({ result }) => result?.images ?? []))}</div>`;
+  return `<div class="tool-group${open ? " open" : ""}"><button type="button" class="group-head" data-toggle="${esc(key)}" aria-expanded="${open}"><span class="st ${failed ? "err" : "ok"}" aria-hidden="true">${failed ? "✕" : "✓"}</span><span class="tool-name">${esc(label)}</span><span class="tool-args">${failed ? `${failed} failed` : ""}</span><span class="tool-dur">${esc(dur(last - first))}</span><span class="chev" aria-hidden="true">›</span></button>${open ? `<div class="group-body">${run.map((entry) => toolRowHtml(entry, entry.result ? undefined : "ok")).join("")}</div>` : ""}</div>`;
 }
 const seenSummaries = new Map(); // toggle key -> last drawn status, so only a summary that just arrived fades in
 /** One tool group as one quiet line that opens to its calls; `view` counts the whole group, also calls on pages not loaded yet. */
@@ -451,7 +451,7 @@ function summaryHtml({ id, entries, view }, runHtml) {
         ? `${esc(label)} · writing summary…`
         : esc(view.text);
   const fresh = view.status === "ready" && previous === "pending" ? " fresh" : "";
-  return `<div class="tool-summary${open ? " open" : ""}${fresh}" data-status="${view.status}" data-errors="${failed}"><button type="button" class="ts-line" data-toggle="${esc(key)}" aria-expanded="${open}">${glyph}<span class="ts-text">${text}</span><span class="ts-meta">${failed ? `<span class="ts-err">${failed} failed</span>` : ""}<span>${count}${esc(took)}</span><span class="chev" aria-hidden="true">›</span></span></button>${open ? `<div class="ts-body">${entries.map((entry) => toolRowHtml(entry, entry.result ? undefined : view.status === "collecting" ? "running" : "ok")).join("")}${by}</div>` : imagesHtml(entries.flatMap(({ result }) => result?.images ?? []))}</div>`;
+  return `<div class="tool-summary${open ? " open" : ""}${fresh}" data-status="${view.status}" data-errors="${failed}"><button type="button" class="ts-line" data-toggle="${esc(key)}" aria-expanded="${open}">${glyph}<span class="ts-text">${text}</span><span class="ts-meta">${failed ? `<span class="ts-err">${failed} failed</span>` : ""}<span>${count}${esc(took)}</span><span class="chev" aria-hidden="true">›</span></span></button>${open ? `<div class="ts-body">${entries.map((entry) => toolRowHtml(entry, entry.result ? undefined : view.status === "collecting" ? "running" : "ok")).join("")}${by}</div>` : ""}</div>`;
 }
 function memoryRowHtml(item, result, args, status) {
   const path = args?.path ?? "",
