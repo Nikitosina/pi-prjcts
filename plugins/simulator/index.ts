@@ -4,15 +4,13 @@ import { fileURLToPath } from "node:url";
 import type { Static, TSchema } from "typebox";
 import type { HostPluginApi, PluginRpcContext } from "../../src/plugin-types.ts";
 import { createSimulators, leaseName } from "./simulator.ts";
-import { pruneTestProducts } from "./test-products.ts";
+import { pruneEnabledProjects } from "./test-products.ts";
 import { COORDINATOR_NOTE, WORKER_NOTE, createSimulatorTools } from "./tools.ts";
 
 const TEST_PRODUCTS_ROOT = join(homedir(), "Library", "Developer", "XcodeBuildMCP", "workspaces");
 const TEST_PRODUCTS_KEEP_MS = 2 * 3600_000;
-const pruneXcodeTestProducts = async () => {
-  const { removed, bytes } = await pruneTestProducts({ root: TEST_PRODUCTS_ROOT, now: Date.now(), keepMs: TEST_PRODUCTS_KEEP_MS });
-  return removed ? `XcodeBuildMCP: removed ${removed} old test products (${(bytes / 1024 ** 3).toFixed(1)} GB).` : "";
-};
+const summary = ({ removed, bytes }: { removed: number; bytes: number }) =>
+  removed ? `XcodeBuildMCP: removed ${removed} old test products (${(bytes / 1024 ** 3).toFixed(1)} GB).` : "";
 
 /**
  * Optional iOS simulators per project: owner-enabled clones of a shut-down simulator, managed by the coordinator,
@@ -24,14 +22,33 @@ export default {
   register(api: HostPluginApi) {
     const simulators = createSimulators(api);
     // Each simulator test run leaves 2-4 GB of test products; a daily cleanup is too rare for a busy afternoon (FAILURES.md T1-T4).
-    const pruning = setInterval(() => void pruneXcodeTestProducts().catch(() => {}), 3600_000);
+    // XcodeBuildMCP keys a workspace by its checkout. A project's roots are the ones the host owns for it (its folder and its worker workspaces);
+    // a checkout two projects claim, and any workspace nobody claims, stay (some historical products remain on purpose).
+    const sweep = (only?: string) =>
+      pruneEnabledProjects({
+        root: TEST_PRODUCTS_ROOT,
+        now: Date.now(),
+        keepMs: TEST_PRODUCTS_KEEP_MS,
+        projects: api.projects.list().map((project) => ({
+          id: project.id,
+          disabledPlugins: project.disabledPlugins,
+          roots: api.projects.workspaceRoots(project.id),
+        })),
+        admit: api.projects.work,
+        only,
+      });
+    const pruneEnabled = () => sweep();
+    const pruning = setInterval(() => void pruneEnabled().catch(() => {}), 3600_000);
     pruning.unref();
     const tools = createSimulatorTools(api, simulators);
     const { Type } = api.lib.typebox,
       { Value } = api.lib.value;
     const Id = Type.String({ pattern: "^[a-f0-9-]{36}$" }),
       Udid = Type.Optional(Type.String({ pattern: "^[a-fA-F0-9-]{36}$" }));
-    const Configure = Type.Object({ enabled: Type.Boolean(), sourceUdid: Udid, requestId: Id }, { additionalProperties: false });
+    const Configure = Type.Union([
+      Type.Object({ enabled: Type.Boolean(), sourceUdid: Udid, requestId: Id }, { additionalProperties: false }),
+      Type.Object({ keepCategories: simulators.KeepCategories, requestId: Id }, { additionalProperties: false }),
+    ]);
     const Act = Type.Object(
       { operation: simulators.SimulatorAction, requestId: Id, udid: Udid, sourceUdid: Udid },
       { additionalProperties: false },
@@ -56,13 +73,14 @@ export default {
       leaseName,
       lifecycle: {
         pause: simulators.pause,
+        unresolved: simulators.unresolved,
         close: async () => {
           clearInterval(pruning);
           await simulators.close();
         },
       },
       cleanup: async (input) =>
-        [await simulators.eraseIdle(input.projectId, input.unusedDays, input.signal), await pruneXcodeTestProducts()]
+        [await simulators.eraseIdle(input.projectId, input.unusedDays, input.signal), summary(await sweep(input.projectId))]
           .filter(Boolean)
           .join(" "),
       usage: (input) => simulators.usage(input.projectId, input.unusedDays, input.signal),

@@ -11,11 +11,12 @@ process.env.PI_PROJECTS_HOME = join(base, "home");
 // Two plugin checkout kinds: "narrowing" declares codeDiffPath, "legacy" predates it. Each serves the diff stored in its root.
 const plugin = (kind, narrows) => `import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+const slow = async (root) => { if (existsSync(join(root, ".${kind}", "slow"))) await new Promise((done) => setTimeout(done, 400)); };
 export default { name: "${kind}", register(api) { api.provide({ vcs: {
   kind: "${kind}", isRoot: (dir) => existsSync(join(dir, ".${kind}")), ${narrows ? "codeDiffPath: true," : ""}
-  changedFiles: async () => [],
-  codeDiff: async (root, _base, helpers) => { appendFileSync(join(root, ".${kind}", "paths.log"), JSON.stringify(helpers.path ?? null) + "\\n"); return JSON.parse(readFileSync(join(root, ".${kind}", "diff.json"), "utf8")); },
-  workerState: async () => ({ branch: "b", head: "1".repeat(40), status: "" }),
+  changedFiles: async (cwd) => { await slow(cwd.split("/proj")[0]); return []; },
+  codeDiff: async (root, _base, helpers) => { await slow(root); appendFileSync(join(root, ".${kind}", "paths.log"), JSON.stringify(helpers.path ?? null) + "\\n"); return JSON.parse(readFileSync(join(root, ".${kind}", "diff.json"), "utf8")); },
+  workerState: async (root) => { await slow(root); return { branch: "b", head: "1".repeat(40), status: "" }; },
   resolveContinuation: async () => { throw new Error("none"); },
 } }); } };
 `;
@@ -26,7 +27,8 @@ for (const [kind, narrows] of [
 ])
   writeFileSync(join(base, "plugins", `${kind}.mjs`), plugin(kind, narrows));
 process.env.PI_PROJECTS_PLUGINS = ["narrowing", "legacy"].map((kind) => join(base, "plugins", `${kind}.mjs`)).join(":");
-const { loadPlugins } = await import("../src/plugins.ts");
+const { loadPlugins, plugins } = await import("../src/plugins.ts");
+const { saveProject, loadProject, projectDir } = await import("../src/state.ts");
 const { readOnlyCodeTools } = await import("../src/durable-code-tools.ts");
 const { RESPONSE_LIMIT } = await import("../src/response-limit.ts");
 const loaded = await loadPlugins();
@@ -203,6 +205,90 @@ try {
   assert.match(kindStat, /^\+2 -1 k\.swift$/m, `F14 one row for a file in two blocks: ${kindStat}`);
   assert.match(kindStat, /^\+2 -0 u\.swift$/m, "F15 an untracked block without a hunk header counts");
   assert.equal(paths("narrowing").at(-1), null, "no path when none was asked");
+
+  // F20 a project that turned the checkout kind's plugin off is not served through it: the plugin's diff never runs for that project.
+  const stored = (cwd, disabledPlugins) => {
+    const id = `00000000-0000-4000-8000-${String(Math.random()).slice(2, 14).padEnd(12, "0")}`;
+    mkdirSync(projectDir(id), { recursive: true });
+    saveProject({
+      version: 1,
+      id,
+      name: "p",
+      cwd,
+      objective: "",
+      runtime: "durable",
+      createdAt: new Date().toISOString(),
+      model: "fake/fake",
+      models: {},
+      phase: "ready",
+      problem: null,
+      ...(disabledPlugins ? { disabledPlugins } : {}),
+    });
+    return id;
+  };
+  {
+    const logged = () =>
+      readFileSync(join(kinds.narrowing.root, ".narrowing", "paths.log"), "utf8")
+        .trim()
+        .split("\n").length;
+    const before = logged();
+    const cwd = join(kinds.narrowing.root, "proj");
+    const offId = stored(cwd, ["narrowing"]),
+      onId = stored(cwd);
+    const off = readOnlyCodeTools(cwd, undefined, () => loadProject(offId)).tools;
+    await assert.rejects(
+      () => runIn(off, "code_diff", {}),
+      /not a git checkout/,
+      "F20 a disabled kind's checkout has no diff for the project",
+    );
+    assert.equal(logged(), before, "F20 the disabled plugin's codeDiff did not run");
+    const on = readOnlyCodeTools(cwd, undefined, () => loadProject(onId)).tools;
+    assert.match(await runIn(on, "code_diff", {}), /narrowing/, "F20 positive control: the same project with the plugin on");
+
+    // F21 the plugin's diff, worker state, head and status reads count as the plugin's work in the project while they run, so a disable
+    // is refused meanwhile; a project that turned it off is refused before the plugin runs.
+    const { workerChanges } = await import("../src/code-diff.ts");
+    const { readHead, changedFiles, confirmCheckout } = await import("../src/vcs.ts");
+    writeFileSync(join(kinds.narrowing.root, ".narrowing", "slow"), "");
+    const project = loadProject(onId);
+    const inFlight = async (what, start) => {
+      const running = start();
+      await new Promise((done) => setTimeout(done, 100));
+      assert.equal(plugins.gate.active(onId, "narrowing"), 1, `F21 ${what} counts as the plugin's work while it runs`);
+      assert.match(
+        plugins.disableBlock(loadProject(onId), "narrowing") ?? "",
+        /./,
+        `F21 ${what}: the plugin cannot be turned off meanwhile`,
+      );
+      await running;
+      assert.equal(plugins.gate.active(onId, "narrowing"), 0, `F21 ${what} leaves nothing counted`);
+    };
+    await inFlight("code_diff", () => runIn(on, "code_diff", {}));
+    await inFlight("worker changes (workerState)", () => workerChanges(cwd, undefined, { project }));
+    await inFlight("head read (workerState)", () => readHead(cwd, project));
+    await inFlight("status read", () => changedFiles(cwd, project));
+    await inFlight("checkout confirmation", () => confirmCheckout(cwd, project));
+    const calls = () =>
+      readFileSync(join(kinds.narrowing.root, ".narrowing", "paths.log"), "utf8")
+        .trim()
+        .split("\n").length;
+    const stopped = calls();
+    await assert.rejects(
+      () => workerChanges(cwd, undefined, { project: loadProject(offId) }),
+      /not a git checkout/,
+      "F21 off: refused before the plugin",
+    );
+    saveProject({ ...loadProject(onId), disabledPlugins: ["narrowing"] });
+    const racing = await readHead(cwd, project);
+    assert.equal(
+      racing.kind,
+      "unreadable",
+      "F21 a read that starts after the flag was stored (stale project object) is refused at the gate",
+    );
+    assert.equal(calls(), stopped, "F21 and the plugin did not run");
+    saveProject({ ...loadProject(onId), disabledPlugins: undefined });
+    rmSync(join(kinds.narrowing.root, ".narrowing", "slow"));
+  }
 
   // F8 a plugin without codeDiffPath: path is refused before its diff runs and no note advises it.
   await assert.rejects(

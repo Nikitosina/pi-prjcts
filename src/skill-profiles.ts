@@ -1,4 +1,4 @@
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { ResourceLoader, Skill } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
@@ -29,20 +29,44 @@ export const SkillProfiles = Type.Object({ off: Type.Optional(OffLists), ...list
 export type SkillProfiles = Static<typeof SkillProfiles>;
 type Loader = Pick<ResourceLoader, "getSkills">;
 
+export function skillPresent(skill: Skill): boolean {
+  try {
+    return statSync(skill.filePath, { throwIfNoEntry: false })?.isFile() === true;
+  } catch {
+    return false;
+  }
+}
 const loaded = (loader?: Loader) => loader?.getSkills().skills ?? [];
 /** Names switched off for a role (its own list plus "all"). */
 export const switchedOff = (off: OffLists | undefined, role: SkillRole): Set<string> =>
   new Set([...(off?.all ?? []), ...(off?.[role] ?? [])]);
 export function effectiveSkills(saved: SkillProfiles | undefined, loader: Loader | undefined, role: SkillRole): Skill[] {
   const off = switchedOff(saved?.off, role);
-  return loaded(loader).filter((skill) => !off.has(skill.name));
+  return loaded(loader).filter((skill) => !off.has(skill.name) && skillPresent(skill));
 }
+const indexHeading =
+  "Skills for your role (names and descriptions only). When one applies, read its SKILL.md with projects_skill_file before acting, then any file it references:";
+
 /** Names and descriptions only; bodies are read on demand. Manual-only skills are left out, as pi does. */
 export function skillIndex(skills: readonly Skill[]): string {
-  const listed = skills.filter((skill) => !skill.disableModelInvocation);
+  const listed = skills.filter((skill) => !skill.disableModelInvocation && skillPresent(skill));
   return listed.length
-    ? `\n\nSkills for your role (names and descriptions only). When one applies, read its SKILL.md with projects_skill_file before acting, then any file it references:\n${listed.map((skill) => `- ${skill.name}: ${skill.description}`).join("\n")}`
+    ? `\n\n${indexHeading}\n${listed.map((skill) => `- ${skill.name}: ${skill.description.replaceAll(/\s+/g, " ").trim()}`).join("\n")}`
     : "";
+}
+
+/** Durable freezes role instructions; prune the generated list for each request, without reconfiguring a running agent. */
+export function pruneSkillIndex(instructions: string, known: ReadonlyMap<string, Skill>): string {
+  const start = instructions.lastIndexOf(indexHeading);
+  if (start < 0) return instructions;
+  const rows = instructions.slice(start + indexHeading.length);
+  const block = /^(?:\n+- [^\n]+)+/.exec(rows)?.[0];
+  if (!block) return instructions;
+  const kept = block.replace(/\n+- (.+?): [^\n]*/g, (row, name: string) => {
+    const skill = known.get(name);
+    return skill && skillPresent(skill) ? row : "";
+  });
+  return kept === block ? instructions : instructions.slice(0, start) + (kept ? indexHeading + kept : "") + rows.slice(block.length);
 }
 
 /** Skills the owner invoked with `/skill:` stay readable by the coordinator even outside its profile. */

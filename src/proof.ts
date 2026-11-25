@@ -8,8 +8,8 @@ import type { BackgroundCommands } from "./background-commands.ts";
 import { Jobs, type Job } from "./jobs.ts";
 import type { ResourceLeases } from "./resource-leases.ts";
 import { missingLease } from "./verification-resources.ts";
-import { workerEnvironmentTools } from "./worker-environment-tools.ts";
-import { readHead } from "./vcs.ts";
+import { policyDenial, workerEnvironmentTools } from "./worker-environment-tools.ts";
+import type { HeadRead } from "./vcs.ts";
 import { CACHE_VARIABLE, type WorkspaceCaches } from "./workspace-cache.ts";
 
 /** One command run for a Job: its log lives under the Job's artifacts, and the run is tied to the commit it ran on. */
@@ -75,8 +75,9 @@ export type ProofDeps = {
   controlRoot: string;
   background: BackgroundCommands;
   leases: ResourceLeases;
+  readHead: (cwd: string) => Promise<HeadRead>;
   /** The worker's shell policy for this Job, or why the host cannot apply it. */
-  shell: (job: Job, cwd: string) => { guard: (command: string) => string } | { refusal: string };
+  shell: (job: Job, cwd: string) => Promise<{ guard: (command: string) => string; refuseDenied?: boolean } | { refusal: string }>;
   isClosed?: () => boolean;
   caches?: WorkspaceCaches;
 };
@@ -126,7 +127,7 @@ export function proofTools(deps: ProofDeps) {
             : 'Not run: the Job has no candidate yet. Commit your work, push the branch, record it with job {action:"candidate", sha, branch, pr}, then retry.',
           true,
         );
-      const read = await readHead(cwd);
+      const read = await deps.readHead(cwd);
       if (read.kind === "unreadable") return text(`Not run: cannot read HEAD: ${read.reason}`, true);
       const head = read.sha;
       if (head !== job.candidate)
@@ -138,12 +139,15 @@ export function proofTools(deps: ProofDeps) {
           } and retry; otherwise check out the candidate ${job.candidate} first.`,
           true,
         );
-      const shell = deps.shell(job, cwd);
+      const shell = await deps.shell(job, cwd);
       if ("refusal" in shell) return text(shell.refusal, true);
       const held = deps.leases
         .held((holder) => holder.projectId === deps.projectId && holder.threadId === job.id)
         .map((item) => item.resource);
-      const missing = missingLease(args.command, held);
+      const command = shell.guard(args.command);
+      const denied = shell.refuseDenied ? policyDenial(command) : undefined;
+      if (denied !== undefined) return text(denied, true);
+      const missing = missingLease(args.command, held) ?? (command !== args.command ? missingLease(command, held) : null);
       if (missing)
         return text(
           `Not run: this command uses the ${missing.resource}, which other workers share, and you hold no lease for it. Take ${missing.hint} with projects_lease_acquire first. If the lease is held by someone else, or you lack the tool or grant, list the check under gaps.`,
@@ -155,7 +159,7 @@ export function proofTools(deps: ProofDeps) {
       const started = Date.now();
       const deadline = started + (args.timeoutSeconds ?? 600) * 1000;
       const running = deps.background.start(job.id, {
-        command: shell.guard(args.command),
+        command,
         label: `verify ${id}`,
         cwd,
         env: { ...process.env, PI_ARTIFACTS_DIR: artifacts, ...(await cacheEnv(cwd)) },
@@ -216,6 +220,7 @@ export function proofTools(deps: ProofDeps) {
     target: async (api, context) => {
       const job = await jobOf(api, context);
       const cwd = (await api.agent(context)).cwd ?? deps.controlRoot;
+      const shell = await deps.shell(job, cwd);
       const guard = (command: string): string => {
         const held = deps.leases
           .held((holder) => holder.projectId === deps.projectId && holder.threadId === job.id)
@@ -225,7 +230,6 @@ export function proofTools(deps: ProofDeps) {
           const message = `Not run: this command uses the ${missing.resource}, which other workers share, and you hold no lease for it. Take ${missing.hint} with projects_lease_acquire first.`;
           return `printf '%s\\n' '${message.replaceAll("'", "'\\''")}' >&2; exit 126`;
         }
-        const shell = deps.shell(job, cwd);
         if ("refusal" in shell) throw new Error(shell.refusal);
         return shell.guard(command);
       };

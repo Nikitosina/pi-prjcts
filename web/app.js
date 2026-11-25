@@ -21,8 +21,9 @@ import {
 } from "./tree.js";
 import { currentChat, loadChat, stopTurn, toggleSteer } from "./chat.js";
 import "./sidebar.js";
-import { closeMergeDialog, loadJobs, loadSide, mergeDialogOpen, renderWorker } from "./workers.js";
-import { renderMemoryEntry, renderMemoryList } from "./memory.js";
+import { closeReview, renderReview } from "./review.js";
+import { reviewEntries, closeMergeDialog, loadJobs, loadSide, mergeDialogOpen, renderWorker } from "./workers.js";
+import { refreshRecentMemory, renderMemoryEntry, renderMemoryList } from "./memory.js";
 import { closeSettings, openSettings, SECTIONS, settingsBack, settingsOpen, showSection } from "./settings.js";
 import {
   isOpen as drawerOpen,
@@ -71,6 +72,7 @@ async function select(projectId, chatId = "main", { keepFocus = false } = {}) {
   if (!sameProject) {
     changes?.stop();
     const gen = state.generation;
+    let connected = false; // the first sync of a stream is the opening read; a later one is a reconnect, after which missed changes are possible
     changes = stream(
       `/changes?project=${encodeURIComponent(projectId)}`,
       (change) => {
@@ -78,10 +80,13 @@ async function select(projectId, chatId = "main", { keepFocus = false } = {}) {
         if (change.t === "sync") {
           emit("plugins-changed");
           void refreshAll();
+          void refreshRecentMemory(connected ? { invalidate: true } : { again: true });
+          connected = true;
         } else if (change.t === "topic") onTopic(change, gen);
       },
       (up) => {
         state.connected = up;
+        emit("connection", up);
         paintStatusLine();
       },
     );
@@ -105,7 +110,10 @@ function onTopic(change) {
     void loadChat();
     void loadUsage();
   }
-  if (change.topic === "knowledge" && state.focus.kind === "memory" && !state.focus.path) renderFocus();
+  if (change.topic === "knowledge") {
+    void refreshRecentMemory({ again: true });
+    if (state.focus.kind === "memory" && !state.focus.path) renderFocus();
+  }
   clearTimeout(listTimer);
   listTimer = setTimeout(() => void loadProjects(), 400);
 }
@@ -130,6 +138,7 @@ on("projects", () => {
 // ---------------------------------------------------------------------------------------------------------------- center focus
 
 function showChat() {
+  closeReview();
   state.focus = { kind: "chat" };
   center.dataset.focus = "chat";
   focusView.hidden = true;
@@ -138,12 +147,14 @@ function showChat() {
   renderTree();
 }
 function renderFocus() {
+  closeReview();
   const focus = state.focus;
   center.dataset.focus = focus.kind;
   chatView.hidden = true;
   focusView.hidden = false;
   focusView.className = `view focus-${focus.kind}`;
   if (focus.kind === "worker") void renderWorker(focusView, focus.id, { steer: focus.steer });
+  else if (focus.kind === "pr") void renderReview(focusView, focus);
   else if (focus.kind === "memory" && focus.path) void renderMemoryEntry(focusView, focus.path, focus.edit);
   else if (focus.kind === "memory") void renderMemoryList(focusView);
   renderTree();
@@ -182,7 +193,9 @@ function paintCrumbs() {
       ? " › worker"
       : state.focus.kind === "memory"
         ? ` › Memory${state.focus.path ? ` › ${clip(state.focus.path, 40)}` : ""}`
-        : "";
+        : state.focus.kind === "pr"
+          ? ` › PR #${state.focus.id}`
+          : "";
   document.querySelector("#crumbs").innerHTML =
     `<b>${esc(name)}</b>${chat ? `<span class="sep">/</span><span>${esc(chat)}</span>` : ""}<span class="muted">${esc(focus)}</span>`;
   document.title = name ? `${name} · pi-prjcts` : "pi-prjcts";
@@ -330,6 +343,7 @@ on("leave-focus", () => {
 });
 
 setPaletteSource(() => [
+  ...reviewEntries(),
   ...state.projects.flatMap((item) => [
     { id: `p:${item.id}`, label: item.name, hint: "project", run: () => void select(item.id, "main") },
     {

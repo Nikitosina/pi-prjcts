@@ -1,12 +1,14 @@
 import { inbox } from "./inbox.ts";
 import { evidence } from "./evidence.ts";
 import { openDurableProject, type DurableProjectRuntime, type DurableSubmissionState } from "./durable-runtime.ts";
-import { attachmentContent, listUploads } from "./uploads.ts";
+import { attachmentImageCopies, listUploads } from "./uploads.ts";
+import { skillNames } from "./coordinator-skills.ts";
+import { recordInvokedSkill } from "./skill-profiles.ts";
 import { plugins } from "./plugins.ts";
 import { feed } from "./change-feed.ts";
 import type { MessageText } from "./transcript-reader.ts";
 import type { ToolSummaries } from "./tool-summaries.ts";
-import { jobs, loadProject, notes, projectDir, saveJob, saveProject, type Project, type Snapshot } from "./state.ts";
+import { jobById, jobs, loadProject, notes, projectDir, saveJob, saveProject, type Job, type Project, type Snapshot } from "./state.ts";
 
 export async function openDurableHost(
   project: Project,
@@ -40,19 +42,57 @@ export async function openDurableHost(
   });
   opened = owner;
   try {
-    if (!(await owner.jobs()).paused) {
-      for (const job of jobs(project.id).filter((job) => job.state === "queued" || job.state === "running")) {
-        await owner.admit(attachmentContent(projectDir(project.id), job.text, job.attachments, owner.acceptsImages), {
-          requestId: job.id,
-          chatId: job.chatId,
-        });
-      }
-    }
+    await recoverUnadmitted(owner, project);
     await settle();
     return owner;
   } catch (error) {
     await owner.close();
     throw error;
+  }
+}
+
+/** Finishes the skill grant of a message the runtime holds. The saved content marks a grant not yet finished; a record without it was granted, or never owed one. */
+export function finishGrant(dir: string, job: Job): void {
+  if (job.delivery && !job.delivery.literal) for (const invoked of skillNames(job.text)) recordInvokedSkill(dir, invoked);
+}
+
+// A message the host saved with its exact content but never marked admitted is continued under its own request id: the runtime's receipt is read
+// first, and only a message the runtime does not hold is admitted, from the saved content, to the saved chat. A refusal leaves the record unconfirmed.
+// A receipt also finishes the original skill grant a crash may have cut off; nothing is submitted again for it.
+async function recoverUnadmitted(owner: DurableProjectRuntime, project: Project): Promise<void> {
+  const waiting = jobs(project.id).filter((job) => job.delivery && !job.admitted && (job.state === "queued" || job.state === "running"));
+  if (!waiting.length) return;
+  const dir = projectDir(project.id);
+  for (const job of waiting) {
+    const chatId = job.chatId ?? "main";
+    try {
+      if (!(await owner.ledgerSubmissions(chatId, [job.id])).length) {
+        const current = loadProject(project.id);
+        if (current.deleted || current.archived || (await owner.jobs()).paused) continue;
+        const chat = (await owner.chats()).find((item) => item.id === chatId);
+        if (!chat || chat.archived) continue;
+        // The images that went in with the saved content are the ones that go in now; a missing one leaves the message unconfirmed.
+        if (job.delivery!.content.length > 120_000) continue;
+        if (job.delivery!.images === undefined && job.attachments?.length) continue;
+        const images = attachmentImageCopies(dir, job.delivery!.images, true);
+        if (images.length !== (job.delivery!.images?.length ?? 0)) continue;
+        await owner.admit(
+          images.length ? [{ type: "text", text: job.delivery!.content }, ...images.map(({ part }) => part)] : job.delivery!.content,
+          {
+            requestId: job.id,
+            origin: job.origin === "telegram" ? "telegram" : undefined,
+            chatId: job.chatId,
+            title: job.text,
+          },
+        );
+      }
+      const held = jobById(project.id, job.id) ?? job;
+      finishGrant(dir, held);
+      const { delivery: _saved, ...admitted } = held;
+      saveJob(project.id, { ...admitted, admitted: true });
+    } catch {
+      // Stays unconfirmed; the owner's explicit retry carries the same request id.
+    }
   }
 }
 
@@ -62,7 +102,13 @@ function settleLedger(projectId: string, ledger: JobLedger, submissions: Durable
   for (const job of ledger) {
     const submission = submissions.find((item) => item.requestId === job.id);
     if (!submission) continue;
-    const before = `${job.state}\0${job.error}`,
+    // The receipt is the proof that the message was admitted, so the grant a crash may have cut off is finished before the saved content goes.
+    try {
+      finishGrant(projectDir(projectId), job);
+    } catch {
+      continue;
+    }
+    const before = `${job.state}\0${job.error}\0${job.admitted}\0${job.entry}\0${!!job.delivery}`,
       wasSettled = job.state === "done" || job.state === "failed";
     switch (submission.status) {
       case "queued":
@@ -88,7 +134,10 @@ function settleLedger(projectId: string, ledger: JobLedger, submissions: Durable
     }
     // Stamped on the observed transition only, so turns that finished before this field existed do not light up.
     if ((job.state === "done" || job.state === "failed") && !wasSettled) job.settledAt = Date.now();
-    if (`${job.state}\0${job.error}` !== before || alwaysSave) saveJob(projectId, job);
+    job.admitted = true;
+    delete job.delivery;
+    if (submission.entry !== null) job.entry = submission.entry;
+    if (`${job.state}\0${job.error}\0${job.admitted}\0${job.entry}\0${!!job.delivery}` !== before || alwaysSave) saveJob(projectId, job);
   }
 }
 
@@ -183,7 +232,7 @@ export async function durableHostSnapshot(owner: DurableProjectRuntime, chatId?:
     project: { ...project, problem: chatProblems(all, chats, view.chatId), phase: project.phase },
     busy: view.coordinator.busy,
     paused,
-    jobs: ledgerOf(view.chatId),
+    jobs: ledgerOf(view.chatId).map(({ delivery: _saved, ...job }) => job),
     messages: view.coordinator.history.items,
     before: view.coordinator.history.before,
     ...(view.coordinator.history.toolGroups ? { toolGroups: view.coordinator.history.toolGroups } : {}),

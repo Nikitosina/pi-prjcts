@@ -153,9 +153,31 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
   "webhook-rotate": dangerous("Rotate a project's webhook secret; existing senders stop working."),
   "follow-poll": allow("Poll followed pull requests now."),
   prs: allow("A project's pull requests."),
+  "pr-review-open": allow("Read a PR review snapshot. Leave seen unset."),
+  "pr-review-approve-step": exclude("Viewed files belong to the owner."),
+  "pr-review-tour": exclude("Owner-requested scout."),
+  "pr-review-tour-status": allow("Read the local review map."),
+  "pr-review-files": allow("List files at an observed PR head."),
+  "pr-review-file": allow("Read one file diff at an observed PR head."),
+  "pr-review-lines": allow("Read context at an observed PR head."),
+  "pr-review-add": exclude("Owner review draft."),
+  "pr-review-edit": exclude("Owner review draft."),
+  "pr-review-delete": exclude("Owner review draft."),
+  "pr-review-publish": exclude("Only the owner may confirm a provider write."),
+  "pr-review-checked": exclude("Only the owner may inspect an uncertain review."),
+  "pr-review-send": exclude("Requires owner confirmation."),
+  "pr-review-viewed": exclude("Viewed files belong to the owner."),
   "pr-watch": allow("Watch or unwatch a pull request."),
   "pr-hide": allow("Hide or show a pull request."),
   plugins: allow("Loaded plugins."),
+  "project-plugin": exclude("Turning a plugin on or off for a project is the owner's decision in Project settings → Plugins."),
+  "plugin-catalog": allow(
+    "Plugins shipped with pi-prjcts and their state on this host: available, configured (restart needed), loaded or failed.",
+  ),
+  "plugin-restart": exclude("Only the owner can confirm interrupting the host to load a configured plugin."),
+  "plugin-activate": exclude(
+    "Adds a bundled plugin to the host's plugins.json; the owner does it in Settings → Plugins, and a separate restart loads it.",
+  ),
   plugin: allow("Call a plugin method; methods the plugin does not declare as reads or safe writes need the owner's approval."),
   "work-submit": exclude("Worker-scoped admission path; the Host agent sends with message."),
   notes: allow("A project's notes."),
@@ -207,6 +229,7 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
   ),
   "memory-index": allow("A project's memory entries (preferences, decisions, procedures) and broken links."),
   "memory-undo": allow("Undo one memory write (revision of the write to undo)."),
+  "memory-writes": allow("The undo state of the listed memory writes (path and revision), including writes older than the recent list."),
   "memory-recent": allow("A project's recent memory writes, each with whether it was undone and whether it is current."),
   "chat-stop": allow("Stop the running Coordinator turn of one chat of a project."),
 };
@@ -245,6 +268,8 @@ export function validateCall(action: string, input: unknown): RequestData {
         .join("; ")
         .slice(0, 1500)}`,
     );
+  if (action === "pr-review-open" && "seen" in request && request.seen === true)
+    throw Error("Only the owner can advance the last seen PR head");
   return request as RequestData;
 }
 

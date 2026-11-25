@@ -53,7 +53,8 @@ Written before the rotation code. Rotation sends the GSEvent device-orientation 
 
 ## XcodeBuildMCP test products
 
-Written before the code. Every simulator test run through XcodeBuildMCP leaves a 2-4 GB `.xctestproducts` folder under `~/Library/Developer/XcodeBuildMCP/workspaces/<key>/test-products`, and XcodeBuildMCP itself keeps up to 100 of them for 3 days per workspace; one busy project filled 70 GB in an afternoon. The plugin prunes them hourly and in the cleanup step. Proof: `scripts/workspace-cleanup-unit.mjs` (T1-T4).
+Written before the code. Every simulator test run through XcodeBuildMCP leaves a 2-4 GB `.xctestproducts` folder under `~/Library/Developer/XcodeBuildMCP/workspaces/<key>/test-products`, and XcodeBuildMCP itself keeps up to 100 of them for 3 days per workspace; one busy project filled 70 GB in an afternoon. The plugin prunes them hourly and in the cleanup step. Proof: `scripts/workspace-cleanup-unit.mjs` (T1-T5).
+- T5 The hourly sweep or one project's cleanup step prunes a workspace the project does not own, or a project that turned the plugin off. XcodeBuildMCP keys a workspace as the checkout's name plus `sha256(realpath)`; a project owns the keys of its folder and its `git worktree list` entries, the sweep prunes only each enabled project's keys, and an unowned workspace is never touched. Proof: `workspace-cleanup-unit` T5 (two projects sharing one XcodeBuildMCP root).
 
 - T1 A run in progress is removed: a folder younger than the window, or whose owner process is alive and has not written the completion marker, is deleted.
 - T2 The newest finished run of a workspace is deleted, so a test-without-building rerun has to build again.
@@ -117,3 +118,5 @@ Layout refresh (written before the change; the e2e covers each):
 - S16 An icon-only button has no accessible name, or its name is only a hover tooltip. Every icon-only button has an `aria-label` and a matching `title`; clone tabs say their state in text, not only by a colour dot.
 - S17 Errors, an unknown outcome or Retry exact request end up inside the Details disclosure or the menu. They stay visible in the primary view.
 - S18 At 390 px the panel overflows sideways or pushes its controls out of view. The toolbar wraps inside the card and every control stays on screen.
+
+- S19 A project's saved simslim categories are ignored at create, boot or reset, or a successful boot with the 0.15.0 `partially slim` verdict is recorded as uncertain. The panel saves photos and search, shows the saved setting and the fake CLI records the exact arguments for each operation. Without exclusions boot still requests and confirms full slimming.

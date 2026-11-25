@@ -12,11 +12,11 @@ const Resource = Type.String({
 });
 const Id = Type.String({ pattern: "^bg-[a-f0-9]{8}$" });
 /** The background wait; the stall detector judges an agent inside it by its command's output. */
-export const BACKGROUND_WAIT_TOOL = "projects_bg_status";
+export const BACKGROUND_WAIT_TOOL = "projects_bg_wait";
 const MAX_WAIT_SECONDS = 1800;
 const BLOCKED = /^printf '%s\\n' '([\s\S]*)' >&2; exit 126$/;
 /** The worker shell policies answer a blocked command with a replacement script ending in `exit 126`; unwrap its message. */
-function policyDenial(guarded: string): string | undefined {
+export function policyDenial(guarded: string): string | undefined {
   const message = BLOCKED.exec(guarded)?.[1];
   return message === undefined ? undefined : message.replaceAll("'\\''", "'");
 }
@@ -75,7 +75,7 @@ export function workerEnvironmentTools(input: {
   const start = defineTool({
     name: "projects_bg_start",
     description:
-      "Start a long-running shell command (build, test run, dev server, big download) in the background in your worktree and return an id at once; bash calls can time out, this cannot. Same shell policy as bash; a denied command is rejected and nothing runs. Output goes to a log under your artifacts folder. Poll with projects_bg_status, end it with projects_bg_stop. At most 3 run per thread. It keeps running across your turns and is killed when the thread is stopped or archived or the host shuts down. Keep the command in the foreground (no trailing & or daemonizing): the whole process group is killed when it exits.",
+      "Start a long-running shell command (build, test run, dev server, big download) in the background in your worktree and return an id at once; bash calls can time out, this cannot. Same shell policy as bash; a denied command is rejected and nothing runs. Output goes to a log under your artifacts folder. Wait with projects_bg_wait, end it with projects_bg_stop. At most 3 run per thread. It keeps running across your turns and is killed when the thread is stopped or archived or the host shuts down. Keep the command in the foreground (no trailing & or daemonizing): the whole process group is killed when it exits.",
     parameters: Type.Object(
       { command: Type.String({ minLength: 1, maxLength: 8000 }), label: Type.String({ minLength: 1, maxLength: 80 }) },
       { additionalProperties: false },
@@ -96,9 +96,9 @@ export function workerEnvironmentTools(input: {
       return json(info);
     },
   });
-  const status = defineTool({
+  const wait = defineTool({
     name: BACKGROUND_WAIT_TOOL,
-    description: `State of one of your background commands: running, exited with its exit code, killed or lost, plus the last tailLines (default 40, max 200) of its output (capped) and the log artifact ref for the full output. To wait for a build or test run, make one call with a large waitSeconds (1-${MAX_WAIT_SECONDS}) instead of polling: it returns as soon as the command ends, when a message for you is queued (state running with a note), or after waitSeconds with state running. Do not poll with sleep and tail. after (a previous logBytes) returns only output newer than that offset.`,
+    description: `State of one of your background commands: running, exited with its exit code, killed or lost, plus the last tailLines (default 40, max 200) of its output (capped) and the log artifact ref for the full output. Waits until the command ends, a message is queued, or waitSeconds elapse (default and maximum ${MAX_WAIT_SECONDS}). Do not poll with sleep and tail. after (a previous logBytes) returns only output newer than that offset.`,
     parameters: Type.Object(
       {
         id: Id,
@@ -111,19 +111,19 @@ export function workerEnvironmentTools(input: {
     replay: "safe",
     async execute(args, api, context) {
       const thread = await owner(api, context);
-      const queued = args.waitSeconds ? watchQueuedInput(api, api.conversationId, context) : undefined;
+      const queued = watchQueuedInput(api, api.conversationId, context);
       try {
-        const signals = [context.abortSignal, queued?.signal].filter((signal) => signal !== undefined);
+        const signals = [context.abortSignal, queued.signal].filter((signal) => signal !== undefined);
         const status = await input.background.wait(thread, args.id, {
           tailLines: args.tailLines ?? 40,
           after: args.after,
-          waitSeconds: args.waitSeconds ?? 0,
+          waitSeconds: args.waitSeconds ?? MAX_WAIT_SECONDS,
           signal: signals.length ? AbortSignal.any(signals) : undefined,
         });
-        const arrived = queued?.arrived();
+        const arrived = queued.arrived();
         return json(arrived && status.state === "running" ? { ...status, note: queuedInputNote(arrived) } : status);
       } finally {
-        queued?.stop();
+        queued.stop();
       }
     },
   });
@@ -137,5 +137,5 @@ export function workerEnvironmentTools(input: {
       return json(info);
     },
   });
-  return [acquire, release, start, status, stop];
+  return [acquire, release, start, wait, stop];
 }

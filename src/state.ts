@@ -4,6 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { Type, type Static, type TSchema } from "typebox";
 import { Value } from "typebox/value";
+import { BUNDLED_PLUGIN_IDS } from "./bundled-plugins.ts";
 import { CommandProfile, CommandProfileInput } from "./command-profile-types.ts";
 import { SkillProfiles } from "./skill-profiles.ts";
 import { MessageText } from "./transcript-reader.ts";
@@ -188,6 +189,8 @@ export const Project = Type.Object(
     decisionAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])),
     /** Coordinator gh access; absent means full. */
     githubCli: Type.Optional(Type.Union([Type.Literal("full"), Type.Literal("none")])),
+    /** Plugins this project turned off (src/plugin-gate.ts); absent = all on. Their stored data stays. */
+    disabledPlugins: Type.Optional(Type.Array(Type.String({ pattern: "^[a-z][a-z0-9-]{0,39}$" }), { maxItems: 64, uniqueItems: true })),
     /** Optional host-only workspace grant. Projects without it receive no workspace scope. */
     workspaceAuthorization: Type.Optional(WorkspaceAuthorization),
     workspaceAuthorizationHistory: Type.Optional(WorkspaceAuthorizationHistory),
@@ -254,6 +257,24 @@ export const Job = Type.Object(
     chatId: Type.Optional(Id),
     /** Owner uploads attached to the message. */
     attachments: Type.Optional(Type.Array(Id, { minItems: 1, maxItems: 10, uniqueItems: true })),
+    /** Where the message came from; a repeat of its request id must carry the same origin. */
+    origin: Type.Optional(Type.Union([Type.Literal("telegram"), Type.Literal("owner")])),
+    /** The exact content handed to the runtime (skills and references expanded, attachment block added), kept until the runtime holds the message so a restart delivers this, not a rebuilt prompt. */
+    delivery: Type.Optional(
+      Type.Object(
+        {
+          content: Type.String({ minLength: 1, maxLength: 130_000 }),
+          literal: Type.Optional(Type.Literal(true)),
+          /** Uploads whose reduced image copies went in with the content; recovery needs every one of them. */
+          images: Type.Optional(Type.Array(Id, { maxItems: 10 })),
+        },
+        { additionalProperties: false },
+      ),
+    ),
+    /** Set once the runtime holds the message's submission; a ledger record without it was recorded but not necessarily admitted. */
+    admitted: Type.Optional(Type.Literal(true)),
+    /** Transcript entry the message became, once the runtime placed it. */
+    entry: Type.Optional(Type.Integer({ minimum: 0 })),
     /** When the host first saw the job settle (done or failed); drives the chat tab's "finished" dot. */
     settledAt: Type.Optional(Type.Number()),
   },
@@ -544,6 +565,14 @@ const scheduleTiming = {
     ]),
   ),
 };
+const reviewId = { id: Id, provider: Provider, pr: Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$" }) };
+const reviewSha = Type.String({ pattern: "^[0-9a-f]{40}$" });
+const reviewRange = { ...reviewId, head: reviewSha, base: Type.Optional(reviewSha), since: Type.Optional(reviewSha) };
+const reviewPath = Type.String({
+  minLength: 1,
+  maxLength: 1024,
+  pattern: "^(?!/|:)(?!.*(?:^|/)(?:\\.{1,2})(?:/|$))(?!.*//)(?!.*[/]$)[^\\x00-\\x1f\\x7f\\\\]+$",
+});
 export const Request = Type.Union([
   Type.Object({ action: Type.Literal("remote-reload") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("remote-status") }, { additionalProperties: false }),
@@ -665,6 +694,14 @@ export const Request = Type.Union([
   ),
   Type.Object({ action: Type.Literal("memory-undo"), projectId: Id, path: knowledgePath, revision }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("memory-recent"), projectId: Id }, { additionalProperties: false }),
+  Type.Object(
+    {
+      action: Type.Literal("memory-writes"),
+      projectId: Id,
+      writes: Type.Array(Type.Object({ path: knowledgePath, revision }, { additionalProperties: false }), { minItems: 1, maxItems: 20 }),
+    },
+    { additionalProperties: false },
+  ),
   Type.Object(
     {
       action: Type.Literal("chat-stop"),
@@ -1330,6 +1367,107 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("automation-update"), id: Id, change: AutomationChange }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("webhook-rotate"), id: Id, confirm: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("follow-poll"), id: Id }, { additionalProperties: false }),
+  Type.Object(
+    { action: Type.Literal("pr-review-open"), ...reviewId, seen: Type.Optional(Type.Boolean()) },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      action: Type.Literal("pr-review-add"),
+      ...reviewRange,
+      path: reviewPath,
+      side: Type.Union([Type.Literal("LEFT"), Type.Literal("RIGHT")]),
+      from: Type.Integer({ minimum: 1, maximum: 10000000 }),
+      to: Type.Integer({ minimum: 1, maximum: 10000000 }),
+      comment: Type.String({ minLength: 1, maxLength: 4000 }),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      action: Type.Literal("pr-review-edit"),
+      ...reviewId,
+      draftId: Id,
+      revision: Id,
+      comment: Type.String({ minLength: 1, maxLength: 4000 }),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object({ action: Type.Literal("pr-review-delete"), ...reviewId, draftId: Id, revision: Id }, { additionalProperties: false }),
+  Type.Object(
+    {
+      action: Type.Literal("pr-review-publish"),
+      ...reviewId,
+      confirmed: Type.Literal(true),
+      revision: Id,
+      head: reviewSha,
+      operation: Type.Union([
+        Type.Object(
+          {
+            kind: Type.Literal("review"),
+            verdict: Type.Union([Type.Literal("APPROVE"), Type.Literal("COMMENT"), Type.Literal("REQUEST_CHANGES")]),
+            summary: Type.String({ maxLength: 12000 }),
+            draftIds: Type.Array(Id, { uniqueItems: true, maxItems: 100 }),
+          },
+          { additionalProperties: false },
+        ),
+        Type.Object(
+          {
+            kind: Type.Literal("reply"),
+            threadId: Type.String({ minLength: 1, maxLength: 256 }),
+            body: Type.String({ minLength: 1, maxLength: 4000 }),
+          },
+          { additionalProperties: false },
+        ),
+        Type.Object(
+          {
+            kind: Type.Union([Type.Literal("resolve"), Type.Literal("unresolve")]),
+            threadId: Type.String({ minLength: 1, maxLength: 256 }),
+          },
+          { additionalProperties: false },
+        ),
+      ]),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { action: Type.Literal("pr-review-checked"), ...reviewId, revision: Id, confirmed: Type.Literal(true), found: Type.Boolean() },
+    { additionalProperties: false },
+  ),
+  Type.Object({ action: Type.Literal("pr-review-send"), ...reviewId, revision: Id, chatId: ChatId }, { additionalProperties: false }),
+  Type.Object(
+    { action: Type.Literal("pr-review-tour"), ...reviewId, head: reviewSha, base: Type.Optional(reviewSha), chatId: ChatId },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      action: Type.Literal("pr-review-approve-step"),
+      ...reviewId,
+      head: reviewSha,
+      base: Type.Optional(reviewSha),
+      mapHead: reviewSha,
+      mapBase: reviewSha,
+      title: Type.String({ minLength: 1, maxLength: 160 }),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object({ action: Type.Literal("pr-review-tour-status"), ...reviewId }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("pr-review-files"), ...reviewRange }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("pr-review-file"), ...reviewRange, path: reviewPath }, { additionalProperties: false }),
+  Type.Object(
+    {
+      action: Type.Literal("pr-review-lines"),
+      ...reviewRange,
+      path: reviewPath,
+      from: Type.Integer({ minimum: 1, maximum: 10000000 }),
+      count: Type.Integer({ minimum: 1, maximum: 100 }),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { action: Type.Literal("pr-review-viewed"), ...reviewRange, path: reviewPath, viewed: Type.Boolean() },
+    { additionalProperties: false },
+  ),
   Type.Object({ action: Type.Literal("prs"), id: Id, refresh: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
   Type.Object(
     {
@@ -1352,6 +1490,19 @@ export const Request = Type.Union([
     { additionalProperties: false },
   ),
   Type.Object({ action: Type.Literal("plugins"), id: Type.Optional(Id) }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("plugin-catalog") }, { additionalProperties: false }),
+  Type.Object(
+    { action: Type.Literal("plugin-restart"), instance: Id, plugin: Type.Union(BUNDLED_PLUGIN_IDS.map((id) => Type.Literal(id))) },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { action: Type.Literal("plugin-activate"), plugin: Type.Union(BUNDLED_PLUGIN_IDS.map((id) => Type.Literal(id))) },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { action: Type.Literal("project-plugin"), id: Id, plugin: Type.String({ pattern: "^[a-z][a-z0-9-]{0,39}$" }), enabled: Type.Boolean() },
+    { additionalProperties: false },
+  ),
   Type.Object(
     {
       action: Type.Literal("plugin"),
@@ -1462,6 +1613,11 @@ export function projectDir(id: string): string {
   return join(home(), parse(Id, id));
 }
 
+/** Worker worktrees for one-click grants live with the project data, outside the owner checkout. */
+export function workerWorktreeRoot(id: string): string {
+  return join(projectDir(id), "worktrees");
+}
+
 export function saveJson(path: string, value: unknown): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temp = `${path}.${randomUUID()}.tmp`;
@@ -1564,7 +1720,9 @@ export function jobs(id: string): Job[] {
       stat = statSync(path, { bigint: true }),
       stamp = `${stat.ino}:${stat.size}:${stat.mtimeNs}`,
       hit = known?.get(name);
-    current.set(name, hit?.stamp === stamp ? hit : { stamp, job: parse(Job, readJson(path)) });
+    const entry = hit?.stamp === stamp ? hit : { stamp, job: parse(Job, readJson(path)) };
+    // A record whose embedded id is not its file's name is not that message.
+    if (`${entry.job.id}.json` === name) current.set(name, entry);
   }
   jobCache.delete(dir);
   jobCache.set(dir, current);
@@ -1575,11 +1733,26 @@ export function jobs(id: string): Job[] {
   return [...current.values()].map(({ job }) => structuredClone(job)).sort((a, b) => a.at.localeCompare(b.at));
 }
 
+/** One job by its id: a single file read, so a lookup does not scan the folder that holds every message ever sent. */
+export function jobById(id: string, jobId: string): Job | undefined {
+  try {
+    const job = parse(Job, readJson(join(projectDir(id), "inbox", `${parse(Id, jobId)}.json`)));
+    if (job.id !== jobId) throw new Error("A saved message record does not carry the id of its file");
+    return job;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
 export function saveJob(id: string, job: Job): void {
   const dir = join(projectDir(id), "inbox");
   saveJson(join(dir, `${job.id}.json`), parse(Job, job));
   jobCache.get(dir)?.delete(`${job.id}.json`);
 }
+
+/** An error raised before anything was recorded or changed: a client may treat the request as not sent. */
+export class Refused extends Error {}
 
 export function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

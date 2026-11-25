@@ -1,0 +1,94 @@
+import { randomUUID } from "node:crypto";
+import type { PrPublish, PrReviewSource, PrIteration } from "./plugin-types.ts";
+import type { Project, Request } from "./state.ts";
+import type { DraftBook } from "./pr-review-drafts.ts";
+
+const inFlight = new Set<string>();
+export const publishing = (h: DraftBook) => !!h.revision && inFlight.has(h.revision);
+export function checkedReview(h: DraftBook, revision: string, found: boolean) {
+  if (publishing(h) || h.sendingTo || !h.uncertain || h.revision !== revision)
+    throw Error("Review is still in progress or changed. Reopen it.");
+  if (found) for (const d of h.drafts ?? []) if (h.uncertain.draftIds.includes(d.id)) d.published = h.uncertain.url;
+  delete h.uncertain;
+  h.revision = randomUUID();
+  return { checked: true };
+}
+export async function publishReview(
+  history: <T>(fn: (h: DraftBook & { iterations: PrIteration[] }) => T) => Promise<T>,
+  source: PrReviewSource,
+  p: Project,
+  i: Extract<Request, { action: "pr-review-publish" }>,
+) {
+  const op = i.operation;
+  if (!source.publish || !source.capabilities[op.kind === "review" ? "publish" : op.kind === "reply" ? "reply" : "resolve"])
+    throw Error("Provider does not support this review action");
+  if (op.kind === "review" && source.capabilities.verdicts && !source.capabilities.verdicts.includes(op.verdict))
+    throw Error("Provider does not support this verdict");
+  const snapshot = await source.snapshot(p, i.pr, []);
+  if (!snapshot.url || !/^https?:\/\//i.test(snapshot.url)) throw Error("Provider must supply a PR link");
+  const urlOfPr = snapshot.url;
+  if (snapshot.head !== i.head) throw Error("PR head changed. Reopen the review.");
+  const target = op.kind === "review" ? null : snapshot.threads.find((t) => t.id === op.threadId);
+  if (op.kind !== "review" && !target) throw Error("Thread not found on this PR");
+  if (
+    (op.kind === "reply" && !op.body.trim()) ||
+    (op.kind === "review" && !op.summary.trim() && (op.verdict === "REQUEST_CHANGES" || (op.verdict === "COMMENT" && !op.draftIds.length)))
+  )
+    throw Error("Enter a review message");
+  const revision = randomUUID();
+  inFlight.add(revision);
+  try {
+    const intent = await history((h): PrPublish => {
+      if (h.uncertain) throw Error("Uncertain provider write. Check the PR first.");
+      if (h.revision !== i.revision || h.sendingTo) throw Error("Drafts changed. Reopen the review.");
+      const intent =
+        op.kind === "review"
+          ? {
+              kind: op.kind,
+              verdict: op.verdict,
+              summary: op.summary,
+              comments: op.draftIds.map((id) => {
+                const d = h.drafts?.find((x) => x.id === id);
+                if (!d || d.sent || d.published) throw Error("Draft is no longer pending");
+                if (
+                  d.head !== i.head ||
+                  (d.side === "LEFT" &&
+                    (d.since ?? d.base ?? h.iterations.find((x) => x.head === d.head)?.base) !==
+                      snapshot.iterations.find((x) => x.head === d.head)?.base)
+                )
+                  throw Error("Outdated anchor. Drop the draft from the review.");
+                return { head: d.head, path: d.path, side: d.side, from: d.from, to: d.to, body: d.comment };
+              }),
+            }
+          : op;
+      h.revision = revision;
+      h.uncertain = {
+        head: i.head,
+        url: urlOfPr,
+        draftIds: op.kind === "review" ? [...op.draftIds] : [],
+        description:
+          op.kind === "review"
+            ? `Review (${op.verdict}) · ${op.draftIds.length} inline comments`
+            : `${op.kind} · ${target?.path}:${target?.line ?? "—"} (${op.threadId})`,
+        at: new Date().toISOString(),
+      };
+      return intent;
+    });
+    let url: string;
+    try {
+      ({ url } = await source.publish(p, i.pr, snapshot, intent));
+      if (!/^https?:\/\//i.test(url)) throw Error("Missing provider receipt");
+    } catch {
+      return { uncertain: true };
+    }
+    return await history((h) => {
+      if (h.revision !== revision) throw Error("Review changed during publish");
+      if (op.kind === "review") for (const d of h.drafts ?? []) if (op.draftIds.includes(d.id)) d.published = url;
+      delete h.uncertain;
+      h.revision = randomUUID();
+      return { url };
+    });
+  } finally {
+    inFlight.delete(revision);
+  }
+}

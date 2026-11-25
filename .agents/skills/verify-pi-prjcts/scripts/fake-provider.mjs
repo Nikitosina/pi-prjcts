@@ -8,6 +8,7 @@
 // hostile HTML and links, for the chat renderers. VERIFY-LONG answers with about 8500 characters ending in VERIFY-LONG-END. VERIFY-IMAGE has the coordinator read the seeded screen.png (a tool result with an
 // image) and cite its artifact reference plus a missing one; VERIFY-WORKER-IMAGE has the coordinator hand that to a worker
 // (scouts read code through code_read, which returns no images).
+import { reviewSteps } from "../../../../scripts/lib/review-map-fixture.mjs";
 import { createServer } from "node:http";
 import { appendFileSync, writeFileSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
@@ -81,7 +82,28 @@ const server = createServer((req, res) => {
         .map((m) => text(m.content))
         .join(" ")
         .match(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/)?.[0];
-    if (user.includes("VERIFY-LONG")) {
+    if (user.startsWith("[Guided tour request]") && names.includes("agents")) {
+      const r = JSON.parse(user.split("\n")[1]);
+      reply =
+        stage === 0
+          ? call("agents", {
+              action: "spawn",
+              role: "scout",
+              requestId: r.requestId,
+              readRef: r.head,
+              brief: "VERIFY-REVIEW-MAP Inspect calendar at " + r.head + "\n" + JSON.stringify(r),
+            })
+          : say("Requested a map.");
+    } else if (user.startsWith("VERIFY-REVIEW-MAP")) {
+      reply =
+        stage === 0
+          ? call("code_read", { path: "calendar.js", limit: 1 })
+          : say(
+              messages.some((m) => m.role === "tool" && /export const days = [57];/.test(text(m.content)))
+                ? JSON.stringify({ steps: reviewSteps() })
+                : "Could not read the PR head.",
+            );
+    } else if (user.includes("VERIFY-LONG")) {
       reply = say(`VERIFY-LONG-START ${"long answer text ".repeat(500)}VERIFY-LONG-END`);
     } else if (user.includes("VERIFY-TABLE")) {
       // The Host agent also cites an artifact, which its drawer cannot show (no project image route).
@@ -209,7 +231,7 @@ const server = createServer((req, res) => {
               action: "spawn",
               role: "worker",
               title,
-              brief: `${title}: add a greeting.`,
+              brief: user.includes("review fixture") ? `${title}: review fixture` : `${title}: add a greeting.`,
               acceptance: ["It greets."],
               requestId: "verify-job",
             })
@@ -247,7 +269,7 @@ const server = createServer((req, res) => {
               ? call("job", {
                   action: "ready",
                   summary: "Added the greeting.",
-                  pr: "12",
+                  pr: user.includes("review fixture") ? "https://github.com/acme/review/pull/7" : "12",
                   candidate: "a".repeat(40),
                   proof: ["greeting printed"],
                 })

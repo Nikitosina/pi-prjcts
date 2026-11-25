@@ -1,0 +1,3 @@
+- Ready must compare the candidate, not the worktree, with its merge base, not the base tip. A rename is one entry; unrelated edits do not count.
+- A provider supplies the same facts without Git. A missing hook, unreadable revision or failed read must not prevent Ready or claim no changes.
+- A long list shows the number omitted.

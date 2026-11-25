@@ -90,7 +90,15 @@ export default {
       ...(process.env.FAKE_PLUGIN_UI ? { web: { script: process.env.FAKE_PLUGIN_UI } } : {}),
       vcs: {
         kind: "fake",
-        isRoot: (dir) => existsSync(join(dir, ".fakevcs")),
+        isRoot: (dir) => existsSync(join(dir, ".fakevcs")) || existsSync(join(dir, ".fake-worktree")),
+        ...(process.env.FAKE_OLD_VCS
+          ? {}
+          : {
+              candidateNameStatus: async (root, candidate) => {
+                if (!existsSync(join(root, ".fake-worktree")) || /^0+$/.test(candidate)) throw Error("unreadable");
+                return `A\t${candidate}\nD\told\nM\tedited\n`;
+              },
+            }),
         privateDirs: [".fakevcs"],
         executables: ["fakectl"],
         workerRule: "Fake VCS rule: use fakectl, never git.",
@@ -116,6 +124,9 @@ export default {
           dirty: false,
           dialog: { checkoutLabel: "Fake checkout", rows: [["Fake row", "fake value"]], bullets: ["Workers get plain directories."] },
         }),
+        ...(process.env.FAKE_NO_VERIFICATION_HEAD
+          ? {}
+          : { verificationHead: async (cwd) => readFileSync(join(cwd, ".fake-revision"), "utf8").trim() }),
         isolation,
         leaseOwner: (project) => `fake:${project.id}`,
         plan: async (context) => {
@@ -133,7 +144,12 @@ export default {
           workDir: context.receipt.workspacePath,
           start: async () => {},
           tools: async () => [publish],
-          guard: (command) => command,
+          guard: (command) =>
+            command === "touch DENIED"
+              ? "printf '%s\\n' 'Denied by fake worker' >&2; exit 126"
+              : command === "fake-test-wrapper"
+                ? "touch LEASED # docker"
+                : command,
           instructions: "\n\nFake mode: your worktree is a plain directory; publish with fake_publish.",
         }),
         // Chat and task checkouts are the same plain directories. A task checkout's revision lives in `.fake-revision`, so a test can move it or dirty the
@@ -306,7 +322,11 @@ export default {
             ? { repositoryId: "fake-repo" }
             : undefined;
         },
-        published: async () => (data().published ?? []).map((item) => ({ number: item.number, conversationId: item.conversationId ?? 0 })),
+        published: async () => {
+          if (data().holdPublished) writeFileSync(dataFile(), JSON.stringify({ ...data(), publishedHeld: true }));
+          while (data().holdPublished) await new Promise((resolve) => setTimeout(resolve, 50));
+          return (data().published ?? []).map((item) => ({ number: item.number, conversationId: item.conversationId ?? 0 }));
+        },
         observe: async ({ repositoryId, prior }) => {
           const baselined = prior?.baselined === true,
             prs = { ...(prior?.prs ?? {}) },

@@ -1,3 +1,5 @@
+import { githubPublishedPullRequests } from "./github-worker.ts";
+import { reviewRead } from "./pr-review.ts";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { createServer } from "node:http";
 import { execFileSync, spawn } from "node:child_process";
@@ -25,7 +27,9 @@ import {
   socketPath,
   Request,
   Project,
+  Refused,
   errorText,
+  jobById,
   jobs,
   legacyProjectIds,
   listProjects,
@@ -33,6 +37,7 @@ import {
   notes,
   parse,
   projectDir,
+  workerWorktreeRoot,
   saveJob,
   saveProject,
   type GithubAuthorization,
@@ -42,10 +47,11 @@ import { ensureKnowledge, historyKnowledge, listKnowledge, readKnowledge, writeK
 import { searchProject } from "./knowledge-search.ts";
 import { loadProjectResourceLoader } from "./project-resources.ts";
 import { referencedPrBlock } from "./pr-monitor.ts";
+import { hostBoot, prepareReplacement } from "./host-restart.ts";
+import { pluginCatalog } from "./plugin-catalog.ts";
 import { plugins } from "./plugins.ts";
 import { expandSkillCommand, listSkills, skillNames, skillPreview } from "./coordinator-skills.ts";
 import { refCandidates, referencedItemsBlock, refPreview } from "./inline-refs.ts";
-import { recordInvokedSkill } from "./skill-profiles.ts";
 import { mcpCatalog, mcpPool } from "./mcp-servers.ts";
 import { resolveEntry, inbox } from "./inbox.ts";
 import { body } from "./http.ts";
@@ -54,7 +60,7 @@ import { feed, HOST_FEED, publishHost } from "./change-feed.ts";
 import { approvals } from "./approvals.ts";
 import { openHostAgent, type HostAgent } from "./host-agent.ts";
 import { profilesSnapshot, readStorage, readUi, setStorage, setTiers, setUi, tiersFor, tiersSnapshot } from "./host-documents.ts";
-import { memoryIndex, memoryRecent, undoMemory } from "./memory.ts";
+import { memoryIndex, memoryRecent, memoryWrites, undoMemory } from "./memory.ts";
 import { splitSkillToggles } from "./profiles.ts";
 import { createRemote, type RemoteAccess } from "./remote.ts";
 import { startWebhooks } from "./webhook.ts";
@@ -80,7 +86,7 @@ import { sendOwnerMessage, startTelegram } from "./telegram.ts";
 import type { JobsSnapshot } from "./jobs.ts";
 import { loadAutomations, rotateWebhookSecret, updateAutomations } from "./project-automations.ts";
 import { listArtifacts } from "./artifacts.ts";
-import { openDurableHost, durableHostSnapshot, durableHostActivity, type ProjectActivity } from "./durable-host.ts";
+import { openDurableHost, durableHostSnapshot, durableHostActivity, finishGrant, type ProjectActivity } from "./durable-host.ts";
 import {
   archiveConfig,
   archiveHistory,
@@ -109,7 +115,7 @@ import {
 } from "./github-authorization.ts";
 import { settingsApplication } from "./settings-application.ts";
 import { libraryImport, libraryList, libraryRead } from "./project-library.ts";
-import { attachmentContent, deleteUpload, listUploads, saveUpload, uploadRecord, uploadText } from "./uploads.ts";
+import { attachmentImageCopies, attachmentMessage, deleteUpload, listUploads, saveUpload, uploadRecord, uploadText } from "./uploads.ts";
 import { createModelRuntime, loadProviderExtensions } from "./provider-extensions.ts";
 import { openToolSummaries } from "./tool-summaries.ts";
 import { projectModelCatalog, projectModelPicker } from "./project-models.ts";
@@ -134,28 +140,32 @@ process.env.PI_PROJECTS_HOST = "1";
 initTheme("light", false);
 mkdirSync(home(), { recursive: true, mode: 0o700 });
 const lock = join(home(), "host.lock");
-if (existsSync(lock)) {
-  const value = readFileSync(lock, "utf8").trim();
-  if (!value) process.exit(0);
-  const pid = Number(value);
-  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("Invalid host lock. Inspect it before removing it.");
-  try {
-    process.kill(pid, 0);
-    process.exit(0);
-  } catch (error) {
-    if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error;
-    unlinkSync(lock);
+if (hostBoot.previous) {
+  if (readFileSync(lock, "utf8") !== String(process.pid)) throw new Error("Lost host ownership during restart");
+} else {
+  if (existsSync(lock)) {
+    const value = readFileSync(lock, "utf8").trim();
+    if (!value) process.exit(0);
+    const pid = Number(value);
+    if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("Invalid host lock. Inspect it before removing it.");
+    try {
+      process.kill(pid, 0);
+      process.exit(0);
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error;
+      unlinkSync(lock);
+    }
   }
+  let lockFd: number;
+  try {
+    lockFd = openSync(lock, "wx", 0o600);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "EEXIST") process.exit(0);
+    throw error;
+  }
+  writeFileSync(lockFd, String(process.pid));
+  closeSync(lockFd);
 }
-let lockFd: number;
-try {
-  lockFd = openSync(lock, "wx", 0o600);
-} catch (error) {
-  if (error instanceof Error && "code" in error && error.code === "EEXIST") process.exit(0);
-  throw error;
-}
-writeFileSync(lockFd, String(process.pid));
-closeSync(lockFd);
 if (existsSync(socketPath())) unlinkSync(socketPath());
 /** The skills installed right now (global, project-local, packages): built from disk on every call, never cached, so a skill installed a moment ago is found without a restart. Passive: never downloads a missing package. */
 const configuredSkills = (id: string) => loadProjectResourceLoader(loadProject(id), { passive: true });
@@ -165,6 +175,7 @@ const settingsUpdating = new Set<string>();
 const lifecycleChanging = new Set<string>();
 const ownerCloseFailed = new Set<string>();
 const githubInspection = createGithubInspection();
+let pluginsReady = false;
 let closing = false;
 let shutdownOperation: Promise<void> | undefined;
 const activeRequests = new Set<Promise<unknown>>();
@@ -223,6 +234,20 @@ async function withProjectLock<T>(id: string, operation: () => Promise<T>, durin
   } finally {
     release();
     if (projectLocks.get(id) === current) projectLocks.delete(id);
+  }
+}
+
+/** The disable refusal for a project's plugin that needs no lock to decide (its checkout needs it, or its work is in flight), or null. */
+function loadedPluginBlock(projectId: string, plugin: string): string | null {
+  ownedProjectDir(projectId);
+  return plugins.disableBlock(loadProject(projectId), plugin);
+}
+
+async function refusing<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    throw error instanceof Refused ? error : new Refused(errorText(error));
   }
 }
 
@@ -386,10 +411,6 @@ const rebindAuthorizations = (project: ReturnType<typeof loadProject>) =>
   plugins
     .workspaceProviders()
     .reduce((current, provider) => (provider.rebind ? provider.rebind(current) : current), rebindOneClickGithub(project));
-/** Worker worktrees for one-click grants live with the project data, outside the owner checkout. */
-function workerWorktreeRoot(id: string): string {
-  return join(projectDir(id), "worktrees");
-}
 
 async function persistWorkspaceGrant<T>(
   before: ReturnType<typeof loadProject>,
@@ -493,6 +514,8 @@ const PROJECT_LIST_ACTIONS: ReadonlySet<RequestData["action"]> = new Set(["creat
 
 function dispatch(input: RequestData): Promise<unknown> {
   // This request closes admission itself and must not wait on its own entry in activeRequests.
+  if (closing) return Promise.reject(new Refused("Host is stopping"));
+  if (input.action === "plugin-restart") return restartConfigured(input);
   if (input.action === "deploy-shutdown") return stopForDeploy(input.sha);
   const operation = trackRequest(() => dispatchRequest(input));
   if (PROJECT_LIST_ACTIONS.has(input.action)) void operation.then(() => publishHost("projects")).catch(() => {});
@@ -523,7 +546,7 @@ async function projectActivity(id: string): Promise<ProjectActivity> {
   return value;
 }
 
-async function dispatchRequest(input: RequestData): Promise<unknown> {
+async function dispatchRequest(input: RequestData, literalMessage = false): Promise<unknown> {
   if (closing) throw new Error("Host is stopping");
   switch (input.action) {
     case "web":
@@ -838,6 +861,8 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return memoryIndex(await knowledgeDir(input.projectId), { includeArchive: input.includeArchive });
     case "memory-recent":
       return memoryRecent(await knowledgeDir(input.projectId));
+    case "memory-writes":
+      return memoryWrites(await knowledgeDir(input.projectId), input.writes);
     case "chat-stop": {
       const project = loadProject(input.projectId);
       if (project.deleted || project.archived) throw new Error("Inactive project has no running turn to stop");
@@ -1247,38 +1272,85 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       });
     }
     case "plugins":
-      return { plugins: plugins.status(), labels: plugins.labels(), web: plugins.web() };
+      return {
+        plugins: input.id ? plugins.forProject(loadProject(input.id)) : plugins.status(),
+        labels: plugins.labels(),
+        web: plugins.web(),
+      };
+    case "project-plugin": {
+      // Work in flight refuses the disable at once; it does not queue behind a project lock the work itself holds.
+      if (!input.enabled) {
+        const early = loadedPluginBlock(input.id, input.plugin);
+        if (early) throw new Error(early);
+      }
+      return withProjectLock(input.id, async () => {
+        const inactive = loadProject(input.id);
+        if (inactive.deleted || inactive.archived) throw new Error("Inactive project settings cannot be changed");
+        // Opening the runtime may save a default workspace grant, so the project is read after it. The disable also reads the plugin's own
+        // unresolved writes, holds the plugin's pause meanwhile and saves in one synchronous step with its last work check.
+        if (input.enabled || inactive.disabledPlugins?.includes(input.plugin))
+          plugins.setEnabled(inactive, input.plugin, input.enabled, saveProject);
+        else {
+          const runtime = await durable(input.id);
+          await runtime.withRoot((root) => plugins.disable(() => loadProject(input.id), input.plugin, root, saveProject));
+        }
+        await (await durable(input.id)).refreshPrompts();
+        feed.publish(input.id, { topic: "settings" });
+        return { plugin: input.plugin, enabled: input.enabled };
+      });
+    }
+    case "plugin-restart":
+      throw new Error("Restart requires exclusive admission");
+    case "plugin-catalog":
+      if (!pluginsReady) throw new Refused("Plugins are still loading.");
+      return { ...hostBoot, entries: pluginCatalog.list() };
+    case "plugin-activate": {
+      if (!pluginsReady) throw new Refused("Plugins are still loading.");
+      const before = pluginCatalog.list().find((entry) => entry.id === input.plugin)?.state;
+      const entries = pluginCatalog.activate(input.plugin);
+      if (before === "available")
+        recordHostEvent("plugins", `${input.plugin} added to plugins.json by the owner; it loads at the next restart`);
+      return { ...hostBoot, entries };
+    }
     case "plugin": {
       const handler = plugins.rpc(input.plugin, input.method);
       if (!handler)
         throw new Error(`Plugin RPC ${input.plugin}.${input.method} is unavailable: the plugin is not loaded or has no such method`);
-      return handler({
-        params: input.params,
-        projectId: input.id,
-        withRoot: (id, fn) => withDurableOwner({ id, operation: (owner) => owner.withRoot(fn) }),
-        mutateIdle: (id, change) =>
-          lifecycle(id, change.validate, async (owner) => {
-            const view = await owner.snapshot(),
-              plan = await owner.jobs();
-            if (
-              view.chats.some((chat) => chat.busy) ||
-              view.coordinator.busy ||
-              view.coordinator.submissions.some((item) => item.status === "queued" || item.status === "placed") ||
-              workBusy(plan)
-            )
-              throw new Error("This change requires no active project work");
-            await closeLifecycleOwner(id, owner);
-            return withProjectLock(
-              id,
-              async () => {
-                const project = loadProject(id);
-                change.validate(project);
-                saveProject(change.apply(project));
-              },
-              true,
-            );
-          }),
-      });
+      const run = <T>(work: () => Promise<T>) => (input.id ? plugins.gate.run(input.id, input.plugin, work) : work());
+      return run(() =>
+        handler({
+          params: input.params,
+          projectId: input.id,
+          // An RPC without a project id reaches a project only through these two: each counts as the plugin's work in that project, from before the
+          // project is opened or locked until its effects are done, and is refused once the project turned the plugin off.
+          withRoot: (id, fn) =>
+            plugins.gate.run(id, input.plugin, () => withDurableOwner({ id, operation: (owner) => owner.withRoot(fn) })),
+          mutateIdle: (id, change) =>
+            plugins.gate.run(id, input.plugin, () =>
+              lifecycle(id, change.validate, async (owner) => {
+                const view = await owner.snapshot(),
+                  plan = await owner.jobs();
+                if (
+                  view.chats.some((chat) => chat.busy) ||
+                  view.coordinator.busy ||
+                  view.coordinator.submissions.some((item) => item.status === "queued" || item.status === "placed") ||
+                  workBusy(plan)
+                )
+                  throw new Error("This change requires no active project work");
+                await closeLifecycleOwner(id, owner);
+                return withProjectLock(
+                  id,
+                  async () => {
+                    const project = loadProject(id);
+                    change.validate(project);
+                    saveProject(change.apply(project));
+                  },
+                  true,
+                );
+              }),
+            ),
+        }),
+      );
     }
     case "provider-pr-inspect":
     case "provider-ci-inspect":
@@ -1557,6 +1629,62 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         unloaded: granted && granted !== "github" && !plugins.workspaceProvider(granted) ? [granted] : [],
       };
     }
+    case "pr-review-approve-step":
+    case "pr-review-tour":
+    case "pr-review-tour-status":
+    case "pr-review-open":
+    case "pr-review-files":
+    case "pr-review-file":
+    case "pr-review-lines":
+    case "pr-review-add":
+    case "pr-review-edit":
+    case "pr-review-delete":
+    case "pr-review-publish":
+    case "pr-review-checked":
+    case "pr-review-send":
+    case "pr-review-viewed": {
+      const project = loadProject(input.id),
+        provider = plugins.prProvider(input.provider),
+        source = provider?.review;
+      if (!provider?.applies(project) || !source || project.archived || project.deleted)
+        throw Error("Review not available for this project");
+      provider.validateId?.(input.pr);
+      const owner = await durable(input.id);
+      return owner.withRoot(async (root) => {
+        let chat = null;
+        let route;
+        if (
+          ["pr-review-tour", "pr-review-open", "pr-review-add", "pr-review-edit", "pr-review-delete", "pr-review-send"].includes(
+            input.action,
+          )
+        ) {
+          const repo = project.githubAuthorization?.[0];
+          const [plan, chats, receipts] = await Promise.all([
+            owner.jobs(),
+            owner.chats(),
+            input.provider === "github" && repo ? githubPublishedPullRequests(root, repo.numericId) : [],
+          ]);
+          const receipt = receipts.find((r) => String(r.number) === input.pr);
+          const url = provider.url(input.pr, project);
+          const job = plan.jobs.find((j) => (receipt ? j.conversationId === receipt.conversationId : j.pr?.replace(/\/$/, "") === url));
+          chat = chats.find((c) => c.conversationId === job?.chat) ?? null;
+          if (input.action === "pr-review-tour") {
+            const dest = job ? chat : chats.find((c) => c.id === input.chatId);
+            if (!dest || dest.archived) throw Error("Tour destination chat unavailable");
+            route = {
+              chat: Number(dest.conversationId),
+              ready: job ? JSON.stringify(job.ready) : null,
+              send: (text: string, id: string) => owner.followUp(dest.id, text, id, true),
+            };
+          }
+        }
+        return reviewRead(root, project, source, input, {
+          route,
+          chat: chat ? { id: chat.id, title: chat.title } : null,
+          send: (text, requestId, chatId) => dispatchRequest({ action: "message", id: input.id, text, requestId, chatId }, true),
+        });
+      });
+    }
     case "pr-watch":
     case "pr-hide": {
       const project = loadProject(input.id),
@@ -1654,7 +1782,9 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         },
       });
     case "message": {
-      const prepareJob = () => {
+      const origin: "telegram" | "owner" = input.origin ?? "owner",
+        chatId = input.chatId ?? "main";
+      const prepareJob = (): import("./state.ts").Job => {
         const project = loadProject(input.id);
         if (project.deleted) throw new Error("Project is deleted; admission is denied");
         if (project.archived) throw new Error("Project is archived; admission is denied");
@@ -1665,44 +1795,100 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           at: new Date().toISOString(),
           state: "queued",
           error: null,
+          origin,
           ...(input.chatId && input.chatId !== "main" ? { chatId: input.chatId } : {}),
           ...(input.attachments ? { attachments: input.attachments } : {}),
-        } satisfies import("./state.ts").Job;
+        };
+      };
+      // The runtime may have settled the job while it was being admitted, so the saved record is the base. Once the runtime holds the message, its
+      // skill grant is finished (a crash may have cut it off) and its saved content is dropped.
+      const markAdmitted = (job: import("./state.ts").Job) => {
+        const base = jobById(input.id, job.id) ?? job;
+        finishGrant(ownedProjectDir(input.id), base);
+        const { delivery: _saved, ...held } = { ...base, admitted: true as const };
+        saveJob(input.id, held);
+        return held;
       };
       return withDurableOwner({
         id: input.id,
         validate: (project) => {
-          if (project.deleted) throw new Error("Project is deleted; admission is denied");
-          if (project.archived) throw new Error("Project is archived; admission is denied");
+          if (!project.deleted && !project.archived) return;
+          // A repeat of a message the host already holds may have been admitted before the project went inactive, so only a first send is proven refused.
+          const text = `Project is ${project.deleted ? "deleted" : "archived"}; admission is denied`;
+          throw input.requestId && jobById(input.id, input.requestId) ? new Error(text) : new Refused(text);
         },
         operation: async (owner) => {
-          // A repeated request ID (Telegram update replay) returns the job it already admitted.
-          const prior = input.requestId ? jobs(input.id).find((job) => job.id === input.requestId) : undefined;
-          if (prior) return prior;
-          const job = prepareJob();
-          // The job keeps what the owner typed; the coordinator receives the expanded skill.
-          // `/skill:<name>` anywhere: skill blocks precede the owner's words. `@issue:/@doc:/@upload:/@file:` and `#123` / `PR #123`: compact untrusted blocks follow them.
-          const text =
-            (skillNames(job.text).length ? await expandSkillCommand(await configuredSkills(input.id), job.text) : job.text) +
-            (await referencedItemsBlock(loadProject(input.id), ownedProjectDir(input.id), job.text)) +
-            (await referencedPrBlock(loadProject(input.id), job.text));
-          if (text.length > 120_000)
-            throw new Error(`Message with its skills and references is too large to send (${text.length} characters; limit 120000)`);
-          for (const invoked of skillNames(job.text)) recordInvokedSkill(ownedProjectDir(input.id), invoked);
-          const plan = await owner.jobs();
-          if (plan.paused) throw new Error("Project plan is paused; admission is denied");
-          // Validate the chat before recording the job, so an unknown or archived chat leaves no ledger entry.
-          const chat = (await owner.chats()).find((item) => item.id === (input.chatId ?? "main"));
-          if (!chat) throw new Error("Unknown chat for this project");
-          if (chat.archived) throw new Error("Chat is archived; restore it before sending");
+          // A request ID names one message: a repeat must carry the same chat, text, attachments and origin, or it is refused before anything is touched.
+          // A record from before origins were stored has none and takes a repeat from any origin.
+          const prior = input.requestId ? jobById(input.id, input.requestId) : undefined;
+          if (
+            prior &&
+            ((prior.chatId ?? "main") !== chatId ||
+              prior.text !== input.text ||
+              JSON.stringify(prior.attachments ?? []) !== JSON.stringify(input.attachments ?? []) ||
+              (prior.origin !== undefined && prior.origin !== origin))
+          )
+            throw new Refused("This request id belongs to a different message; nothing was changed");
+          if (prior?.admitted) return prior;
+          if (prior && (await owner.ledgerSubmissions(chatId, [prior.id])).length) return markAdmitted(prior);
+          // A record without saved content proves neither where it came from nor what it said, and no runtime receipt was found: nobody's repeat rebuilds it.
+          if (prior && !prior.delivery && (prior.state === "queued" || prior.state === "running"))
+            throw new Refused("This saved message does not prove what it said or where it came from; send it again as a new message");
+          // A settled record the runtime has no submission for is history, not a message waiting to be sent.
+          if (prior && prior.state !== "queued" && prior.state !== "running") return prior;
+          // Everything that can refuse runs before anything is recorded or granted.
+          const { job, parts } = await refusing(async () => {
+            const job = prior ?? prepareJob();
+            // The saved content is the message; only a new message is built from the text (a legacy record without it never reaches here).
+            // The job keeps what the owner typed; the coordinator receives the expanded skill.
+            // `/skill:<name>` anywhere: skill blocks precede the owner's words. `@issue:/@doc:/@upload:/@file:` and `#123` / `PR #123`: compact untrusted blocks follow them.
+            const dir = ownedProjectDir(input.id);
+            const saved = job.delivery;
+            // The uploads are read once: the same reduced copies are checked here and handed to the runtime below.
+            const built = saved
+              ? undefined
+              : literalMessage
+                ? { content: job.text, images: [] }
+                : attachmentMessage(
+                    dir,
+                    (skillNames(job.text).length ? await expandSkillCommand(await configuredSkills(input.id), job.text) : job.text) +
+                      (await referencedItemsBlock(loadProject(input.id), dir, job.text)) +
+                      (await referencedPrBlock(loadProject(input.id), job.text)),
+                    job.attachments,
+                    owner.acceptsImages,
+                  );
+            const content = saved?.content ?? built!.content;
+            // The limit applies to what the runtime receives, attachment block included, so a skill is never granted for a message it would refuse.
+            if (content.length > 120_000)
+              throw new Error(`Message with its skills and references is too large to send (${content.length} characters; limit 120000)`);
+            if (saved && saved.images === undefined && job.attachments?.length)
+              throw new Error("The saved message does not say which images went with it; send it again as a new message");
+            const images = built?.images ?? attachmentImageCopies(dir, saved!.images, true);
+            if (images.length !== (saved?.images?.length ?? images.length))
+              throw new Error("An image attached to the saved message is no longer available; send it again as a new message");
+            if ((await owner.jobs()).paused) throw new Error("Project plan is paused; admission is denied");
+            // Validate the chat before recording the job, so an unknown or archived chat leaves no ledger entry.
+            const chat = (await owner.chats()).find((item) => item.id === chatId);
+            if (!chat) throw new Error("Unknown chat for this project");
+            if (chat.archived) throw new Error("Chat is archived; restore it before sending");
+            return {
+              job: {
+                ...job,
+                origin,
+                delivery: { content, ...(literalMessage ? { literal: true as const } : {}), images: images.map(({ id }) => id) },
+              },
+              parts: images.map(({ part }) => part),
+            };
+          });
           saveJob(input.id, job);
-          await owner.admit(attachmentContent(ownedProjectDir(input.id), text, job.attachments, owner.acceptsImages), {
+          const effective = job.delivery!.content;
+          await owner.admit(parts.length ? [{ type: "text", text: effective }, ...parts] : effective, {
             requestId: job.id,
-            origin: input.origin,
+            origin: job.origin === "telegram" ? "telegram" : undefined,
             chatId: input.chatId,
             title: job.text,
           });
-          return job;
+          return markAdmitted(job);
         },
       });
     }
@@ -2058,12 +2244,43 @@ const server = createServer(async (request, response) => {
     const data = await dispatch(input);
     response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, data }));
   } catch (error) {
-    response.writeHead(400, { "content-type": "application/json" }).end(JSON.stringify({ ok: false, error: errorText(error) }));
+    response
+      .writeHead(400, { "content-type": "application/json" })
+      .end(JSON.stringify({ ok: false, error: errorText(error), ...(error instanceof Refused ? { refused: true } : {}) }));
   }
 });
 server.requestTimeout = 120000;
 // Plugins load before the first request or project restore; a failing plugin is recorded, never fatal.
-for (const status of await plugins.load())
+for (const status of await plugins.load((name) => {
+  const eligible = (project: ReturnType<typeof loadProject>) => {
+    if (project.archived || project.deleted || project.disabledPlugins?.includes(name)) throw new Error("Plugin unavailable for project");
+  };
+  return {
+    pause: (id, reason, requestId) =>
+      lifecycle(id, eligible, async (owner) => {
+        const state = await owner.jobs();
+        if (state.paused) return state.pauseOwner === name;
+        const claim = JSON.stringify([name, requestId]);
+        if (state.lastPluginPause === claim) return false;
+        await owner.pause({ name, claim });
+        recordHostEvent("lifecycle", `paused:${id}: ${name}: ${reason.slice(0, 500)}`);
+        return true;
+      }),
+    owns: (id) => withDurableOwner({ id, operation: async (owner) => (await owner.jobs()).pauseOwner === name }),
+    resume: (id) =>
+      lifecycle(id, eligible, async (owner) => {
+        if ((await owner.jobs()).pauseOwner !== name) return false;
+        await owner.resume();
+        recordHostEvent("lifecycle", `resumed:${id}: ${name}`);
+        return true;
+      }),
+    notice: async (message) => {
+      const detail = `${name}: ${message.slice(0, 500)}`;
+      recordHostEvent("plugins", detail);
+      await sendOwnerMessage(detail);
+    },
+  };
+}))
   process.stderr.write(
     JSON.stringify({
       event: status.state === "loaded" ? "plugin-loaded" : "plugin-failed",
@@ -2074,6 +2291,7 @@ for (const status of await plugins.load())
       ...(status.error ? { error: status.error } : {}),
     }) + "\n",
   );
+pluginsReady = true;
 server.listen(socketPath(), () => {
   if (closing) return;
   void loadProviderExtensions().then(({ status }) =>
@@ -2105,7 +2323,28 @@ process.on("SIGINT", () => {
   void shutdown();
 });
 
-function shutdown(): Promise<void> {
+async function restartConfigured(input: Extract<RequestData, { action: "plugin-restart" }>) {
+  closing = true;
+  try {
+    if (input.instance !== hostBoot.instance) throw new Error("Host instance changed. Reopen Plugins before confirming.");
+    if (!pluginsReady) throw new Refused("Plugins are still loading.");
+    await Promise.allSettled([...activeRequests]);
+    await quietWindow(runningToolCalls);
+    if (ownerCloseFailed.size) throw new Error("A project could not close safely. Catalog restart refused.");
+    if (shutdownOperation || deployBusy() || readFileSync(lock, "utf8") !== String(process.pid))
+      throw new Error("Host ownership changed or another lifecycle operation is running.");
+    if (pluginCatalog.list().find((entry) => entry.id === input.plugin)?.state !== "configured")
+      throw new Error("Plugin is not awaiting restart.");
+    const replace = prepareReplacement();
+    setTimeout(() => void shutdown(replace), 50);
+    return { stopping: true };
+  } catch (error) {
+    closing = !!shutdownOperation;
+    throw new Refused(errorText(error));
+  }
+}
+
+function shutdown(restart?: (home: string) => never): Promise<void> {
   if (shutdownOperation) return shutdownOperation;
   closing = true;
   closeArchives();
@@ -2176,11 +2415,15 @@ function shutdown(): Promise<void> {
       report(error);
     }
     try {
-      if (existsSync(lock) && readFileSync(lock, "utf8") === String(process.pid)) unlinkSync(lock);
+      if (existsSync(lock) && readFileSync(lock, "utf8") === String(process.pid)) {
+        if (restart && !failed) restart(home());
+        unlinkSync(lock);
+      }
     } catch (error) {
       report(error);
     }
-    process.exit(failed ? 1 : 0);
+    // Do not let a supervisor retry a refused replacement with unverified code.
+    process.exit(failed && !restart ? 1 : 0);
   });
   return shutdownOperation;
 }

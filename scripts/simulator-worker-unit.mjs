@@ -111,6 +111,15 @@ try {
   assert.ok((await leases.acquire(simulatorResource(udid), { projectId, threadId: "job-a" }, 600_000)).acquired);
   const booted = await call("job-a", 7, { operation: "boot" });
   assert.equal(stateOf(), "Booted", "W2 the clone booted");
+  assert.deepEqual(
+    readFileSync(calls, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+      .find((args) => args[0] === "on"),
+    ["on", udid],
+    "No exclusions by default",
+  );
   assert.match(booted.output[0].text, /Booted/, "W2 the answer reports the booted state");
   assert.deepEqual(acquired, [], "W2 no maintenance lease was requested");
   assert.deepEqual(
@@ -217,6 +226,35 @@ try {
     deletes().every(([, id]) => id === stray),
     "X4 simslim deletes only the stray",
   );
+  // Y1 a persisted uncertain outcome or an interrupted pending write is reported as unresolved (the host refuses a plugin disable on it),
+  // while the lifecycle pause itself still works, so restoring or recovering the project is not blocked.
+  {
+    const saved = readFileSync(join(projectDir, "simulator.json"), "utf8");
+    const stored = JSON.parse(saved);
+    assert.equal(simulators.unresolved(projectId), null, "Y1 a settled store reports nothing");
+    writeFileSync(join(projectDir, "simulator.json"), JSON.stringify({ ...stored, uncertain: "Simulator boot outcome is unknown." }));
+    assert.match(simulators.unresolved(projectId) ?? "", /unknown/i, "Y1 an uncertain outcome is reported");
+    simulators.pause(projectId)();
+    writeFileSync(
+      join(projectDir, "simulator.json"),
+      JSON.stringify({ ...stored, pending: { requestId: randomUUID(), operation: "boot", udid, sourceUdid: null } }),
+    );
+    assert.match(simulators.unresolved(projectId) ?? "", /interrupted/i, "Y1 an interrupted write is reported");
+    simulators.pause(projectId)();
+    writeFileSync(join(projectDir, "simulator.json"), saved);
+    assert.equal(simulators.unresolved(projectId), null);
+  }
+  // Y2 a pause held by a plugin disable survives another lifecycle pause being taken and resumed (and a resume called twice).
+  {
+    const held = simulators.pause(projectId);
+    const other = simulators.pause(projectId);
+    other();
+    other();
+    const configure = () => simulators.configure(projectId, { enabled: true, requestId: randomUUID() });
+    await assert.rejects(configure, /lifecycle is changing/, "Y2 the held pause stays");
+    held();
+    await configure();
+  }
   console.log("simulator-worker-unit: ok");
 } finally {
   rmSync(base, { recursive: true, force: true });

@@ -3,6 +3,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { parseFrontmatter, type ResourceLoader, type Skill } from "@earendil-works/pi-coding-agent";
 import { defineExtension, defineTool, type Conversation, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
+import { skillPresent } from "./skill-profiles.ts";
 import type { Context } from "@earendil-works/chord";
 
 /** Owner-invoked skills: `/skill:<name>` anywhere in the composer (start of text or after whitespace), expanded like pi does before it reaches the coordinator. */
@@ -28,7 +29,8 @@ const order: Record<SkillSource, number> = { repo: 0, global: 1, package: 2 };
 export function listSkills(loader: Loader) {
   return loader
     .getSkills()
-    .skills.map((skill) => ({
+    .skills.filter(skillPresent)
+    .map((skill) => ({
       name: skill.name,
       description: skill.description,
       source: source(skill),

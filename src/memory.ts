@@ -140,17 +140,29 @@ export async function preferencesText(dir: string): Promise<string> {
     : text;
 }
 
+type HistoryRecord = Awaited<ReturnType<typeof historyKnowledge>>[number];
+
+/** The one original write of `revision`; revisions are content hashes, so a revision written twice, or only produced by an undo, names no write. */
+function undoTarget(history: readonly HistoryRecord[], revision: string): HistoryRecord {
+  const writes = history.filter((item) => item.revision === revision && item.author !== "memory-undo");
+  if (writes.length !== 1) throw new Error("No single recorded write produced this revision; nothing to undo");
+  return writes[0]!;
+}
+
 /** Undo the write that produced `revision`: the prior text comes back, or a just-created entry is removed. The undo is itself a revision. */
 export async function undoMemory(dir: string, path: string, revision: string): Promise<{ entry: MemoryEntry | null }> {
   const current = await readKnowledge(dir, path);
   if (current.revision !== revision) throw new Error(`Memory revision conflict for ${path}; reread before undoing`);
-  const record = (await historyKnowledge(dir, path)).findLast((item) => item.revision === revision);
-  if (!record) throw new Error(`No recorded write produced this revision of ${path}; nothing to undo`);
+  const record = undoTarget(await historyKnowledge(dir, path), revision);
+  // Checked again under the knowledge lock: a write of the same text after the read above makes the click stale.
+  const guard = (history: HistoryRecord[]) => {
+    if (undoTarget(history, revision).id !== record.id) throw new Error(`Memory write changed for ${path}; reread before undoing`);
+  };
   if (record.priorText === null) {
-    await deleteKnowledge(dir, path, revision, "memory-undo");
+    await deleteKnowledge(dir, path, revision, "memory-undo", guard);
     return { entry: null };
   }
-  const restored = await writeKnowledge({ dir, path, text: record.priorText, expectedRevision: revision, author: "memory-undo" });
+  const restored = await writeKnowledge({ dir, path, text: record.priorText, expectedRevision: revision, author: "memory-undo" }, guard);
   return { entry: publicEntry(describe(path, restored.text, restored)) };
 }
 
@@ -164,6 +176,7 @@ export type MemoryWrite = {
   current: boolean;
 };
 export const RECENT_LIMIT = 50;
+export const WRITES_LIMIT = 20;
 /**
  * Recent writes, newest first, with whether `memory-undo` reverted each and whether it is still the entry's current revision,
  * so a client reloaded after an undo shows "Undone" instead of offering Undo again.
@@ -173,20 +186,73 @@ export async function memoryRecent(dir: string): Promise<{ writes: MemoryWrite[]
   const records = await recentKnowledgeHistory(dir, RECENT_LIMIT * 4);
   const newest = new Map<string, string>();
   for (const record of records) if (!newest.has(record.path)) newest.set(record.path, record.revision);
-  const undone = new Set(
-    records.filter((record) => record.author === "memory-undo").map((record) => `${record.path}\0${record.priorRevision}`),
-  );
-  const writes = records
-    .filter((record) => record.author !== "memory-undo")
-    .slice(0, RECENT_LIMIT)
-    .map((record) => ({
+  // Newest first: an undo counts for the writes after it in the list, never for a later write that happens to produce the same revision (revisions are content hashes).
+  const undone = new Set<string>(),
+    listed = new Set<string>(),
+    writes: MemoryWrite[] = [];
+  for (const record of records) {
+    const key = `${record.path}\0${record.revision}`;
+    if (record.author === "memory-undo") {
+      undone.add(`${record.path}\0${record.priorRevision}`);
+      continue;
+    }
+    if (writes.length >= RECENT_LIMIT || listed.has(key)) continue;
+    listed.add(key);
+    writes.push({
       path: record.path,
       revision: record.revision,
       author: record.author,
       updatedAt: record.updatedAt,
       created: record.priorText === null,
-      undone: undone.has(`${record.path}\0${record.revision}`),
+      undone: undone.has(key),
       current: newest.get(record.path) === record.revision,
-    }));
+    });
+  }
+  // Two writes of one revision (identical text written again) cannot be told apart by a chat row, so neither is offered Undo; the window above may
+  // not hold the other one, so each current write's own history decides.
+  await Promise.all(
+    writes
+      .filter((write) => write.current)
+      .map(async (write) => {
+        const history = await historyKnowledge(dir, write.path);
+        if (history.filter((item) => item.revision === write.revision && item.author !== "memory-undo").length > 1) write.current = false;
+      }),
+  );
+  return { writes };
+}
+
+/**
+ * The state of specific writes, read from the history of each path alone: how a write older than the recent window is proven undoable, or not.
+ * A write the history does not hold is left out of the answer, so absence means unknown, never undoable.
+ */
+export async function memoryWrites(dir: string, wanted: readonly { path: string; revision: string }[]): Promise<{ writes: MemoryWrite[] }> {
+  const writes: MemoryWrite[] = [];
+  for (const path of new Set(wanted.slice(0, WRITES_LIMIT).map((item) => item.path))) {
+    let history: Awaited<ReturnType<typeof historyKnowledge>>;
+    try {
+      history = await historyKnowledge(dir, path);
+    } catch {
+      continue;
+    }
+    // The entry itself says which revision is current; a document edited outside the history, or removed, makes no write current.
+    const current = await readKnowledge(dir, path).then(
+      (entry) => entry.revision,
+      () => undefined,
+    );
+    for (const { revision } of wanted.slice(0, WRITES_LIMIT).filter((item) => item.path === path)) {
+      const at = history.findLastIndex((item) => item.revision === revision && item.author !== "memory-undo");
+      if (at >= 0)
+        writes.push({
+          path,
+          revision,
+          author: history[at]!.author,
+          updatedAt: history[at]!.updatedAt,
+          created: history[at]!.priorText === null,
+          undone: history.slice(at + 1).some((item) => item.author === "memory-undo" && item.priorRevision === revision),
+          current:
+            current === revision && history.filter((item) => item.revision === revision && item.author !== "memory-undo").length === 1,
+        });
+    }
+  }
   return { writes };
 }

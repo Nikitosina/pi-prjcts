@@ -36,7 +36,7 @@ export async function resolveContinuationBranch(project: Project, ref: string, s
   const repository = authorization.repositories.find((item) => item.repositoryId === scope.repositoryId);
   if (!repository) throw new Error("Workspace scope repository is not host-authorized");
   if (authorization.provider === "github") return gitBranch(project, ref, repository.ownerCheckout);
-  const vcs = plugins.vcsProvider(authorization.provider);
+  const vcs = plugins.vcsProvider(authorization.provider, project);
   if (!vcs) throw new Error(`The ${authorization.provider} plugin is not loaded, so branch ownership cannot be verified`);
   return vcs.resolveContinuation(project, ref, repository.ownerCheckout);
 }

@@ -28,6 +28,8 @@ export default { name: "kindh", register(api) { api.provide({ vcs: {
 );
 process.env.PI_PROJECTS_PLUGINS = pluginFile;
 const { loadPlugins } = await import("../src/plugins.ts");
+const { readHead } = await import("../src/vcs.ts");
+const { verificationProviderProblem } = await import("../src/project-settings.ts");
 const { proofTools } = await import("../src/proof.ts");
 const { ResourceLeases } = await import("../src/resource-leases.ts");
 assert.ok((await loadPlugins()).every((item) => item.state === "loaded"));
@@ -56,6 +58,7 @@ const { tools } = proofTools({
   projectId: "p",
   controlRoot: join(base, "control"),
   background: {},
+  readHead,
   leases: new ResourceLeases(),
   // Reaching the shell policy means every HEAD check passed.
   shell: () => ({ refusal: "SHELL-REACHED" }),
@@ -73,6 +76,7 @@ const run = async ({ cwd, candidate, helper = false }) => {
 };
 
 try {
+  assert.match(verificationProviderProblem({ workspaceAuthorization: { provider: "kindh" } }), /kindh.*verificationHead/);
   // F1/F6 the candidate passes on git and on a plugin kind whose HEAD comes from its provider.
   assert.equal(await run({ cwd: repo, candidate: second }), "SHELL-REACHED", "F6 git on the candidate runs");
   writeFileSync(join(base, "arclike", ".kindh", "head"), "c".repeat(40));

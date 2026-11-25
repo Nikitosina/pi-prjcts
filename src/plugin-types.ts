@@ -70,6 +70,8 @@ export type VcsProvider = {
   ): Promise<CodeDiffParts>;
   /** codeDiff honors `helpers.path`; without it the host refuses path narrowing for this kind. */
   codeDiffPath?: true;
+  /** Name-status output between the candidate's merge base with the provider's base branch and candidate (no working changes). Throw on failure. */
+  candidateNameStatus?(root: string, candidate: string): Promise<string>;
   /** Branch, head and status lines of a worker worktree. */
   workerState(root: string): Promise<{ branch: string; head: string; status: string }>;
   /** Resolves and authorizes an existing branch (or PR) for a new worker thread to continue. */
@@ -231,6 +233,8 @@ export type WorkspaceProvider = {
   /** Names, branch and base of a worker worktree: frozen with the receipt on first allocation, then reused. */
   plan(context: BindContext): Promise<AllocationPlan>;
   attach(context: AttachContext): Promise<WorkerAttachment>;
+  /** Opts in to verification with the bound worker shell guard. Read the full current commit from the worktree; throw if unreadable. */
+  verificationHead?(workDir: string): Promise<string>;
   /** Explicit chat ownership, without worker publication policy or a fabricated Job. */
   coordinator?: {
     plan(context: CoordinatorBindContext): Promise<AllocationPlan>;
@@ -325,7 +329,67 @@ export type PrDetailData = {
   draft?: boolean;
   review?: PrCardData["review"];
 };
+export type PrCheck = { name: string; result: string };
+export type PrIteration = { head: string; base: string; checks?: PrCheck[] };
+export type PrRange = { base: string; head: string };
+export type PrFile = { patchId?: string; path: string; status: string; blob: string; stats?: { additions: number; deletions: number } };
+export type PrReviewThread = {
+  id?: string;
+  path: string;
+  side: "LEFT" | "RIGHT";
+  line: number | null;
+  commit: string | null;
+  resolved: boolean;
+  outdated: boolean;
+  comments: { author: string; body: string; createdAt?: string }[];
+  severity?: string;
+  kind?: "ai" | "human";
+};
+export type PrReviewSnapshot = {
+  description?: string;
+  providerId?: string;
+  url?: string;
+  branch?: string;
+  baseBranch?: string;
+  state?: string;
+  title: string;
+  author: string;
+  head: string;
+  iterations: PrIteration[];
+  notice?: string;
+  threads: PrReviewThread[];
+};
+export type PrVerdict = "COMMENT" | "APPROVE" | "REQUEST_CHANGES";
+export type PrPublish =
+  | {
+      kind: "review";
+      verdict: PrVerdict;
+      summary: string;
+      comments: { path: string; side: "LEFT" | "RIGHT"; from: number; to: number; body: string; head: string }[];
+    }
+  | { kind: "reply"; threadId: string; body: string }
+  | { kind: "resolve" | "unresolve"; threadId: string };
+export type PrReviewSource = {
+  publish?(project: Project, id: PrId, snapshot: PrReviewSnapshot, op: PrPublish): Promise<{ url: string }>;
+  capabilities: {
+    publish?: boolean;
+    reply?: boolean;
+    resolve?: boolean;
+    /** Verdicts the provider can publish; every verdict when absent. */
+    verdicts?: PrVerdict[];
+    viewedSync: boolean;
+    annotations: boolean;
+    issues: boolean;
+    suggestions: boolean;
+  };
+  authorize(project: Project): Promise<string>;
+  snapshot(project: Project, id: PrId, observed: readonly string[]): Promise<PrReviewSnapshot>;
+  files(project: Project, id: PrId, range: PrRange): Promise<PrFile[]>;
+  fileDiff(project: Project, id: PrId, path: string, range: PrRange): Promise<string>;
+  fileLines(project: Project, id: PrId, path: string, sha: string, from: number, count: number): Promise<string[]>;
+};
 export type PrProvider = {
+  review?: PrReviewSource;
   id: string;
   /** Shown as the card group and in events ("GitHub", or a plugin's label). */
   label: string;
@@ -407,7 +471,7 @@ export type FollowProvider = {
     prior: FollowRepoState | undefined;
     signal: AbortSignal;
   }): Promise<{ state: FollowRepoState; items: FollowItem[]; failed: FollowFailure[] }>;
-  published(root: Conversation): Promise<Array<{ number: number; conversationId: number }>>;
+  published(root: Conversation, project: Project): Promise<Array<{ number: number; conversationId: number }>>;
 };
 
 // ---- merge (result acceptance) ----
@@ -487,6 +551,8 @@ export type WorkerToolsProvider = {
 export type LifecycleHooks = {
   /** Called before a project lifecycle change (pause, resume, archive, delete); throw to refuse it. Returns the resume callback. */
   pause?(projectId: string): () => void;
+  /** A write of this project whose outcome is unknown and kept outside the Durable store; the host refuses to turn the plugin off while it answers a reason. Fails closed: a throw refuses too. */
+  unresolved?(projectId: string): string | null;
   /** Host shutdown: abort outstanding work. */
   close?(): Promise<void>;
 };
@@ -532,6 +598,13 @@ export type LeaseAnswer =
   | { acquired: true; resource: string; until: string }
   | { acquired: false; resource: string; heldBy: LeaseHolder; until: string; waitedMs: number };
 
+export type ProjectPauseControl = {
+  pause(id: string, reason: string, requestId: string): Promise<boolean>;
+  resume(id: string): Promise<boolean>;
+  owns(id: string): Promise<boolean>;
+  notice(message: string): Promise<void>;
+};
+
 export type HostPluginApi = {
   /** The plugin's own name. */
   name: string;
@@ -540,7 +613,11 @@ export type HostPluginApi = {
   lib: PluginLib;
   provide(capabilities: PluginCapabilities): void;
   projects: {
+    /** Available only on the running host. Resume never releases another caller's pause. */
+    control?: ProjectPauseControl;
     load(id: string): Project;
+    /** Every project, for host-wide work that must still honor a project's plugin switch. */
+    list(): Project[];
     /** The project's state directory (`$PI_PROJECTS_HOME/<id>`), for per-project plugin files. */
     dir(id: string): string;
     /** Provider-owned top-level project records (kept verbatim by the host even when no plugin understands them). */
@@ -548,6 +625,13 @@ export type HostPluginApi = {
     /** Digest of the project's workspace grant; provider authorizations bind to it. */
     authorizationFingerprint(project: Project): string;
     trustedOwner(): string;
+    /** The checkout roots the host owns for the project: its folder and the real workspaces under its worker worktree root (no `git worktree list`). */
+    workspaceRoots(id: string): string[];
+    /**
+     * Runs host-wide work for one project through the project's plugin gate: refused when the project turned the plugin off, counted until it
+     * settles (a disable waits for it), so deletions and other effects happen while the project still has the plugin on.
+     */
+    work<T>(id: string, work: () => Promise<T>): Promise<T>;
   };
   exec: {
     /** Runs a binary without throwing; the exit code is data. */

@@ -38,3 +38,12 @@ Each file: H1, one paragraph, then exactly four H2s in order: `Sub-features`, `H
 - [Plugins](./plugins.md) — a plugin under development on the private host (`launch --plugin`), its row in the Plugins section and the `plugins` RPC. Scripted.
 - [UI 2.0 Prompt blocks](./ui2-prompts.md) — Settings → Prompt: block list with switches, badges and tokens, one editor, custom blocks, reorder, restore default, drafts, stale-write conflicts, preview, Host agent, 390 px. Scripted.
 - [Storage and Clean up](./storage.md) — Settings → Storage rows and the Clean up button ending with its run summary. Scripted.
+
+`pr-review`: launch with `--review-fixture`, doctor, then drive `pr-review`. A local contributor checkout and stub gh supply two heads, four files across directories, a large multi-hunk patch, and open and resolved threads. Drive the PR row and chat #7, file navigation, Viewed and gap expansion; capture unified, split, resolved, expanded, context, since-you-looked, light and 390 px.
+
+`review-tour`: launch with `--review-fixture`, doctor, then drive `review-tour`. The scout reads the fetched calendar; capture both chat routes, building, stale and rebuilt maps, viewed files and the light theme.
+
+`review-drafts`: launch with `--review-fixture`. Measure the layout toggle at a file boundary, inspect a colleague PR, then link the fixture PR to a real fake-provider Job and exercise the draft and batch flow.
+Add `--review-stress` at launch to measure the toggle after loading 16 files. The draft journey reads from Main and checks delivery in the Job's separate Calendar maintenance chat.
+
+`review-publish`: launch with `--review-fixture`, doctor, then drive `review-publish`. The owner submits one selected draft and keeps a worker draft pending. The stub applies the reply but drops its receipt; the room shows the uncertain state.

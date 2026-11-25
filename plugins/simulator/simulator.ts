@@ -69,6 +69,25 @@ export function createSimulators(api: HostPluginApi) {
   type Orientation = Static<typeof Orientation>;
   const Uuid = Type.String({ pattern: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" });
   const Device = Type.Object({ udid: Uuid, name: Type.String(), state: Type.String(), osVersion: Type.String(), set: Type.String() });
+  const categories = [
+    "apps",
+    "connectivity",
+    "family",
+    "health",
+    "icloud",
+    "mdm",
+    "messaging",
+    "other",
+    "photos",
+    "pim",
+    "search",
+    "siri",
+    "store",
+    "telemetry",
+    "web",
+    "widgets",
+  ] as const;
+  const KeepCategories = Type.Array(Type.Union(categories.map((id) => Type.Literal(id))), { uniqueItems: true });
   const Slim = Type.Object({
     managedDisabled: Type.Integer(),
     managedTotal: Type.Integer(),
@@ -102,6 +121,7 @@ export function createSimulators(api: HostPluginApi) {
       projectId: Uuid,
       enabled: Type.Boolean(),
       sourceUdid: Type.Union([Uuid, Type.Null()]),
+      keepCategories: Type.Optional(KeepCategories),
       owned: Type.Array(Owned, { maxItems: MAX_OWNED }),
       pending: Type.Union([Pending, Type.Null()]),
       uncertain: Type.Union([Type.String(), Type.Null()]),
@@ -130,13 +150,23 @@ export function createSimulators(api: HostPluginApi) {
   const frames = new Map<string, Frame>();
   const captures = new Map<string, Promise<Frame>>();
   const captureControllers = new Set<AbortController>();
-  const transitions = new Set<string>();
+  const transitions = new Map<string, number>();
   function pauseSimulatorManagement(id: string): () => void {
     if (tasks.has(id) || locks.has(id)) throw Error("Wait for simulator management to finish before changing project lifecycle");
-    transitions.add(id);
+    transitions.set(id, (transitions.get(id) ?? 0) + 1);
+    let resumed = false;
     return () => {
-      transitions.delete(id);
+      if (resumed) return;
+      resumed = true;
+      const left = (transitions.get(id) ?? 1) - 1;
+      if (left) transitions.set(id, left);
+      else transitions.delete(id);
     };
+  }
+  /** The persisted outcome the owner has not resolved (a disable of the plugin is refused on it; restoring or recovering is not), or null. */
+  function unresolvedSimulatorOutcome(id: string): string | null {
+    const store = readStore(id);
+    return store.uncertain ? `Resolve the simulator outcome first: ${store.uncertain}` : null;
   }
   let stopping = false;
   const simslim = () => process.env.PI_PROJECTS_SIMSLIM || "/opt/homebrew/bin/simslim";
@@ -147,11 +177,18 @@ export function createSimulators(api: HostPluginApi) {
   const simulatorEnabled = (id: string) => readStore(id).enabled;
 
   /** Management is on by default; the owner may turn it off (keeping the clones and all their data) or pin the default clone source. */
-  async function configureSimulator(id: string, input: { enabled: boolean; sourceUdid?: string; requestId: string }) {
+  async function configureSimulator(
+    id: string,
+    input: { enabled?: boolean; sourceUdid?: string; keepCategories?: Static<typeof KeepCategories>; requestId: string },
+  ) {
     await locked(id, async () => {
       activeProject(id);
       const store = readStore(id),
-        fingerprint = JSON.stringify({ enabled: input.enabled, sourceUdid: input.sourceUdid?.toUpperCase() ?? null });
+        fingerprint = JSON.stringify({
+          enabled: input.enabled,
+          sourceUdid: input.sourceUdid?.toUpperCase() ?? null,
+          keepCategories: input.keepCategories,
+        });
       if (repeated(store, input.requestId, fingerprint)) return;
       if (store.pending || tasks.has(id)) throw Error("Simulator operation is still running or unresolved");
       if (input.sourceUdid) {
@@ -159,7 +196,8 @@ export function createSimulators(api: HostPluginApi) {
         if (!source) throw Error("Choose an available iOS simulator in the default device set");
         store.sourceUdid = source.udid;
       }
-      store.enabled = input.enabled;
+      if (input.enabled !== undefined) store.enabled = input.enabled;
+      if (input.keepCategories) store.keepCategories = input.keepCategories;
       store.receipts[input.requestId] = { fingerprint, status: "done" };
       writeStore(id, store);
       dropFrames(id);
@@ -352,6 +390,8 @@ export function createSimulators(api: HostPluginApi) {
     return {
       enabled: store.enabled,
       sourceUdid: store.sourceUdid,
+      categories,
+      keepCategories: store.keepCategories ?? [],
       defaultSourceUdid: store.sourceUdid ?? defaultSource(devices)?.udid ?? null,
       maxOwned: MAX_OWNED,
       status,
@@ -467,15 +507,13 @@ export function createSimulators(api: HostPluginApi) {
         store.owned.push(owned);
         writeStore(id, store);
         await ownedDevice(owned, await inventory(signal));
-        await command(simslim(), ["on", udid], signal, 660000);
-        await confirmedSlim(udid, signal);
+        await bootSlim(udid, store.keepCategories, signal);
       } else {
         const owned = targetOf(store, pending.udid);
         const device = await ownedDevice(owned, await inventory(signal));
         switch (operation) {
           case "boot":
-            await command(simslim(), ["on", device.udid], signal, 660000);
-            await confirmedSlim(device.udid, signal);
+            await bootSlim(device.udid, store.keepCategories, signal);
             break;
           case "shutdown":
             if (device.state !== "Shutdown") await command(simslim(), ["shutdown", device.udid, "--json"], signal, 120000);
@@ -486,8 +524,7 @@ export function createSimulators(api: HostPluginApi) {
             await ownedDevice(owned, await inventory(signal));
             await command(simslim(), ["erase", device.udid, "--json"], signal, 180000);
             await ownedDevice(owned, await inventory(signal));
-            await command(simslim(), ["on", device.udid], signal, 660000);
-            await confirmedSlim(device.udid, signal);
+            await bootSlim(device.udid, store.keepCategories, signal);
             break;
           case "erase":
             if (device.state !== "Shutdown") throw Error("Only a shut-down clone is erased");
@@ -564,9 +601,15 @@ export function createSimulators(api: HostPluginApi) {
     frames.set(frameKey(id, udid), frame);
     return frame;
   }
-  async function confirmedSlim(udid: string, signal: AbortSignal) {
+  async function bootSlim(udid: string, keep: Store["keepCategories"], signal: AbortSignal) {
+    const flags = keep?.length ? ["--except", keep.join(",")] : [];
+    await command(simslim(), ["on", udid, ...flags], signal, 660000);
     const slim = parse(Slim, JSON.parse(await command(simslim(), ["status", udid, "--json"], signal)));
-    if (!slim.booted || slim.verdict !== "slim") throw Error("simslim did not confirm a booted slim simulator");
+    const confirmed =
+      slim.verdict === "slim" ||
+      (keep?.length && slim.verdict === "partially slim") ||
+      (keep?.length === categories.length && slim.verdict === "stock");
+    if (!slim.booted || !confirmed) throw Error("simslim did not confirm a booted slim simulator");
   }
   async function inventory(signal?: AbortSignal): Promise<Device[]> {
     const devices = parse(Type.Array(Device), JSON.parse(await command(simslim(), ["list", "--json"], signal)));
@@ -759,6 +802,7 @@ export function createSimulators(api: HostPluginApi) {
     MAX_OWNED,
     rotate: rotateSimulator,
     enabled: simulatorEnabled,
+    KeepCategories,
     configure: configureSimulator,
     recover: recoverSimulator,
     act: actOnSimulator,
@@ -766,6 +810,7 @@ export function createSimulators(api: HostPluginApi) {
     snapshot: simulatorSnapshot,
     frame: simulatorFrame,
     pause: pauseSimulatorManagement,
+    unresolved: unresolvedSimulatorOutcome,
     close: closeSimulators,
     eraseIdle: eraseIdleSimulators,
     usage: simulatorUsage,

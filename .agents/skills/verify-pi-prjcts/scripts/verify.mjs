@@ -180,6 +180,7 @@ function hostEnv(run) {
     PI_PROJECTS_HOST: "1",
     PI_CODING_AGENT_DIR: run.agentDir,
     PI_OFFLINE: "1",
+    ...run.review?.env,
     // Plugins under development load through the env list only; the scratch home has no plugins.json.
     ...(run.plugins?.length ? { PI_PROJECTS_PLUGINS: run.plugins.join(":") } : {}),
     // The host's test seam that holds each cleanup run at its first step, so a journey can watch its progress.
@@ -256,6 +257,10 @@ async function launch() {
     });
     git("add", ".");
     git("commit", "-qm", "seed");
+    if (rest.includes("--review-fixture")) {
+      const { reviewFixture } = await import("../../../../scripts/lib/pr-review-fixture.mjs");
+      run.review = reviewFixture(scratch, run.workspace, repo, rest.includes("--review-stress"));
+    }
     // Fake model provider (the only external-model seam): its own detached process group.
     const portFile = join(scratch, "fake-provider.port"),
       providerFd = openSync(run.providerLog, "a");
@@ -1186,6 +1191,354 @@ async function ui2Prompts(run, page, record, dir, sinks) {
 const EXPAND_HISTORY = `document.querySelector('#workers [data-worker-history][aria-expanded="false"]')?.click()`;
 
 const journeys = {
+  async "review-tour"(run, page, record, dir) {
+    const wait = (s) => page.waitFor(`!!document.querySelector(${JSON.stringify(s)})`, s);
+    const open = async () => {
+      await page.navigate(run.webUrl);
+      await wait("[data-review-pr]");
+      await page.click("[data-review-pr]");
+      await wait(".drow");
+    };
+    await open();
+    await page.shot(dir, "01-before");
+    await page.click("[data-tour-request]");
+    await wait("[data-tour-building]");
+    await page.shot(dir, "02-building");
+    await wait(".tour-note");
+    await page.shot(dir, "03-colleague");
+    await page.click("[data-approve-step]");
+    await until(
+      async () =>
+        (await rpc(run, { action: "pr-review-files", id: run.projectId, provider: "github", pr: "7", head: run.review.first })).files
+          .filter((f) => f.viewed)
+          .map((f) => f.path)
+          .join(",") === "calendar.js,src/workdays.js",
+      "step files viewed",
+    );
+    const chat = await rpc(run, { action: "chat-create", id: run.projectId, title: "Calendar maintenance" });
+    await rpc(run, { action: "message", id: run.projectId, chatId: chat.id, text: "VERIFY-JOB review fixture" });
+    await until(
+      async () =>
+        (await rpc(run, { action: "jobs-snapshot", id: run.projectId })).jobs.some((j) => j.pr === "https://github.com/acme/review/pull/7"),
+      "fixture Job",
+      60000,
+    );
+    const { advanceReview } = await import("../../../../scripts/lib/pr-review-fixture.mjs");
+    advanceReview(run.review, run.review.second);
+    await open();
+    await page.click('[data-tour-mode="tour"]');
+    await wait(".stale-map");
+    if (
+      await page.evaluate(`document.querySelectorAll('[data-step].changed').length!==1||!document.querySelector('[data-step="0"].changed')`)
+    )
+      throw Error("wrong stale steps");
+    await page.shot(dir, "04-stale");
+    await page.click('[data-step="1"]');
+    await wait('[data-step="1"][aria-current="true"]');
+    await page.click("[data-tour-request]");
+    await page.waitFor(
+      `!document.querySelector(".stale-map") && !!document.querySelector(\'[data-step="1"][aria-current="true"]\')`,
+      "selection after rebuild",
+    );
+    await page.click('[data-step="0"]');
+    await wait(".tour-note");
+    await page.shot(dir, "05-step");
+    await page.evaluate(`document.documentElement.dataset.theme='light'`);
+    await page.shot(dir, "06-light");
+    for (const id of ["main", chat.id]) {
+      const view = await rpc(run, { action: "show", id: run.projectId, chatId: id });
+      const msgs = view.messages.filter((m) => m.text?.startsWith("[Guided tour request]"));
+      if (msgs.length !== 1 || msgs[0].origin !== "internal") throw Error("request routing: " + id);
+    }
+    await page.navigate(`${new URL(run.webUrl).origin}/?project=${run.projectId}&chat=${chat.id}`);
+    await wait("[data-tour-event]");
+    await page.shot(dir, "07-event");
+    record("tour", "One internal request in each destination; manual rebuild and viewed step.");
+  },
+  async "review-publish"(run, page, record, dir) {
+    const wait = (s) => page.waitFor(`!!document.querySelector(${JSON.stringify(s)})`, s);
+    async function open() {
+      await wait("[data-review-pr]");
+      await page.click("[data-review-pr]");
+      await wait(".drow");
+    }
+    async function add(text) {
+      await page.click('.drow[data-n="1"] .ln.n');
+      await page.click(".rv-compose textarea");
+      await page.cdp("Input.insertText", { text });
+      await page.click("[data-save-draft]");
+      await page.waitFor(`!document.querySelector('.rv-compose')`, "draft saved");
+    }
+    await page.navigate(run.webUrl);
+    await open();
+    await add("Please document the regional calendar.");
+    await page.click("[data-publish]");
+    await wait("dialog[open]");
+    await page.shot(dir, "01-colleague");
+    await page.click("dialog [data-cancel]");
+    await page.click(".rv-room .back");
+    const chat = await rpc(run, { action: "chat-create", id: run.projectId, title: "Calendar maintenance" });
+    await rpc(run, { action: "message", id: run.projectId, chatId: chat.id, text: "VERIFY-JOB review fixture" });
+    await until(
+      async () =>
+        (await rpc(run, { action: "jobs-snapshot", id: run.projectId })).jobs.some((j) => j.pr === "https://github.com/acme/review/pull/7"),
+      "fixture Job",
+      60000,
+    );
+    await open();
+    await add("Keep this change in the worker batch.");
+    await page.click("[data-publish]");
+    await page.click("dialog textarea");
+    await page.cdp("Input.insertText", { text: "One documentation request." });
+    await page.shot(dir, "02-our-pr");
+    await page.evaluate(`document.documentElement.dataset.theme='light'`);
+    await page.shot(dir, "03-light");
+    await page.click("[data-confirm-provider]");
+    await wait("[data-published]");
+    await page.waitFor(
+      `document.querySelector('.rv-code').textContent.includes('Please document the regional calendar.') && document.querySelector('[data-count="1"]')`,
+      "refreshed inline review, worker draft retained",
+    );
+    await page.shot(dir, "04-inline");
+    await page.click("[data-reply]");
+    await wait("dialog textarea");
+    await page.shot(dir, "05-reply");
+    const data = JSON.parse(readFileSync(run.review.state, "utf8"));
+    data.loseReviewAnswer = true;
+    writeFileSync(run.review.state, JSON.stringify(data));
+    await page.click("dialog textarea");
+    await page.cdp("Input.insertText", { text: "Thanks for the context." });
+    await page.click("[data-confirm-provider]");
+    await wait("[data-uncertain]");
+    await wait(".rv-code .drow");
+    await wait(".rv-draft [data-published]");
+    await wait("[data-batch]:enabled");
+    await page.waitFor(`!document.querySelector('[data-publish],[data-reply],[data-resolve]')`, "provider writes blocked");
+    await page.shot(dir, "06-uncertain-light");
+    await page.evaluate(`document.documentElement.dataset.theme='claude'`);
+    await page.shot(dir, "07-uncertain-dark");
+    await add("Local draft while checking the PR.");
+    await page.click("[data-batch]");
+    await page.click("[data-send-batch]");
+    await wait("[data-sent]");
+    await page.click("[data-checked]");
+    await page.select("dialog select", "found");
+    await page.click("[data-confirm-provider]");
+    await wait("[data-publish]");
+    await wait(".rv-code [data-reply]");
+    await page.shot(dir, "08-checked");
+    record(
+      "visible",
+      "Lost reply shown in the room; local draft and worker batch sent before owner reconciliation restored provider actions.",
+    );
+  },
+  async "review-drafts"(run, page, record, dir) {
+    const q = (s) => `document.querySelector(${JSON.stringify(s)})`;
+    const wait = (s) => page.waitFor(`!!${q(s)}`, s);
+    const open = async () => {
+      if (await page.evaluate(`!!document.querySelector('.rv-room .back')`)) await page.click(".rv-room .back");
+      await wait("[data-review-pr]");
+      await page.click("[data-review-pr]");
+      await wait(".drow");
+    };
+    await page.navigate(run.webUrl);
+    await open();
+    // Put the layout probe halfway into the margin following the longest file.
+    await page.evaluate(
+      `document.querySelector('.rv-end').style.paddingBottom='100vh'; document.querySelector('.rv-scroll').scrollTop += document.querySelector('[data-idx="1"]').getBoundingClientRect().top-document.querySelector('.rv-scroll').getBoundingClientRect().top-75`,
+    );
+    const boundary = await page.evaluate(
+      `(() => { const top=()=>document.querySelector('[data-idx="1"]').getBoundingClientRect().top; const before=top(), start=performance.now(); document.querySelector('[data-split]').click(); return {before,after:top(),ms:performance.now()-start}; })()`,
+    );
+    record("boundary", JSON.stringify(boundary));
+    if (Math.abs(boundary.after - boundary.before) > 1) throw Error("File boundary moved: " + JSON.stringify(boundary));
+    await page.click('[data-goto="0"]');
+    await wait("[data-provider-bar]");
+    if (await page.evaluate(`!!document.querySelector('[data-batch],[data-fix-thread]')`)) throw Error("Colleague PR has worker controls");
+    await page.shot(dir, "01-colleague");
+    if (run.review.stress) {
+      const blocks = await page.evaluate(`document.querySelectorAll('.fblock').length`);
+      for (let i = 0; i < blocks; i++) {
+        await page.click(`[data-goto="${i}"]`);
+        if (await page.evaluate(`${q(`[data-idx="${i}"] .diff`)}.hidden`)) await page.click(`[data-idx="${i}"] [data-toggle]`);
+        await wait(`[data-idx="${i}"] .drow`);
+      }
+      record(
+        "loaded layout",
+        await page.evaluate(
+          `(()=>{const rows=document.querySelectorAll('.drow').length,start=performance.now();document.querySelector('[data-unified]').click();document.querySelector('.rv-end').getBoundingClientRect();return rows+' loaded rows, '+(performance.now()-start)+' ms'})()`,
+        ),
+      );
+    }
+    const jobChat = await rpc(run, { action: "chat-create", id: run.projectId, title: "Calendar maintenance" });
+    await rpc(run, { action: "message", chatId: jobChat.id, id: run.projectId, text: "VERIFY-JOB review fixture" });
+    await until(
+      async () =>
+        (await rpc(run, { action: "jobs-snapshot", id: run.projectId })).jobs.some((j) => j.pr === "https://github.com/acme/review/pull/7"),
+      "fixture Job",
+      60000,
+    );
+    await open();
+    await wait("[data-batch]");
+    const messages = async () =>
+      (await rpc(run, { action: "show", id: run.projectId, chatId: jobChat.id })).messages.filter((m) => m.role === "user");
+    const before = (await messages()).length;
+    await page.click('.drow[data-n="1"] .ln.n');
+    await page.evaluate(
+      `document.querySelector('.drow[data-n="3"] .ln.n').dispatchEvent(new MouseEvent('click',{bubbles:true,shiftKey:true}))`,
+    );
+    await page.click(".rv-compose textarea");
+    await page.cdp("Input.insertText", { text: "Check the working week." });
+    await page.click("[data-split]");
+    await page.waitFor(
+      `document.querySelector('.rv-compose textarea')?.value==='Check the working week.' && document.querySelectorAll('.rv-selected').length===3`,
+      "composer survives layout",
+    );
+    await page.shot(dir, "02-range");
+    await page.click("[data-save-draft]");
+    await wait("[data-edit-draft]");
+    await page.click("[data-edit-draft]");
+    await page.click(".rv-compose textarea");
+    await page.press("End");
+    await page.cdp("Input.insertText", { text: " Include weekends." });
+    await page.click("[data-save-draft]");
+    await page.waitFor(`document.querySelector('.rv-draft')?.textContent.includes('Include weekends.')`, "edit saved");
+    const priorPage = await page.evaluate("performance.timeOrigin");
+    await page.reload();
+    await page.waitFor(`performance.timeOrigin!==${priorPage} && document.body.dataset.ready==='1'`, "reloaded review client");
+    await open();
+    await wait("[data-edit-draft]");
+    await page.click("[data-fix-thread]");
+    await wait('[data-count="2"]');
+    await page.click("[data-split]");
+    await page.click('.srow[data-o="1"] .ln.o');
+    await page.click(".rv-compose textarea");
+    await page.cdp("Input.insertText", { text: "Temporary" });
+    await page.click("[data-save-draft]");
+    await wait('[data-count="3"]');
+    await page.waitFor(
+      `Array.from(document.querySelectorAll('.rv-draft')).at(-1).textContent.includes('calendar.js:1 · old')`,
+      "split left draft",
+    );
+    await page.evaluate(`Array.from(document.querySelectorAll('[data-delete-draft]')).at(-1).click()`);
+    await wait('[data-count="2"]');
+    if ((await messages()).length !== before) throw Error("Draft CRUD sent a message");
+    await page.shot(dir, "03-drafts");
+    const { advanceReview } = await import("../../../../scripts/lib/pr-review-fixture.mjs");
+    advanceReview(run.review, run.review.second);
+    await open();
+    await wait("[data-outdated]");
+    await page.evaluate(`document.documentElement.dataset.theme='light'`);
+    await page.shot(dir, "04-light");
+    await page.click("[data-since]");
+    await wait('[data-since][aria-pressed="true"]');
+    await wait(".rv-code .drow.del");
+    await page.click(".rv-code .drow.del .ln.o");
+    await page.click(".rv-compose textarea");
+    await page.cdp("Input.insertText", { text: "Interdiff left anchor" });
+    await page.click("[data-save-draft]");
+    await wait('[data-count="3"]');
+    if (await page.evaluate(`Array.from(document.querySelectorAll('.rv-draft')).at(-1).querySelector('[data-outdated]')!==null`))
+      throw Error("Fresh interdiff anchor marked outdated");
+    await page.evaluate(`Array.from(document.querySelectorAll('[data-delete-draft]')).at(-1).click()`);
+    await wait('[data-count="2"]');
+    await page.click(`[data-iteration="${run.review.first}"]`);
+    await wait(`[data-head="true"] [data-iteration="${run.review.first}"]`);
+    await wait("[data-outdated]");
+    await page.click("[data-batch]");
+    await wait("dialog[open] .merge-text");
+    const preview = await page.evaluate(`${q("dialog[open] .merge-text")}.textContent`);
+    for (const part of [
+      "calendar.js",
+      "1–3",
+      "export const days = 7",
+      "Include weekends.",
+      "Should holidays count here?",
+      run.review.first,
+    ])
+      if (!preview.includes(part)) throw Error("Preview missing " + part);
+    await page.shot(dir, "05-confirm");
+    await page.click("[data-send-batch]");
+    await wait('[data-count="0"]');
+    await wait("[data-sent]");
+    await open();
+    await wait("[data-sent]");
+    await wait('[data-count="0"]');
+    await page.click(".rv-room .back");
+    await page.navigate(`${new URL(run.webUrl).origin}/?project=${run.projectId}&chat=${jobChat.id}`);
+    await page.waitFor(`document.querySelector('#feed').innerText.includes('Include weekends.')`, "chat batch");
+    await page.shot(dir, "06-chat");
+    const after = await messages();
+    if (after.length !== before + 1 || !after.some((m) => m.text === preview)) throw Error("Expected exactly one confirmed message");
+    record("delivery", "One owner message, identical to the confirmed preview.");
+  },
+  async "pr-review"(run, page, record, dir) {
+    if (!run.review) throw Error("launch with --review-fixture");
+    const { advanceReview } = await import("../../../../scripts/lib/pr-review-fixture.mjs");
+    await page.navigate(run.webUrl);
+    await page.waitFor(`!!document.querySelector('[data-review-pr]')`, "PR row");
+    await page.click("[data-review-pr]");
+    await page.waitFor(`document.querySelector('#focus-view')?.innerText.includes('Should holidays count here?')`, "inline thread");
+    await page.shot(dir, "01-unified-thread");
+    await page.click("[data-split]");
+    await page.waitFor(
+      `document.querySelector('.srow .code.del mark') && document.querySelector('.srow .code.add mark') && document.querySelector('.srow .code.empty')`,
+      "split replacement and one-sided rows",
+    );
+    await page.shot(dir, "02-split");
+    await page.press("s");
+    await page.waitFor(`!!document.querySelector('.th-collapsed') && !document.querySelector('.srow')`, "unified resolved discussion");
+    await page.evaluate(`document.querySelector('.th-collapsed').scrollIntoView({block:'center'})`);
+    await page.shot(dir, "03-resolved");
+    await page.click("[data-end]");
+    await page.waitFor(`!!document.querySelector('.expanded-line')`, "expanded context");
+    await page.shot(dir, "04-expanded");
+    await page.press("s");
+    await page.waitFor(`!!document.querySelector('.expanded-line.srow')`, "layout preserved expanded lines");
+    await page.press("s");
+    await page.click('[data-goto="2"]');
+    await page.press("v");
+    await page.waitFor(
+      `document.querySelector('[data-idx="2"] [data-mark]').checked && !!document.querySelector('.current[data-goto="3"]')`,
+      "viewed shortcut marks selected file and advances",
+    );
+    await page.press("k");
+    await page.waitFor(`!!document.querySelector('.current[data-goto="2"]')`, "previous file");
+    await page.press("j");
+    await page.waitFor(`!!document.querySelector('.current[data-goto="3"]')`, "next file");
+    await page.click("[data-jump]");
+    await page.shot(dir, "05-context");
+    await page.press("Escape", { keyCode: 27 });
+    advanceReview(run.review, run.review.second);
+    await page.click("#composer-input");
+    await page.cdp("Input.insertText", { text: "Review #7" });
+    await page.press("Enter", { keyCode: 13, text: "\r" });
+    await page.waitFor(`!!document.querySelector('[data-review-ref="7"]')`, "chat reference");
+    await page.click('[data-review-ref="7"]');
+    await page.waitFor(`!!document.querySelector('[data-since]:not(:disabled)')`, "previous head");
+    await page.click("[data-since]");
+    await page.waitFor(
+      `document.querySelector('.rv-code')?.innerText.includes('days = 7') && document.querySelector('.rv-code')?.innerText.includes('days = 5')`,
+      "interdiff",
+    );
+    await page.shot(dir, "06-since");
+    await page.click("[data-all]");
+    await page.waitFor(`!!document.querySelector('.th-collapsed')`, "all changes restored");
+    await page.evaluate(`document.documentElement.dataset.theme='light'`);
+    await page.shot(dir, "07-light");
+    await page.evaluate(`document.documentElement.dataset.theme='claude'`);
+    await page.cdp("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await page.waitFor(
+      `getComputedStyle(document.querySelector("#context")).visibility === "hidden" && document.querySelector("[data-tree]").offsetWidth > 0`,
+      "narrow layout settled",
+    );
+    await page.shot(dir, "08-narrow");
+    if (await page.evaluate(`document.documentElement.scrollWidth>innerWidth`)) throw Error("narrow overflow");
+    record(
+      "visible",
+      "PR row and chat #7; unified and aligned split, resolved and open threads, expanded gap, since previous head, light and 390px",
+    );
+  },
   // Feature: features/storage.md; failure list: scripts/workspace-cleanup-failures.md (R22).
   async "storage-clean"(run, page, record, dir) {
     // Precondition, not the journey: more than 30 routine runs, so history's oldest-first page cannot hold the next one.

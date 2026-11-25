@@ -4,6 +4,8 @@ A plugin is a module the host loads at its start to add capabilities: RPC method
 
 Core ships Git and GitHub only. GitHub is the built-in `github` plugin (see [The built-in GitHub plugin](#the-built-in-github-plugin)); no config. Other checkout kinds and PR services (an internal VCS, GitLab, ...) are separate plugins loaded at host start. Bundled: `plugins/simulator` (iOS simulators per project; not loaded unless configured) and `plugins/tasks` (a task list per project and chat for the Coordinator with a right-panel section; not loaded unless configured).
 
+Optional host plugin: [Network gate](docs/network-gate-proposal.md) pauses projects on corporate VPN loss. Activate it in Settings → Plugins.
+
 ## Author guide
 
 Start with [`docs/plugins/README.md`](docs/plugins/README.md):
@@ -24,7 +26,7 @@ The contract is `HostPluginApi` and `PluginCapabilities` in `src/plugin-types.ts
 | `prs` | PR provider: generic card data (checks, conflicts, optional draft/review/unresolved threads), detail, `#` refs, watch/hide validation, status, worker-published ids, watch document kind; optional `normalizeId` (number/URL input), `transitions`/`noticeFor` (monitor kinds), `followCovers` (what Follow PRs already announces) |
 | `follow` | Follow PRs for publication receipts: observe, fix brief (host supplies receipts) |
 | `merge` | result acceptance for the checkout kind (`MergeProvider`, `kind` matches the `vcs` kind): `inspect` the PR (state, draft, head, base, `mergeable` yes/later/no), `merge` exactly the approved head, `enableAutoMerge` pinned to that head, and `pullMain` for the main checkout. Approve calls it, and Follow PRs calls `pullMain` (with `inspect` for the base) when a followed PR becomes merged; without it a Job of this kind cannot be approved |
-| `uncertainWrites` | blocks automatic admission while a plugin write outcome is unknown |
+| `uncertainWrites` | blocks automatic admission while a plugin write outcome is unknown; also asked before a project turns the plugin off: an unknown outcome, or a check that throws or times out, refuses the disable; once the plugin is off it is no longer asked for that project |
 
 A provider plugin can also use the general capabilities, for example `rpc` for the `connect` call of a setup card; the [reference](docs/plugins/reference.md) describes them.
 
@@ -50,6 +52,8 @@ Isolated task helpers require the separate optional `workspace.task` adapter. `p
 
 `helperGuard(command)` is the optional shell policy of every task helper, shared or isolated. Helpers never publish, so it should keep the provider's safety rules and refuse pushes and PR writes with a message that sends the work back to the Coordinator. Without it, core's Git helper policy applies.
 
+`workspace.verificationHead?(workDir: string): Promise<string>` opts the provider into `projects_verify_run`. Read the current full commit from the worker’s actual cwd (which can be a project subfolder), not its receipt. Throw with a reason when it cannot be read. Core trims the result and refuses an empty, unreadable or non-candidate HEAD without starting the command. It uses the worker attachment’s existing `guard(command: string): string`, including the host’s owner-checkout guard, or the task helper’s bound shell policy. Return the permitted or rewritten shell command; the standard denial script (`printf '%s\n' '<reason>' >&2; exit 126`) refuses the run without a proof id. Missing hook, scope or bound policy never falls back to the independent Git shell. Older cores ignore the method.
+
 Absent task support visibly refuses isolated task allocation. Existing independent `plan`/`attach` behavior remains unchanged. Task helpers receive core execution tools without independent worker publication hooks. Neither adapter gives permission to merge main, deploy or perform destructive actions.
 
 ## The built-in GitHub plugin
@@ -72,3 +76,9 @@ The `github` provider reads through `gh` (`PI_PROJECTS_GH_CLI`): one `gh api gra
 - Follow PRs auto-fix for a failed check run includes name, conclusion, title, summary and details_url (http(s) only), capped at 4 KB and marked untrusted.
 - Limits: the repository's 50 most recently updated open PRs are listed; a branch without a review rule reports approval from the reviewers' latest reviews; a failing check counts as required unless GitHub reports the merge state UNSTABLE.
 Tests: `scripts/github-pr-watch-e2e.mjs` (failure modes: `scripts/github-pr-watch-failures.md`).
+
+### Ready report file list
+
+`vcs.candidateNameStatus?(root: string, candidate: string): Promise<string>` reads the candidate commit in the worker's checkout (`root` is its absolute VCS root; `candidate` is a full SHA). Diff its merge base with the provider's base branch against the candidate, not HEAD or uncommitted work. Return complete newline-separated `--name-status` output: tab-separated status and checkout-relative path, or `R<score>`, old path and new path. Quote unusual filenames as the CLI does; do not return a partial result. Empty output means no changes. Reject on failure and bound the provider command's runtime: the report timeout stops waiting but does not kill the plugin's process. The host keeps A/D/R rows, at most 20, with an omitted count. With no hook, a failed read or no answer within five seconds, Ready records “unavailable” instead. No result affects Ready status.
+
+`PrProvider.review` is optional. Before any cache lookup, `authorize` verifies the current checkout binding and returns the repository identity. Its `snapshot` includes a header, checks, anchored read-only threads and iterations (`head` and comparison `base`, full commit ids); a diff-set can be an iteration. `files` returns a path, change status and blob identity for each changed file. `fileDiff` returns unified text for the exact range and `fileLines` a slice of the file at the head. Report support for viewed sync, annotations, issues and suggestions in `capabilities`. Only optional `publish` writes. Advertise `publish`, `reply` and `resolve` separately. It receives a fresh authorized snapshot and either a verdict, summary and exact-head comments, or a thread operation. Return the provider receipt URL; never retry an ambiguous write. The host validates `pr-review-open/files/file/lines` requests, owns the comparison and `pr-review-viewed` state; `web/review.js` uses the same center view for all review sources.

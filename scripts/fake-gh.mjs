@@ -94,6 +94,39 @@ if (method === "POST" && parts[0] === "graphql") {
     query = body.query ?? "",
     vars = body.variables ?? {},
     fault = state.graphql ?? {};
+  const mutation = /\b(addPullRequestReviewThreadReply|addPullRequestReview|resolveReviewThread|unresolveReviewThread)\(input:/.exec(
+    query,
+  )?.[1];
+  if (mutation) {
+    const input = vars.input;
+    const item = state.pulls.find(
+      (p) =>
+        input.pullRequestId === "PR_" + p.number ||
+        (p.threads ?? []).some((_, i) => (input.threadId ?? input.pullRequestReviewThreadId) === "T_" + p.number + "_" + i),
+    );
+    if (!item) fail(422, "Wrong target");
+    const url = "https://github.com/" + repo.full_name + "/pull/" + item.number + "#review";
+    let result;
+    if (mutation === "addPullRequestReview") {
+      if (input.commitOID !== item.sha) fail(422, "Wrong head");
+      for (const c of input.threads) (item.threads ??= []).push(c);
+      result = { pullRequestReview: { url } };
+    } else {
+      const id = input.threadId ?? input.pullRequestReviewThreadId,
+        t = item.threads[Number(id.split("_").at(-1))];
+      if (mutation === "addPullRequestReviewThreadReply") {
+        (t.replies ??= []).push(input.body);
+        result = { comment: { url } };
+      } else {
+        t.resolved = mutation === "resolveReviewThread";
+        result = { thread: { id, isResolved: t.resolved } };
+      }
+    }
+    saveState();
+    log({ mutation, input });
+    if (state.loseReviewAnswer) process.exit(1);
+    out({ data: { [mutation]: result } });
+  }
   const kind = /markPullRequestReadyForReview/.test(query)
     ? "mutation"
     : /pullRequests\(states:OPEN/.test(query)
@@ -154,13 +187,17 @@ if (method === "POST" && parts[0] === "graphql") {
       ];
     };
     const node = (item, rich) => ({
+      id: "PR_" + item.number,
       number: item.number,
       title: item.title,
       url: item.url ?? "https://github.com/" + repo.full_name + "/pull/" + item.number,
       state: item.merged ? "MERGED" : (item.state ?? "open") === "closed" ? "CLOSED" : "OPEN",
       merged: item.merged === true,
+      body: item.body ?? "",
       isDraft: item.draft === true,
       headRefName: item.head,
+      baseRefName: item.base ?? "main",
+      baseRefOid: item.baseRefOid,
       headRefOid: item.sha ?? head(item.head),
       mergeable: item.mergeable ?? "MERGEABLE",
       mergeStateStatus: item.mergeState ?? "CLEAN",
@@ -170,12 +207,29 @@ if (method === "POST" && parts[0] === "graphql") {
       autoMergeRequest: item.autoMerge ? { enabledAt: "2026-10-03T00:00:00Z" } : null,
       latestOpinionatedReviews: { nodes: (item.opinions ?? []).map((value) => ({ state: value })) },
       reviewThreads: {
-        nodes: (item.threads ?? []).map((thread) => ({
+        nodes: (item.threads ?? []).map((thread, i) => ({
+          id: `T_${item.number}_${i}`,
+          diffSide: thread.side ?? "RIGHT",
           isResolved: thread.resolved === true,
           isOutdated: false,
           path: thread.path ?? "a.txt",
           line: thread.line ?? 1,
-          comments: { nodes: [{ author: { login: thread.user ?? "rev" }, body: thread.body ?? "" }] },
+          comments: {
+            nodes: [
+              {
+                author: { login: thread.user ?? "rev" },
+                createdAt: thread.createdAt ?? "2026-11-23T09:40:00Z",
+                commit: { oid: item.sha },
+                body: thread.body ?? "",
+              },
+              ...(thread.replies ?? []).map((body) => ({
+                author: login(),
+                createdAt: "2026-11-24T09:40:00Z",
+                commit: { oid: item.sha },
+                body,
+              })),
+            ],
+          },
         })),
       },
       commits: {
@@ -209,7 +263,7 @@ if (method === "POST" && parts[0] === "graphql") {
       });
     const item = state.pulls.find((value) => value.number === vars.number);
     if ((state.graphql?.failNumbers ?? []).includes(vars.number)) stop("GraphQL: boom", [{ message: "boom" }]);
-    reply({ repository: { pullRequest: item ? node(item, kind === "detail") : null } });
+    reply({ repository: { databaseId: repo.id, pullRequest: item ? node(item, kind === "detail") : null } });
   }
   const number = Number(/^PR_(\d+)$/.exec(vars.id ?? "")?.[1]),
     item = state.pulls.find((value) => value.number === number);
