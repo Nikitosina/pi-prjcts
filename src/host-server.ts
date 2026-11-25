@@ -894,7 +894,7 @@ async function dispatchRequest(input: RequestData, literalMessage = false): Prom
     case "show":
       return durableHostSnapshot(await durable(input.id), input.chatId, input.messageText);
     case "search":
-      return searchProject(ownedProjectDir(input.id), input.query, await (await durable(input.id)).searchSources(), input.limit);
+      return searchProject(ownedProjectDir(input.id), input.query, (await durable(input.id)).searchSources, input.limit);
     case "chat-create":
       return withDurableOwner({
         id: input.id,

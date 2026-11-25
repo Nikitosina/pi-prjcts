@@ -3,6 +3,7 @@
 Search (one project at a time; chats, worker threads, knowledge, uploads):
 - S1 A word said only in a non-Main chat, an archived chat or an old turn outside the 30-message window is not found.
 - S2 A word said only inside a worker thread (incl. a nested child thread) is not found; or only the coordinator's copy of the worker report is found.
+- S2a The Coordinator cannot open a child-only message with its returned threadId and index, or sees private assistant thinking in the page.
 - S3 Knowledge documents and upload text (PDF/text) are not searched, or deleted/edited ones still match (stale cache).
 - S4 Results do not say where they come from (chat title, worker role/task, doc path, file name), or snippets are unbounded / HTML-injected (XSS through transcript text).
 - S5 Ranking ignores rarity: a common word drowns the rare word that identifies the message; no result cap.

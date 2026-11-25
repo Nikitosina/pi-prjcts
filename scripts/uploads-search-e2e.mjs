@@ -127,6 +127,24 @@ const scripts = {
     ["projects_search", { query: "zebrafish quantum" }],
     (results) => ["projects_upload_read", { uploadId: firstHit(results).uploadId, offset: firstHit(results).offset, limit: 400 }],
   ],
+  "MARK-HISTORY": [
+    ["projects_search", { query: "archivedwombat" }],
+    (results) => {
+      const hit = firstHit(results);
+      return ["projects_chat_read", { chatId: hit?.chatId ?? "main", before: (hit?.index ?? 0) + 1, limit: 1 }];
+    },
+    (results) => [
+      "projects_chat_read",
+      {
+        chatId: JSON.parse(results[0]).results[0]?.chatId ?? "main",
+        ref: JSON.parse(results[1]).items[0].ref,
+        textOffset: 4500,
+        textLimit: 100,
+      },
+    ],
+  ],
+  "MARK-FOREIGN": [["projects_search", { query: "archivedwombat WSEARCH" }]],
+  "MARK-THREAD": [["projects_search", { query: "WSEARCH" }]],
   "MARK-STOP": [["projects_search", { query: "the and of" }]],
   "MARK-DELEG": [
     [
@@ -142,7 +160,7 @@ const scripts = {
     ],
   ],
   "MARK-CHAT2": [["projects_search", { query: "ostrich" }]],
-  "MARK-PENGUIN": [["projects_search", { query: "penguin" }]],
+  "MARK-EDITED": [["projects_search", { query: "penguin" }]],
   "MARK-AFTER": [
     ["projects_search", { query: "zebrafish" }],
     ["projects_upload_list", {}],
@@ -178,7 +196,7 @@ const model = createServer((req, res) => {
       tools,
       user: userText.slice(-1500),
       images,
-      results: results.map((r) => r.slice(0, 3000)),
+      results: results.map((r) => r.slice(0, 8192)),
     });
     const reply = (text) => {
       res.writeHead(200, { "content-type": "text/event-stream" });
@@ -436,7 +454,7 @@ try {
     text: "# Pelicans\n\nThe pelican colony nests on the north spit.\n",
     expectedRevision: null,
   });
-  await ask(id, undefined, "MARK-SEARCH find the zebrafish report");
+  await ask(id, undefined, "MARK-SEARCH find the report");
   const searched = turns("MARK-SEARCH").at(-1),
     hits = JSON.parse(searched.results[0]).results;
   if (
@@ -481,7 +499,9 @@ try {
   if (
     !worker?.tools.includes("projects_search") ||
     !worker.tools.includes("projects_upload_read") ||
-    worker.tools.includes("projects_library_read")
+    worker.tools.includes("projects_library_read") ||
+    worker.tools.includes("projects_chat_read") ||
+    JSON.parse(worker.results[0]).results.some((hit) => hit.source === "chat" || hit.source === "worker")
   )
     throw Error("Worker tools wrong: " + worker?.tools);
   if (!(await rpc({ action: "show", id })).messages.some((m) => m.text === "REPORT-ACK found"))
@@ -536,11 +556,37 @@ try {
 
   // S1: chats other than Main search too.
   const chat = await rpc({ action: "chat-create", id, title: "Second" });
-  await ask(id, chat.id, "MARK-CHAT2 find the ostrich");
+  await ask(id, chat.id, "MARK-CHAT2 find the dropped code");
   const chatTurn = turns("MARK-CHAT2").at(-1);
   if (JSON.parse(chatTurn.results[0]).results[0]?.filename !== "dropped-snippet.ts")
     throw Error("Chat search wrong: " + chatTurn.results[0]);
   result.checks.push("S1 a second chat has projects_search and finds the dropped code file");
+
+  await ask(id, chat.id, `archivedwombat ${"p".repeat(4500)} tail`);
+  await rpc({ action: "chat-update", id, chatId: chat.id, archived: true });
+  await ask(id, undefined, "MARK-THREAD");
+  const thread = JSON.parse(turns("MARK-THREAD").at(-1).results[0]).results.find((hit) => hit.source === "worker");
+  if (!thread?.threadId || !Number.isInteger(thread.index) || !thread.label.includes("scout")) throw Error("Missing scout hit and locator");
+  await ask(id, undefined, "MARK-HISTORY");
+  const [history, page, range] = turns("MARK-HISTORY").at(-1).results.map(JSON.parse);
+  const hit = history.results[0];
+  if (
+    hit.chatId !== chat.id ||
+    hit.chat !== "Second" ||
+    !hit.archived ||
+    page.items[0].entryId !== hit.index ||
+    !page.items[0].truncated ||
+    !range.text.endsWith(" tail")
+  )
+    throw Error("Archived hit did not open at its entry and text ref");
+  scripts["MARK-FOREIGN"].push(["projects_chat_read", { chatId: chat.id, before: hit.index + 1, limit: 1 }]);
+  await ask(textOnly, undefined, "MARK-FOREIGN");
+  if (!/Unknown chat for this project/.test(turns("MARK-FOREIGN").at(-1).results[1]))
+    throw Error("Foreign chat read did not refuse the locator");
+  if (JSON.parse(turns("MARK-FOREIGN").at(-1).results[0]).results.length) throw Error("Search leaked another project's chat or thread");
+  result.checks.push(
+    "H1/H2 Coordinator finds the scout and opens an archived chat entry by locator and ref; another project finds neither",
+  );
 
   // S5: an edited knowledge document is searchable at once.
   const pelican = await rpc({ action: "knowledge-read", id, path: "research/pelican-notes.md" });
@@ -551,8 +597,8 @@ try {
     text: pelican.text + "\nA penguin visited once.\n",
     expectedRevision: pelican.revision,
   });
-  await ask(id, undefined, "MARK-PENGUIN");
-  if (JSON.parse(turns("MARK-PENGUIN").at(-1).results[0]).results[0]?.path !== "research/pelican-notes.md")
+  await ask(id, undefined, "MARK-EDITED");
+  if (JSON.parse(turns("MARK-EDITED").at(-1).results[0]).results[0]?.path !== "research/pelican-notes.md")
     throw Error("Edited knowledge not searchable");
   result.checks.push("S5 an edited knowledge document is found by its new words");
 

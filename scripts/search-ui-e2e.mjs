@@ -3,8 +3,16 @@
 // Failure cases recorded in search-ui-failures.md before implementation.
 import { kit, delay } from "./notify-kit.mjs";
 
+let childPage;
 const respond = ({ coordinator, userText, results, say, call }) => {
   if (coordinator) {
+    if (userText.includes("MARK-RECALL")) {
+      if (!results.length) return call("projects_search", { query: "childbadger" });
+      const hit = JSON.parse(results[0]).results.find((item) => item.child);
+      if (hit && results.length === 1) return call("projects_worker_read", { threadId: hit.threadId, before: hit.index + 1, limit: 1 });
+      if (hit) childPage = { hit, page: JSON.parse(results[1]) };
+      return say("Recall finished.");
+    }
     const owner = !userText.startsWith("[worker") && !userText.startsWith("[Owner-local event");
     const task = owner && results.length === 0 && /MARK-(WORK|WFAIL|WSTOP)\b/.exec(userText)?.[1];
     if (task)
@@ -24,6 +32,13 @@ const respond = ({ coordinator, userText, results, say, call }) => {
       '"role":"assistant",',
       '"role":"assistant","content":"Looking around for ibexvortex first.",',
     );
+  if (/WORK-TASK/.test(userText) && results.length === 1) return call("subagent", { role: "scout", task: "NESTED-TASK" });
+  if (/NESTED-TASK/.test(userText) && !results.length)
+    return call("projects_knowledge_list", {}).replace(
+      '"role":"assistant",',
+      '"role":"assistant","reasoning_content":"Private reasoning.","content":"Checking childbadger.",',
+    );
+  if (/NESTED-TASK/.test(userText)) return say("Checked.");
   if (/WORK-TASK/.test(userText)) return say("Worker result: all good.");
   return undefined;
 };
@@ -83,6 +98,13 @@ try {
     async () =>
       (await rpc({ action: "thread-history", id: a, threadId: worker.id })).items.some((item) => /Worker result/.test(item.text ?? "")),
     "worker did not finish its turn",
+  );
+  await ok(a, "main", "MARK-RECALL");
+  check(
+    "S2a Coordinator opens a nested scout message without reasoning",
+    childPage?.hit.threadId.startsWith(`${worker.id}/`) &&
+      childPage.page.items.some((item) => item.entryId === childPage.hit.index && item.text === "Checking childbadger." && !item.thinking),
+    childPage,
   );
   const doc = `# Zoo\n\n${"Plain filler paragraph about nothing in particular.\n\n".repeat(60)}The narwhalcompass points north.\n`;
   await rpc({ action: "knowledge-write", id: a, path: "research/zoo.md", text: doc, expectedRevision: null });

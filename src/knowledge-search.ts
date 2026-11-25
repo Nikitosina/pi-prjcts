@@ -2,7 +2,7 @@ import { listKnowledge, readKnowledge } from "./knowledge.ts";
 import { listUploads, uploadText } from "./uploads.ts";
 import type { SearchSources } from "./durable-runtime.ts";
 
-/** BM25 keyword search over knowledge documents and owner uploads (and, for the owner's search UI, chat and worker transcripts), by chunk. No embeddings. */
+/** BM25 keyword search over knowledge documents and owner uploads (and, for the owner and Coordinator, chat and worker transcripts), by chunk. No embeddings. */
 const CHUNK = 1200,
   K1 = 1.2,
   B = 0.75;
@@ -164,9 +164,9 @@ export async function searchKnowledge(dir: string, query: string, limit = 8) {
   return rank(query, await corpus(dir), Math.min(20, Math.max(1, limit)));
 }
 
-/** Owner search UI: knowledge, uploads and, for Durable projects, every chat and worker thread. A message hit carries its transcript `index`. */
-export async function searchProject(dir: string, query: string, sources: SearchSources | null, limit = 30) {
+/** Project-wide search: knowledge, uploads and, for Durable projects, every chat and worker thread. A message hit carries its transcript `index`. */
+export async function searchProject(dir: string, query: string, loadSources: () => Promise<SearchSources>, limit = 30) {
   if (!tokenize(query).length) return rank(query, [], 1);
-  const all = [...(await corpus(dir)), ...(sources ? transcriptCorpus(dir, sources) : [])];
-  return { ...rank(query, all, Math.min(50, Math.max(1, limit))), transcripts: sources !== null };
+  const all = [...(await corpus(dir)), ...transcriptCorpus(dir, await loadSources())];
+  return { ...rank(query, all, Math.min(50, Math.max(1, limit))), transcripts: true };
 }
