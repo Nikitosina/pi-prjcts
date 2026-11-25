@@ -1023,7 +1023,7 @@ export async function openDurableProject(input: {
     const tools = maintainedKnowledgeTools(
       dir,
       () => input.onChange?.({ topic: "knowledge" }),
-      (id) => (isCoordinator(id) ? runtimeReference?.searchSources() : undefined),
+      (id) => (isCoordinator(id) ? runtimeReference?.searchSources : undefined),
     );
     const workerKnowledge = () => (knowledgeAccess() === "maintain" ? tools : tools.filter((tool) => !mutationTools.has(tool.name)));
     // Library and decision tools authorize against the saved project on every call; the grant only decides whether a chat is offered them.
@@ -2518,8 +2518,26 @@ export async function openDurableProject(input: {
       },
       searchSources: async () => {
         assertOpen();
-        const read = (conversationId: Conversation["id"]) => searchMessages(storageSource(openedStorage, context), Number(conversationId));
-        const agents = (await jobs.snapshot(openedHarness)).agents;
+        const read = (id: number) => searchMessages(storageSource(openedStorage, context), id);
+        const view = await jobs.snapshot(openedHarness);
+        const threads = [
+          ...view.agents.map((agent) => ({
+            threadId: agent.id,
+            parentThreadId: null,
+            role: agent.role,
+            task: agent.title,
+            conversationId: Number(agent.conversationId),
+          })),
+          ...view.jobs.flatMap((job) =>
+            job.children.map((child) => ({
+              threadId: `${job.id}/${child.id}`,
+              parentThreadId: job.id,
+              role: child.role,
+              task: child.title,
+              conversationId: Number(child.id),
+            })),
+          ),
+        ];
         return {
           chats: await Promise.all(
             (await chatList()).map(async (chat) => ({
@@ -2527,21 +2545,10 @@ export async function openDurableProject(input: {
               title: chat.title,
               archived: chat.archived,
               conversationId: chat.conversationId,
-              messages: await read((await resolveChat(chat.id)).conversation.id),
+              messages: await read(chat.conversationId),
             })),
           ),
-          threads: await Promise.all(
-            agents.map(async (thread) => {
-              return {
-                threadId: thread.id,
-                role: thread.role,
-                task: thread.title,
-                parentThreadId: null,
-                conversationId: Number(thread.conversationId),
-                messages: await read(thread.conversationId),
-              };
-            }),
-          ),
+          threads: await Promise.all(threads.map(async (thread) => ({ ...thread, messages: await read(thread.conversationId) }))),
         };
       },
       chatCreate: async (title) =>
@@ -2657,6 +2664,7 @@ export async function openDurableProject(input: {
         const page = await readTranscriptPage(storageSource(openedStorage, context), Number(conversationId), {
           ...options,
           display: displayText,
+          includeThinking: false,
         });
         const child = await openedHarness.conversation(conversationId, context);
         if (!child) throw new Error("Owned durable worker conversation is missing");
@@ -3303,7 +3311,7 @@ export async function openDurableProject(input: {
 export function maintainedKnowledgeTools(
   dir: string,
   changed: () => void = () => {},
-  sourcesFor?: (id: Conversation["id"]) => Promise<SearchSources> | undefined,
+  sourcesFor?: (id: Conversation["id"]) => DurableProjectRuntime["searchSources"] | undefined,
 ): ToolRegistration[] {
   const list = defineTool({
     name: "projects_knowledge_list",
@@ -3403,7 +3411,7 @@ export function maintainedKnowledgeTools(
     }),
     replay: "safe",
     async execute(args, api) {
-      const sources = await sourcesFor?.(api.conversationId);
+      const sources = sourcesFor?.(api.conversationId);
       const found = sources
         ? await searchProject(dir, args.query, sources, args.limit ?? 8)
         : await searchKnowledge(dir, args.query, args.limit ?? 8);

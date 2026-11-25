@@ -165,8 +165,8 @@ export async function searchKnowledge(dir: string, query: string, limit = 8) {
 }
 
 /** Project-wide search: knowledge, uploads and, for Durable projects, every chat and worker thread. A message hit carries its transcript `index`. */
-export async function searchProject(dir: string, query: string, sources: SearchSources | null, limit = 30) {
+export async function searchProject(dir: string, query: string, loadSources: () => Promise<SearchSources>, limit = 30) {
   if (!tokenize(query).length) return rank(query, [], 1);
-  const all = [...(await corpus(dir)), ...(sources ? transcriptCorpus(dir, sources) : [])];
-  return { ...rank(query, all, Math.min(50, Math.max(1, limit))), transcripts: sources !== null };
+  const all = [...(await corpus(dir)), ...transcriptCorpus(dir, await loadSources())];
+  return { ...rank(query, all, Math.min(50, Math.max(1, limit))), transcripts: true };
 }

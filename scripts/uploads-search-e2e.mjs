@@ -579,7 +579,10 @@ try {
     !range.text.endsWith(" tail")
   )
     throw Error("Archived hit did not open at its entry and text ref");
+  scripts["MARK-FOREIGN"].push(["projects_chat_read", { chatId: chat.id, before: hit.index + 1, limit: 1 }]);
   await ask(textOnly, undefined, "MARK-FOREIGN");
+  if (!/Unknown chat for this project/.test(turns("MARK-FOREIGN").at(-1).results[1]))
+    throw Error("Foreign chat read did not refuse the locator");
   if (JSON.parse(turns("MARK-FOREIGN").at(-1).results[0]).results.length) throw Error("Search leaked another project's chat or thread");
   result.checks.push(
     "H1/H2 Coordinator finds the scout and opens an archived chat entry by locator and ref; another project finds neither",
