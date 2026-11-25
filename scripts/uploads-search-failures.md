@@ -47,3 +47,7 @@ The new client has no uploads UI and no composer attachments yet. The script upl
 sends attachments with `message`, and deletes with `upload-delete`; every storage, search, vision and restart case stays. Retired with
 the classic layout: K1 (upload viewer), K2 (Knowledge drop zone and picker), K4 (uploads list at 390 px), C1/C6 (composer picker, drop
 and transcript chips) and the human labels of search tool rows. Known gap: no way to upload, attach, view or delete files in the new client.
+
+## Coordinator history
+- H1 An archived chat or worker message is missing, has the wrong locator, or opens at the wrong entry. Long chat text cannot be continued by reference.
+- H2 Search or read leaks another project’s history, or worker search gains Coordinator-only history.

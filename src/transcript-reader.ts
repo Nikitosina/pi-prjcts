@@ -163,6 +163,7 @@ export type PageOptions = {
   limit?: number;
   display?: (role: "user" | "assistant", text: string) => string;
   messageText?: MessageText;
+  includeThinking?: boolean;
 };
 export async function readTranscriptPage(
   source: TranscriptSource,
@@ -180,7 +181,9 @@ export async function readTranscriptPage(
     conversationId,
     items: entries
       .toReversed()
-      .flatMap((entry) => entryItems(entry, options.display, options.messageText === "full" ? Infinity : TEXT_PREVIEW_CHARS)),
+      .flatMap((entry) =>
+        entryItems(entry, options.display, options.messageText === "full" ? Infinity : TEXT_PREVIEW_CHARS, options.includeThinking),
+      ),
     before: older ? entries[entries.length - 1]!.id : null,
     entries: entries.length,
   };
@@ -197,7 +200,7 @@ const reportData = (entry: RawEntry) =>
   entry.kind === "projects.agent-report" && Value.Check(ReportData, entry.data) ? entry.data : undefined;
 
 /** Items of one entry in display order. Calls come out right after their assistant text. */
-function entryItems(entry: RawEntry, display: PageOptions["display"], messageChars: number): TranscriptItem[] {
+function entryItems(entry: RawEntry, display: PageOptions["display"], messageChars: number, includeThinking = true): TranscriptItem[] {
   const report = reportData(entry);
   if (report) {
     const text = preview(report.text, messageChars);
@@ -235,7 +238,8 @@ function entryItems(entry: RawEntry, display: PageOptions["display"], messageCha
     if (message.role === "user" || message.role === "assistant") {
       const content = parts(message.content),
         text = preview(display ? display(message.role, joinText(content)) : joinText(content), messageChars),
-        thinking = message.role === "assistant" ? preview(joinText(content, "thinking"), THINKING_PREVIEW_CHARS).text : "";
+        thinking =
+          includeThinking && message.role === "assistant" ? preview(joinText(content, "thinking"), THINKING_PREVIEW_CHARS).text : "";
       items.push({
         kind: "message",
         entryId: entry.id,
