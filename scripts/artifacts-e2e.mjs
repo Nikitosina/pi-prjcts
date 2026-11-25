@@ -369,6 +369,22 @@ try {
     "A16 clicking the log downloads it once through the authenticated route",
     await evaluate(`performance.getEntriesByType('resource').filter(e => /\\/artifacts\\/.*run\\.log$/.test(e.name)).length === 1`, s),
   );
+  // A25: an image a tool call read stays inside that call; the chat shows it only once the owner opens the call.
+  const toolMedia = `document.querySelectorAll('#feed :is(.tool-summary, .tool-group, .tool-row) [data-media]').length`;
+  check("A25 collapsed tool calls show no image", (await evaluate(toolMedia, s)) === 0, await evaluate(toolMedia, s));
+  await shot("01d-tool-image-collapsed", s);
+  // Each click repaints the feed, so open one collapsed line at a time until the read call with the image is open.
+  for (let round = 0; round < 20 && !(await evaluate(toolMedia, s)); round++) {
+    await evaluate(`document.querySelector('#feed :is(.ts-line, .group-head, .tool-head)[aria-expanded=false]')?.click()`, s);
+    await delay(100);
+  }
+  await waitFor(
+    `(() => { const slot = document.querySelector('#feed .tool-row.open [data-media]'); slot?.scrollIntoView(); const img = slot?.querySelector('.media-img'); return img?.complete && img.naturalWidth === 320; })()`,
+    s,
+    "tool image after expanding",
+  );
+  check("A25 opening the tool call shows the image it read", true);
+  await shot("01e-tool-image-expanded", s);
   // Owner browsing: the classic Activity artifact browser (A21) was retired with the classic inbox; the listing it showed stays.
   const listing = await rpc({ action: "artifacts-list", id, threadId: thread });
   check(
