@@ -12,8 +12,8 @@ Security
 
 Origin and identity
 7. A host restart changes the inbox port, so the origin and the device key are lost and every remote host needs pairing again. The port is fixed and survives restarts; a taken port is reported, not silently replaced.
-8. The remote host list is lost on restart, stores secrets, or is edited by a request from a remote host. It lives in the local home, holds only host ID, name and relay origin, and changes only through local owner actions.
-9. Forget host leaves its tunnel open, its list entry or its device key usable for that host.
+8. The remote host list is lost on restart, stores secrets, or is edited by a request from a remote host. It lives in the local home, holds only host ID, name and relay origin, and changes only through local owner actions. Known limitation: a lost Add receipt and failed list read can leave an orphan key in IndexedDB. Lost receipts are rare because the local host answers over loopback.
+9. Forget host leaves its tunnel open, its list entry or its device key usable for that host. Known limitation: a lost Forget receipt can skip session closure and key deletion; the receipt comes over loopback, so loss is rare. A revoked or incompatible tab has closed its broadcast channel and may miss even a confirmed Forget.
 
 Version
 10. A remote host is used before its API version is checked. The first request on each authenticated tunnel is the read-only version action. Only an exact match enables streams, project reads and writes. If the action or version is missing or the version differs, the client closes the tunnel and shows "needs update" without ever showing the host online.

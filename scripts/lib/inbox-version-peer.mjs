@@ -15,7 +15,7 @@ const server = createServer(async (req, res) => {
   const json = (data) => res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, data }));
   if (input.action === "api-version") return json(version === null ? {} : { version });
   if (input.action === "search" && input.query === "retry probe") {
-    if (requests.filter((k) => k === "search").length === 1) return;
+    if (requests.filter((k) => k === "search").length <= 2) return;
     return json(input.query);
   }
   if (input.action === "message") return; // The host received the write, but its reply is lost.

@@ -44,19 +44,21 @@ export async function remoteTransport(entry) {
     state: "offline",
     close,
     async run(read, signal, operation) {
-      const session = active;
-      if (client.state !== "online" || !session) throw Error(client.state);
       const execute = (s) =>
         operation(async (path, init = {}) => {
           const body = init.body == null ? null : await new Response(init.body).arrayBuffer();
           return s.request({ ...init, path, body });
         });
-      try {
-        return await execute(session);
-      } catch (error) {
-        if (signal?.aborted || !session.closed) throw error;
-        if (!read) throw Error("Result unknown, check after reconnecting.");
-        if (client.state === "offline")
+      for (;;) {
+        const session = active;
+        if (client.state !== "online" || !session) throw Error(client.state);
+        try {
+          return await execute(session);
+        } catch (error) {
+          if (signal?.aborted || !session.closed) throw error;
+          if (!read) throw Error("Result unknown, check after reconnecting.");
+        }
+        while (client.state === "offline" && !stopped)
           await new Promise((resolve, reject) => {
             const finish = () => {
               if (client.state === "offline" && !signal?.aborted && !stopped) return;
@@ -66,9 +68,8 @@ export async function remoteTransport(entry) {
             };
             client.addEventListener("statechange", finish);
             signal?.addEventListener("abort", finish, { once: true });
+            finish();
           });
-        if (client.state !== "online" || !active) throw Error(client.state);
-        return execute(active);
       }
     },
     authorizedFetch(path, init = {}) {

@@ -42,10 +42,12 @@ export async function inboxRelay() {
   const reserve = netServer();
   const port = await listen(reserve);
   await new Promise((ok) => reserve.close(ok));
-  const sockets = new Set();
+  let nextPeer;
+  const sockets = new Map();
   const tls = createServer({ key: readFileSync(key), cert: readFileSync(cert) }, (socket) => {
-    const plain = connect(port, "127.0.0.1");
-    sockets.add(socket);
+    const plain = connect(nextPeer ?? port, "127.0.0.1");
+    nextPeer = undefined;
+    sockets.set(socket, plain);
     socket.on("error", () => plain.destroy());
     plain.on("error", () => socket.destroy());
     socket.on("close", () => {
@@ -73,12 +75,19 @@ export async function inboxRelay() {
   return {
     origin,
     cert,
+    routeNextTo(port) {
+      nextPeer = port;
+    },
+    browserLinks() {
+      const hosts = new Set(sockets.keys());
+      return () => [...sockets].filter(([socket]) => !hosts.has(socket));
+    },
     spki: createHash("sha256")
       .update(new X509Certificate(readFileSync(cert)).publicKey.export({ format: "der", type: "spki" }))
       .digest("base64"),
     allow: (id) => execFileSync(process.execPath, ["relay/relay.ts", "allow", id, "Remote private host"], { env }),
     close: async () => {
-      for (const socket of sockets) socket.destroy();
+      for (const socket of sockets.keys()) socket.destroy();
       tls.close();
       child.kill();
       await ended;

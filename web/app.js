@@ -486,7 +486,7 @@ async function start() {
     const status = document.querySelector("#host-connection");
     const paint = () => {
       if (client.state === "forgotten") {
-        document.body.replaceChildren();
+        document.body.hidden = true;
         location.replace("/");
         return;
       }

@@ -2,16 +2,21 @@ import { createServer } from "node:net";
 import { fork } from "node:child_process";
 import { once } from "node:events";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { inboxRelay } from "./lib/inbox-relay.mjs";
 import { createKit, call as tool, say } from "./lib/e2e-kit.mjs";
 
+import { switchPanels, forgetAcrossViews, typeAndSend } from "./lib/inbox-journeys.mjs";
+import { refusedWelcome } from "./lib/inbox-wrong-welcome.mjs";
+
+const thread = crypto.randomUUID();
+const hostile = '<strong id="remote-markup">not markup</strong>';
 const client = await createKit("inbox-client", {
   handler: ({ role, user, results }) =>
     role === "coordinator" && user === "Check worker without inbox" && !results.length
       ? tool("projects_delegate", { role: "worker", task: "Report while the inbox port is occupied" })
-      : say(`Finished ${role}`),
+      : say(user.includes("Work agent check") ? "Work Mac replies" : `Finished ${role}`),
 });
 await client.run(async () => {
   const url = new URL((await client.rpc({ action: "web" })).url);
@@ -80,7 +85,13 @@ await client.run(async () => {
       handler: ({ role, user, results }) =>
         role === "coordinator" && user.includes("Remote journey") && !results.length
           ? tool("projects_question", { question: "Which colour for the remote project?" })
-          : say("Noted on Home Mac."),
+          : say(
+              user.includes("Home agent check")
+                ? "Home Mac replies"
+                : user.includes("Lost receipt")
+                  ? "Received exactly here."
+                  : `${hostile}\n\n![Remote icon](artifact:${thread}/icon.png)`,
+            ),
     });
     await other.run(async () => {
       mkdirSync(join(other.home, "remote"), { recursive: true });
@@ -91,11 +102,26 @@ await client.run(async () => {
       const { link } = await other.rpc({ action: "remote-pair-start" });
       other.initRepo();
       const remoteProject = await other.createProject("Only at home");
+      const artifactDir = join(other.home, remoteProject, "artifacts", thread);
+      mkdirSync(artifactDir, { recursive: true });
+      copyFileSync("relay/bootstrap/icon-180.png", join(artifactDir, "icon.png"));
+      const links = relay.browserLinks();
       const page = await client.openPage(url.href, { trustedSpki: relay.spki });
       await page.waitFor(`document.body.dataset.ready === '1'`, "inbox ready");
-      await page.evaluate(
-        `document.querySelector('[data-cmd="settings"]').click(); document.querySelector('nav [data-section="remote"]').click()`,
-      );
+      async function addPanel() {
+        await page.evaluate(
+          `document.querySelector('#topbar [data-cmd="settings"]').click(); document.querySelector('nav [data-section="remote"]').click()`,
+        );
+        await page.waitFor(`!!document.querySelector('[data-add-host]')`, "local Add host");
+      }
+      await page.shot("no-hosts-before", { force: true });
+      const chromeClip = { x: 0, y: 0, width: 240, height: 144, scale: 1 };
+      const sidebar = async () => (await page.cdp("Page.captureScreenshot", { clip: chromeClip })).data;
+      // Top-left inbox chrome from the pre-stage web/ (1e02b5b), same private project and viewport.
+      const baseline = readFileSync(new URL("./fixtures/no-hosts-sidebar.png", import.meta.url)).toString("base64");
+      assert.ok((await sidebar()) === baseline, "local sidebar matches pre-stage screenshot");
+      assert.equal(links().length, 0);
+      await addPanel();
       await page.waitFor(`!!document.querySelector('[aria-label="Host pairing link"]')`, "Add host from link", 3);
       async function addLink(link) {
         await page.evaluate(`document.querySelector('[aria-label="Host pairing link"]').focus()`);
@@ -119,20 +145,54 @@ await client.run(async () => {
       assert.equal(await page.evaluate(`location.pathname`), "/", "remote projects open in the real inbox");
       assert.ok(await page.evaluate(`!!document.querySelector('#composer-input')`));
       assert.ok(!(await page.evaluate(`document.body.innerText.includes('Only at work')`)));
-      async function submit(label, text) {
-        const field = label === "Answer" ? `document.querySelector("#questions textarea")` : `document.querySelector("#composer-input")`;
-        await page.waitFor(`!!${field}`, label);
-        await page.evaluate(`${field}.focus()`);
-        await page.cdp("Input.insertText", { text });
-        await page.evaluate(`${field}.form.requestSubmit()`);
-      }
-      await submit("Send message", "Remote journey");
-      await submit("Answer", "Purple");
+      await typeAndSend(page, "#composer-input", "Remote journey");
+      await typeAndSend(page, "#questions textarea", "Purple");
       await other.waitFor(
         async () => (await other.rpc({ action: "show", id: remoteProject })).inbox.some((q) => q.kind === "question" && q.result),
         "answer stored on remote",
       );
+      await page.waitFor(`document.querySelector('#feed').innerText.includes(${JSON.stringify(hostile)})`, "remote markup shown literally");
+      assert.equal(await page.evaluate(`!!document.querySelector('#remote-markup')`), false);
+      await page.waitFor(`document.querySelector('img.media-img[src^="blob:"]')?.naturalWidth === 180`, "decoded remote artifact");
       await page.shot("remote-inbox", { force: true });
+      await page.evaluate(
+        `{ const d = new DataTransfer(); d.setData('text/uri-list','file:///tmp/work-path'); document.querySelector('#composer-input').dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:d})); }`,
+      );
+      assert.ok(
+        await page.evaluate(
+          `document.querySelector('#toasts').innerText.includes('Local paths cannot be attached') && !document.querySelector('#composer-input').value`,
+        ),
+      );
+      await refusedWelcome(page, relay, status.hostId);
+      for (const kit of [client, other]) {
+        const { revision } = await kit.rpc({ action: "host-agent-settings" });
+        await kit.rpc({ action: "host-agent-settings", revision, patch: { model: "fake/fake-model" } });
+      }
+      await switchPanels(page, status.hostId);
+      assert.equal((await other.rpc({ action: "ui-get" })).ui.theme, "midnight");
+      assert.notEqual((await client.rpc({ action: "ui-get" })).ui.theme, "midnight");
+      const channels = links();
+      assert.ok(channels.length);
+      for (const [socket, plain] of channels) plain.unpipe(socket);
+      await typeAndSend(page, "#composer-input", "Lost receipt");
+      await other.waitFor(() => other.result.calls.some((c) => c.user.includes("Lost receipt")), "write reached remote host");
+      for (const [socket] of channels) socket.destroy();
+      await page.waitFor(
+        `document.body.innerText.toLowerCase().includes('result unknown, check after reconnecting')`,
+        "uncertain write notice",
+      );
+      await page.shot("uncertain-write", { force: true });
+      await page.waitFor(
+        `document.querySelector('#feed').innerText.includes('Received exactly here.') && !document.querySelector('[data-delivery=unconfirmed]')`,
+        "read back after reconnect",
+      );
+      await forgetAcrossViews(page, status.hostId);
+      assert.deepEqual(await call("inbox-hosts"), []);
+      await page.shot("no-hosts-after", { force: true });
+      assert.ok((await sidebar()) === baseline, "local sidebar restored after Forget");
+      await addPanel();
+      await addLink((await other.rpc({ action: "remote-pair-start" })).link);
+      await page.waitFor(`document.body.innerText.includes('Only at home')`, "paired again");
       await other.stopHost();
       await page.waitFor(`document.querySelector('#host-connection')?.textContent.includes('offline')`, "remote offline");
       await page.shot("remote-offline", { force: true });
@@ -163,7 +223,7 @@ await client.run(async () => {
         await page.reload();
         await page.waitFor(statusIs("online"), "compatible host");
         await page.evaluate(
-          `(async()=>{ const {localHost,remoteHost}=await import('/api.js'); window.probe=await remoteHost((await localHost.call('inbox-hosts'))[0]); window.readResult=probe.call('search',{query:'retry probe'}); window.writeResult=probe.call('message',{text:'no replay'}).catch(e=>e.message); })()`,
+          `(async()=>{ const {localHost,remoteHost}=await import('/api.js'); window.probe=await remoteHost((await localHost.call('inbox-hosts'))[0]); window.readResult=probe.call('search',{query:'retry probe'}).catch(e=>e.message); window.writeResult=probe.call('message',{text:'no replay'}).catch(e=>e.message); })()`,
         );
         await other.waitFor(async () => {
           const r = await control("status");
@@ -172,12 +232,18 @@ await client.run(async () => {
         await control("stop");
         await page.waitFor(statusIs("offline"), "lost replies");
         assert.match(await page.evaluate("writeResult"), /result unknown, check after reconnecting/i);
-        await page.evaluate(`new Promise(resolve => probe.addEventListener('statechange', resolve, {once:true}))`);
+        await control("restart", 1);
+        await other.waitFor(
+          async () => (await control("status")).requests.filter((r) => r === "search").length === 2,
+          "first replay in flight",
+        );
+        await control("stop");
+        await page.waitFor(statusIs("offline"), "lost replay");
         await control("restart", 1);
         assert.equal(await page.evaluate("readResult"), "retry probe");
         const requests = (await control("status")).requests;
         assert.equal(requests.filter((r) => r === "message").length, 1);
-        assert.equal(requests.filter((r) => r === "search").length, 2);
+        assert.equal(requests.filter((r) => r === "search").length, 3);
         await page.evaluate(`(async()=>{window.large = await probe.authorizedFetch('/large');})()`);
         assert.equal((await page.evaluate(`probe.call('list')`)).length, 0);
         assert.match(await page.evaluate(`probe.authorizedFetch('/changes?project=host').then(r=>r.text())`), /sync/);
@@ -186,6 +252,15 @@ await client.run(async () => {
         peer.disconnect();
         await ended;
       }
+      other.startHost();
+      await other.waitHost();
+      await page.waitFor(`document.querySelector('#host-connection')?.innerText.endsWith('online')`, "real host reconnected");
+      const deviceId = await page.evaluate(
+        `(async()=> (await (await import('/inbox-wire/store.js')).get('inbox-device:${status.hostId}')).id)()`,
+      );
+      await other.rpc({ action: "remote-revoke", deviceId, confirm: deviceId });
+      await page.waitFor(`document.querySelector('#host-connection')?.innerText.endsWith('revoked')`, "revoked device stopped");
+      await page.shot("revoked", { force: true });
     });
     assert.equal(other.result.status, "passed", other.result.failure);
   } finally {

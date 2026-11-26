@@ -283,6 +283,10 @@ Each stage is its own PR, with its failure modes written in `scripts/<name>-fail
 3. **Shared sidebar and Decision inbox.** Projects grouped by host, online state, shared Decision inbox.
 4. **Offline read cache.** IndexedDB cache, "data from HH:MM", disabled writes while offline, clearing on Forget host and revocation.
 
+### Known limitations
+
+- Add and Forget rely on a receipt from the local host over loopback, so losing it is rare. If Add cannot confirm whether it landed, it may leave an orphan device key in IndexedDB. If Forget lands but its receipt is lost, the key and open sessions may survive. A tab already revoked or marked “needs update” has closed its broadcast channel and can miss Forget even when the receipt arrives.
+
 ### Verification
 
 Every stage is proven by a script: two private hosts in temporary homes, a local relay from `relay/`, the fake provider and headless Chrome, following `.agents/skills/verify-pi-prjcts/SKILL.md`. The [Constraints](#constraints) of the first remote stages (suspended verification, no new committed tests) do not apply here; `AGENTS.md` applies. A live check from the work Mac to the home Mac runs at the end, only with the owner's permission.
