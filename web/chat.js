@@ -756,14 +756,19 @@ function renderLive() {
   if (!node) return;
   const frame = state.live;
   emit("busy", !!frame?.running);
-  document.querySelector("#stop-btn").hidden = !frame?.running;
+  const retryAt = currentChat()?.networkRetryAt;
+  document.querySelector("#stop-btn").hidden = !frame?.running && !retryAt;
   document.querySelector("#send-mode").hidden = !frame?.running;
   document.querySelector("#send-mode").textContent = state.steer ? "steer" : "queue";
   const kept = held
     ? `${held.thinkingText && showThinking() ? thinkingHtml(held.thinkingText, "held-thinking") : ""}${held.text ? `<article class="msg agent"><div class="msg-meta"><span class="who">Coordinator</span></div><div class="prose">${markdown(held.text)}</div></article>` : ""}`
     : "";
   if (!frame?.running) {
-    node.innerHTML = kept;
+    node.innerHTML =
+      kept +
+      (retryAt
+        ? `<div class="live-status">Provider connection failed. Retrying at ${esc(new Date(retryAt).toLocaleTimeString())}.</div>`
+        : "");
     hydrateMedia(feed, mediaSource());
     return;
   }
@@ -914,7 +919,7 @@ form.addEventListener("submit", async (event) => {
   await deliver(send);
 });
 export async function stopTurn() {
-  if (!state.live?.running) return;
+  if (!state.live?.running && !currentChat()?.networkRetryAt) return;
   const gen = state.generation;
   try {
     const result = await call("chat-stop", { projectId: state.projectId, reason: "owner pressed Stop", ...chatArgs() });

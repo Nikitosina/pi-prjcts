@@ -27,3 +27,5 @@ Recorded before the change. Covered by `codemode-native-tools-e2e.mjs`, which us
 - N14 A tool switched off in the conversation's profile is hidden from direct model calls but remains available as `tools.<name>` inside `codemode`, bypassing the owner's tool selection.
 - N15 A script invokes a dangerous host action directly instead of `owner_approval_request`, or a nested approval request executes before the owner approves it.
 - N16 A nested dangerous request changes its target while its approval is still pending.
+
+A model copies the outer mcp__custom_tools__ prefix into a script; the alias must dispatch the same offered tool with its existing authority.

@@ -19,17 +19,19 @@ const SESSION_LIMIT = {
     error: { message: "Rate limit reached: You've hit your session limit", type: "rate_limit_exceeded", code: "rate_limit_exceeded" },
   },
 };
+const network = { status: 502, body: { error: { message: "fetch failed" } } };
 const requests = [],
   coordinator = [],
   reviews = [];
 const callsFor = (marker) => requests.filter((call) => call.marker === marker);
 const kit = await createKit("worker-quota", {
-  env: { PI_PROJECTS_QUOTA_RETRY_BASE_MS: "60" },
+  env: { PI_PROJECTS_QUOTA_RETRY_BASE_MS: "60", PI_PROJECTS_NETWORK_RETRY_BASE_MS: "2000" },
   handler: ({ role, model, user, msgs, results }) => {
     if (role === "coordinator") {
       // Each case runs in its own chat, so the whole conversation names it.
-      const marker = ["COEND", "COQUOTA", "COPLAIN"].find((value) => JSON.stringify(msgs ?? user).includes(value));
+      const marker = ["COEND", "COQUOTA", "COPLAIN", "CONET"].find((value) => JSON.stringify(msgs ?? user).includes(value));
       if (marker) coordinator.push({ marker, model });
+      if (marker === "CONET") return coordinator.filter((c) => c.marker === marker).length <= 4 ? network : say("Network recovered");
       if (marker === "COEND" || (marker === "COQUOTA" && model === "fake-model")) return QUOTA;
       return say(marker === "COQUOTA" ? "Coordinator recovered." : "Noted.");
     }
@@ -40,8 +42,11 @@ const kit = await createKit("worker-quota", {
     if (role !== "worker") return say("Noted.");
     if (user.includes("SUBQUOTA"))
       return results.length ? say("Reviewed.") : call("subagent", { role: "reviewer", kind: "full", task: "SUBQUOTA review" });
-    const marker = ["FALLBACK", "EXHAUST", "UNKNOWN", "CHAINEND", "CHAIN", "RATE", "EMPTY"].find((value) => user.includes(value));
+    const marker = ["FALLBACK", "EXHAUST", "UNKNOWN", "CHAINEND", "CHAIN", "RATE", "EMPTY", "WORKNET"].find(
+      (value) => user.includes(value) || (value === "WORKNET" && JSON.stringify(msgs).includes(value)),
+    );
     requests.push({ marker, model, at: Date.now() });
+    if (marker === "WORKNET") return callsFor(marker).length <= 4 ? network : say("Network recovered");
     if (marker === "FALLBACK" && model === "fallback-model") return say("Finished on the fallback model.");
     if (marker === "CHAIN" && model === "third-model") return say("Finished on the third model.");
     if (marker === "RATE") return model === "fake-model" ? RATE : say("Finished after the rate limit.");
@@ -83,6 +88,38 @@ await kit.run(async () => {
       1200,
     );
 
+  const { networkRetryDelay, transientNetworkFailure } = await import("../src/provider-failure.ts");
+  for (const error of ["Codex stream ended without a stop reason", "WebSocket stream closed before response.completed"]) {
+    kit.check(error, transientNetworkFailure(`model_error: ${error}`));
+  }
+  kit.check("bounded network backoff", [1, 2, 3, 4, 5, 6, 7].map((n) => networkRetryDelay(n, 1)).join() === "1,2,4,8,8,8,");
+  for (const error of [
+    "401 Connection error",
+    "authentication failed: fetch failed",
+    "quota exceeded: terminated",
+    "context length exceeded: fetch failed",
+    "429 Connection error",
+    "aborted",
+  ])
+    kit.check(error, !transientNetworkFailure(`model_error: ${error}`));
+  const workerNet = await settled(await submit("WORKNET"));
+  kit.check(
+    "network: worker survives Durable's four failed requests",
+    workerNet.status !== "failed" && callsFor("WORKNET").length === 5,
+    workerNet.status,
+  );
+  const netChat = (await kit.rpc({ action: "chat-create", id, title: "Network" })).id;
+  await kit.rpc({ action: "message", id, chatId: netChat, text: "CONET" });
+  const netCalls = () => coordinator.filter((c) => c.marker === "CONET");
+  await kit.eventually(() => netCalls().length === 4, "four coordinator attempts");
+  await delay(650);
+  await kit.restartHost();
+  await kit.rpc({ action: "show", id });
+  await kit.eventually(() => netCalls().length >= 5, "network continuation survived restart", 130);
+  kit.check(
+    "coordinator recovers on its model",
+    netCalls().every((c) => c.model === "fake-model"),
+  );
   await kit.updateSettings(id, { fallbackModels: { worker: "fake/fallback-model" } });
   const fallback = await settled(await submit("FALLBACK finish after quota"));
   kit.check(

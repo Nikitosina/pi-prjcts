@@ -40,6 +40,23 @@ export function emptyAnswerFailure(entries: readonly TurnEntry[]): string | unde
   return providerFailure(reason) ? reason : undefined;
 }
 
+export function transientNetworkFailure(reason: string): boolean {
+  if (!reason.startsWith("model_error:") || providerFailure(reason)) return false;
+  if (
+    /\b4\d\d\b|authenticat|unauthori|forbidden|api.?key|context.{0,24}(?:length|window|overflow)|too many tokens|prompt.{0,16}too long|quota/i.test(
+      reason,
+    )
+  )
+    return false;
+  return /fetch failed|\bterminated\b|websocket (?:error|closed|(?:connect|idle) timeout)|SSE response headers timed out|stream (?:ended without (?:a stop reason|a terminal response event)|(?:closed|disconnected) before (?:response\.completed|completion))|connection (?:error|refused|lost|reset)|\b(?:ECONNREFUSED|ECONNRESET|EAI_AGAIN|ENETUNREACH|ETIMEDOUT)\b|socket hang up/i.test(
+    reason,
+  );
+}
+
+export const networkRetryDelay = (attempt: number, base = Number(process.env.PI_PROJECTS_NETWORK_RETRY_BASE_MS) || 60_000) =>
+  attempt >= 1 && attempt <= 6 ? Math.min(2 ** (attempt - 1), 8) * base : undefined;
+export const NETWORK_CONTINUE = "The provider connection failed during your last turn. Continue where you left off.";
+
 export const QUOTA_RETRY_LIMIT = 8;
 export const QUOTA_RETRY_BASE_MS = 15 * 60_000;
 export const quotaRetryDelay = (attempt: number, base: number) => Math.min(6 * 60 * 60_000, base * 2 ** Math.min(attempt - 1, 8));

@@ -32,3 +32,5 @@ Owner decision: every reader may read under `/tmp` (macOS: `/private/tmp`), read
 ## Continuation advice
 
 17. A note advises a call that is not supported (`pass path for one file` on a provider without narrowing). Every note names only calls that work for that checkout: `offset`, `path` where supported, `mode: "stat"`.
+
+A Job reader needs its parent's artifacts and cache, not another Job's. A diff must distinguish the selected base ref's full commit from HEAD and the merge-base.

@@ -48,6 +48,7 @@ type Collected = {
   /** Project directory the call was made from; path and the stat list are relative to it. */
   dir: string;
   mergeBase: string;
+  baseRef?: string;
   revision: string;
   changed: string;
   diff: string;
@@ -78,7 +79,7 @@ export async function codeDiff(root: string, base?: string, page: DiffPage = {})
   const where = found.dir === found.root ? "" : relative(found.root, found.dir);
   const head = ellipsize(
     [
-      `${mode === DiffMode.Stat ? "Changed files of" : "Diff of"} this checkout (${kind})${revision ? ` at HEAD ${revision}` : ""} against merge-base ${mergeBase.slice(0, 12)}${base ? ` with ${base}` : ""}${path ? `, limited to ${path}` : ""}, including uncommitted changes.`,
+      `${mode === DiffMode.Stat ? "Changed files of" : "Diff of"} this checkout (${kind})${revision ? ` at HEAD ${revision}` : ""} against merge-base ${mergeBase.slice(0, 12)}${found.baseRef ? ` with ${found.baseRef}` : base ? ` with ${base}` : ""}${path ? `, limited to ${path}` : ""}, including uncommitted changes.`,
       mode === DiffMode.Diff && untracked.length
         ? `${untracked.length} new untracked file(s): ${untracked.slice(0, 12).join(", ")}${untracked.length > 12 ? ", ..." : ""}.`
         : "",
@@ -139,7 +140,8 @@ async function collect(root: string, base: string | undefined, path: string | un
     throw new Error(
       "Could not find a default branch to diff against (tried origin/HEAD, origin/main, origin/master, main, master); pass base",
     );
-  const mergeBase = (await text(git("merge-base", "--end-of-options", chosen, "HEAD"), `git merge-base ${chosen} HEAD`)).trim();
+  const baseSha = (await text(git("rev-parse", "--verify", "--end-of-options", `${chosen}^{commit}`), "git rev-parse base")).trim();
+  const mergeBase = (await text(git("merge-base", "--end-of-options", baseSha, "HEAD"), `git merge-base ${chosen} HEAD`)).trim();
   const revision = (await text(git("rev-parse", "--verify", "HEAD^{commit}"), "git rev-parse HEAD")).trim();
   const flags = ["--no-ext-diff", "--no-textconv", "--no-color"];
   const changed = await text(git("diff", ...flags, "--stat=200", mergeBase, "--", ...pathspec), "git diff --stat", true);
@@ -156,7 +158,18 @@ async function collect(root: string, base: string | undefined, path: string | un
   // Untracked files past the collection cap are named, so a complete-looking last page cannot hide them.
   if (done < untracked.length)
     diff += `\n[${untracked.length - done} untracked ${untracked.length - done === 1 ? "file" : "files"} not included: collection stopped at ${CODE_DIFF_CAP / 1024} KB; read one with path]\n`;
-  return { kind: "git", root: vcs.root, dir, mergeBase, revision, changed, diff, untracked, narrows: true };
+  return {
+    kind: "git",
+    root: vcs.root,
+    dir,
+    mergeBase,
+    baseRef: `${chosen} (${baseSha})`,
+    revision,
+    changed,
+    diff,
+    untracked,
+    narrows: true,
+  };
 }
 
 const under = (dir: string, file: string) => dir === "." || file === dir || file.startsWith(`${dir}/`);
