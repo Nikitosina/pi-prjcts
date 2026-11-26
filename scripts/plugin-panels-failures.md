@@ -35,3 +35,7 @@ Found in review (red before the fix)
 
 Example
 17. The example plugin's panel drifts from the contract or does not save: adding a note through the panel stores it for that project only, and it is shown again after Settings is reopened.
+
+Simulator clone source (scripts/simulator-panel-e2e.mjs and scripts/simulator-worker-unit.mjs)
+- A create request omits `sourceUdid` and the RPC or coordinator tool clones a device anyway. Both must refuse it, even with a source saved in an older project.
+- The panel shows a default source or submits a source the owner never picked. It must create from the shut-down source the owner selects.

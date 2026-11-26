@@ -4,10 +4,10 @@ import { binaryResult } from "../../src/binary-results.ts";
 import { MAX_OWNED, simulatorResource, WORKER_OPERATIONS, type Simulators } from "./simulator.ts";
 
 /** The coordinator's simulator rules: the editable "iOS simulators" integration block, shown while management is on. Tool details live in the descriptions. */
-export const COORDINATOR_NOTE = `- iOS simulators: you manage up to ${MAX_OWNED} clones yourself (projects_simulator_status, projects_simulator_action). Never ask the owner to create, boot or delete one. Give a coding worker the exact UDID and its simulator:<UDID> lease resource. Delete clones nobody needs. An unknown outcome blocks management: tell the owner, never guess or substitute another simulator.`;
+export const COORDINATOR_NOTE = `- iOS simulators: you manage up to ${MAX_OWNED} clones yourself (projects_simulator_status, projects_simulator_action). For create, choose a shut-down source from projects_simulator_status according to the project instructions. Never ask the owner to create, boot or delete one. Give a coding worker the exact UDID and its simulator:<UDID> lease resource. Delete clones nobody needs. An unknown outcome blocks management: tell the owner, never guess or substitute another simulator.`;
 /** Worker counterpart, appended to the instructions of workers that have the simulator tools. */
 export const WORKER_NOTE =
-  "\n\nManaged iOS simulators: get the clone your task names with projects_worker_simulator_status, acquire its simulator:<UDID> lease before build, install, launch or screenshot, and release it when done. While you hold the lease, boot, shut down or reboot that clone with projects_worker_simulator_boot. Use only project clones; ask the Coordinator to create, reset or delete one.";
+  "\n\nManaged iOS simulators: get the clone your task names with projects_worker_simulator_status, acquire its simulator:<UDID> lease before build, install, launch or screenshot, and release it when done. While you hold the lease, boot, shut down or reboot that clone with projects_worker_simulator_boot. Use only project clones; ask the Coordinator to create, reset or delete one. When requesting a clone, name the shut-down base from status that matches the project instructions.";
 
 export function createSimulatorTools(host: HostPluginApi, simulators: Simulators) {
   const { defineExtension, defineTool } = host.lib.durable,
@@ -33,7 +33,7 @@ export function createSimulatorTools(host: HostPluginApi, simulators: Simulators
     });
     const action = defineTool({
       name: "projects_simulator_action",
-      description: `Manage this project's pi-prjcts-created simulators (up to ${MAX_OWNED}). create clones sourceUdid (any shut-down source from status; default the owner's pin or the newest shut-down iPhone), then slims and boots the clone; boot slims/boots; shutdown frees RAM without deleting data; reset erases the clone's apps/data and reboots slim; delete permanently deletes the clone. boot/shutdown/reset/delete take udid of an owned clone (required when several are owned) and are refused only while a worker leases that clone. Returns accepted progress; don't poll repeatedly while other work can proceed. Uncertain outcomes do not retry automatically and block management until the owner inspects them. Only a leased clone is blocked: ask its worker to release the lease rather than stopping the worker. Never touch source simulators, shared runtimes or global caches.`,
+      description: `Manage this project's pi-prjcts-created simulators (up to ${MAX_OWNED}). create requires sourceUdid: choose a shut-down source from projects_simulator_status. It clones that source, then slims and boots the clone; boot slims/boots; shutdown frees RAM without deleting data; reset erases the clone's apps/data and reboots slim; delete permanently deletes the clone. boot/shutdown/reset/delete take udid of an owned clone (required when several are owned) and are refused only while a worker leases that clone. Returns accepted progress; don't poll repeatedly while other work can proceed. Uncertain outcomes do not retry automatically and block management until the owner inspects them. Only a leased clone is blocked: ask its worker to release the lease rather than stopping the worker. Never touch source simulators, shared runtimes or global caches.`,
       parameters: Type.Object(
         {
           operation: simulators.SimulatorAction,
@@ -42,7 +42,7 @@ export function createSimulatorTools(host: HostPluginApi, simulators: Simulators
             description: "Stable UUID for this exact operation; never reuse it for a different intent",
           }),
           udid: Udid("Owned clone for boot/shutdown/reset/delete"),
-          sourceUdid: Udid("Source simulator to clone for create"),
+          sourceUdid: Udid("Required for create: UDID of a shut-down source from projects_simulator_status"),
         },
         { additionalProperties: false },
       ),

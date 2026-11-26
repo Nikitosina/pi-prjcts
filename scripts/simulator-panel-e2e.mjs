@@ -80,7 +80,16 @@ await kit.run(async () => {
   const storeFile = (id) => join(kit.home, id, "simulator.json");
   writeFileSync(
     storeFile(alpha),
-    JSON.stringify({ version: 2, projectId: alpha, enabled: true, sourceUdid: null, owned, pending: null, uncertain: null, receipts: {} }),
+    JSON.stringify({
+      version: 2,
+      projectId: alpha,
+      enabled: true,
+      sourceUdid: SOURCE,
+      owned,
+      pending: null,
+      uncertain: null,
+      receipts: {},
+    }),
   );
   const store = (id = alpha) => (existsSync(storeFile(id)) ? JSON.parse(readFileSync(storeFile(id), "utf8")) : null);
   const devices = () => JSON.parse(readFileSync(fakeState, "utf8")).devices;
@@ -96,6 +105,14 @@ await kit.run(async () => {
       .map((line) => JSON.parse(line));
   const settled = () => kit.eventually(() => !store()?.pending, "simulator operation settled");
 
+  const missingSource = await kit.rejects({
+    action: "plugin",
+    plugin: "simulator",
+    method: "action",
+    id: alpha,
+    params: { operation: "create", requestId: randomUUID() },
+  });
+  check("Create RPC refuses a missing sourceUdid", /sourceUdid/.test(missingSource), missingSource);
   const page = await kit.openPage(await kit.webUrl(alpha));
   await page.waitFor(`document.body.dataset.ready === "1"`, "inbox ready");
   await page.viewport(1440, 1400);
@@ -242,7 +259,8 @@ await kit.run(async () => {
   );
   check(
     "S2 the listing shows status, a tab per clone with its state in text, its source, UDID, slimming and the clone limit",
-    listing.tabs.length === 2 &&
+    !listing.text.includes("Default source") &&
+      listing.tabs.length === 2 &&
       listing.tabs.some((tab) => tab.startsWith(`${CLONE_A} true `) && /running$/.test(tab)) &&
       listing.tabs.some((tab) => tab.startsWith(`${CLONE_B} false `) && /shut down$/.test(tab)) &&
       /iPhone 16 Pro/.test(listing.text) &&
@@ -393,13 +411,16 @@ await kit.run(async () => {
   );
   check(
     "S5 only shut-down sources can be chosen; a running source is listed disabled, its name as text",
-    options.length === 2 &&
+    options.length === 3 &&
       options.find((option) => option.value === SOURCE)?.disabled === false &&
       options.find((option) => option.value === RUNNING_SOURCE)?.disabled === true &&
       options.find((option) => option.value === RUNNING_SOURCE)?.text.includes("<b>Air</b>") &&
-      (await page.evaluate(`document.querySelector(${js(inPanel("[data-simulator-source]"))}).value`)) === SOURCE,
+      (await page.evaluate(`document.querySelector(${js(inPanel("[data-simulator-source]"))}).value`)) === "",
     options,
   );
+  await page.evaluate(`document.querySelector(${js(inPanel("[data-simulator-source]"))}).focus()`);
+  await key("i", "KeyI", 73, "i");
+  await waitPanel(`slot.querySelector("[data-simulator-source]").value === ${js(SOURCE)}`, "owner selected the iPhone");
   await shot("05-new-clone", "[data-simulator-confirm]");
   await click(inPanel(`[data-action="simulator-enable"]`));
   await kit.eventually(() => store().owned.length === 2, "clone created");
