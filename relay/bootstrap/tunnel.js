@@ -113,6 +113,9 @@ class Tunnel {
   }
 
   async start(state, welcome) {
+    // A close during the welcome verification keeps its code, so a revocation is not mistaken for an outage.
+    let early = null;
+    this.#ws.onclose = (event) => (early = event);
     this.#session = await clientFinish(state, welcome, {
       send: (record) => this.#ws.send(record),
       onMessage: (header, body) => this.#receive(header, body),
@@ -122,7 +125,7 @@ class Tunnel {
       if (typeof event.data !== "string") void this.#session.receive(event.data);
     };
     this.#ws.onclose = (event) => this.#end(closeError(event));
-    // A close during the welcome verification fired before this handler existed.
+    if (early) throw closeError(early);
     if (this.#ws.readyState > 1) throw new TunnelError("Connection closed during the handshake");
   }
 
