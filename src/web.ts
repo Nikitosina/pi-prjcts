@@ -1,3 +1,4 @@
+import { inboxHosts } from "./inbox-hosts.ts";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type ServerResponse } from "node:http";
 import { inboxAssetNames, readBrowserAsset } from "./host-assets.ts";
@@ -20,7 +21,17 @@ type LiveWatch = (projectId: string, onFrame: (frame: unknown) => void, onEnd: (
 
 const liveStreams = new Set<() => void>();
 /** Actions a paired device may not call through the tunnel (REMOTE_SPEC.md: pairing approval from a paired device comes later). */
-const LOCAL_ONLY = new Set(["remote-reload", "remote-pair-start", "remote-pair-cancel", "remote-revoke", "remote-rename"]);
+const LOCAL_ONLY = new Set([
+  "web",
+  "inbox-hosts",
+  "inbox-host-add",
+  "inbox-host-forget",
+  "remote-reload",
+  "remote-pair-start",
+  "remote-pair-cancel",
+  "remote-revoke",
+  "remote-rename",
+]);
 
 /** Server-sent events: one `data:` frame per live change, comment heartbeats so idle proxies keep the stream. */
 async function serveLive(
@@ -147,8 +158,7 @@ export async function startWeb(
       "x-content-type-options": "nosniff",
       "referrer-policy": "no-referrer",
       // style-src 'unsafe-inline': bars and markers set their width or position in a style="" attribute, which style-src 'self' blocks. Scripts stay 'self' only.
-      "content-security-policy":
-        "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'; img-src 'self' blob:; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+      "content-security-policy": `default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'${[...new Set(inboxHosts().map((host) => ` wss://${new URL(host.relayOrigin).host}`))].join("")}; img-src 'self' blob:; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`,
     };
     let status = 400;
     try {
@@ -363,12 +373,7 @@ export async function startWeb(
         resolve();
       });
     });
-  try {
-    await listen(port);
-  } catch (error) {
-    if (!port) throw error;
-    await listen(0);
-  }
+  await listen(port);
   server.on("error", (error) => process.stderr.write(JSON.stringify({ event: "web-error", error: errorText(error) }) + "\n"));
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Browser listener has no TCP address");

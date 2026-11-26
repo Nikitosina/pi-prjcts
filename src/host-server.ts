@@ -1,3 +1,4 @@
+import { inboxHosts, setInboxHost } from "./inbox-hosts.ts";
 import { githubPublishedPullRequests } from "./github-worker.ts";
 import { reviewRead } from "./pr-review.ts";
 import { initTheme } from "@earendil-works/pi-coding-agent";
@@ -548,9 +549,19 @@ async function projectActivity(id: string): Promise<ProjectActivity> {
 
 async function dispatchRequest(input: RequestData, literalMessage = false): Promise<unknown> {
   if (closing) throw new Error("Host is stopping");
+  if (input.action.startsWith("remote-") && !remote) throw new Error(inboxError);
   switch (input.action) {
     case "web":
+      if (!web) throw new Error(inboxError);
       return { url: web.url };
+    case "api-version":
+      return { version: 1 };
+    case "inbox-hosts":
+      return inboxHosts();
+    case "inbox-host-add":
+      return setInboxHost(input.hostId, { hostId: input.hostId, name: input.name, relayOrigin: input.relayOrigin });
+    case "inbox-host-forget":
+      return setInboxHost(input.hostId);
     case "remote-reload":
       await remote!.reload();
       return remote!.status();
@@ -2027,36 +2038,55 @@ setOllamaKeyResolver(async () => {
   }
   return undefined;
 });
-const web = await startWeb(
-  dispatch,
-  async (id, onFrame, onEnd, chatId) =>
-    id === HOST_FEED ? requireHostAgent().watchLive(onFrame, onEnd) : (await durable(id)).watchLive(onFrame, onEnd, chatId),
-  (id, filename, bytes) =>
-    withProjectLock(id, async () => {
-      const project = loadProject(id);
-      if (project.deleted || project.archived) throw new Error("Inactive project cannot take uploads");
-      return saveUpload(ownedProjectDir(id), { filename, bytes });
-    }),
-  () => notifier.seq(),
-  () => remote,
-  (id) => durable(id),
-);
-remote = createRemote({
-  webUrl: web.url,
-  report: (detail) => recordHostEvent("remote", detail),
-  changed: () => publishHost("remote"),
-  summary: async () => {
-    let needs = 0;
-    for (const project of listProjects().filter((project) => !project.deleted && !project.archived))
-      needs += inbox(projectDir(project.id)).filter((item) => !item.result).length;
-    return { needs };
-  },
-});
-try {
-  await remote.reload();
-} catch {
-  recordHostEvent("remote", "Remote access could not start; inspect local configuration");
+let web: Awaited<ReturnType<typeof startWeb>> | undefined;
+let inboxError = "Inbox unavailable";
+let bindRetry: NodeJS.Timeout | undefined;
+async function bindInbox() {
+  try {
+    web = await startWeb(
+      dispatch,
+      async (id, onFrame, onEnd, chatId) =>
+        id === HOST_FEED ? requireHostAgent().watchLive(onFrame, onEnd) : (await durable(id)).watchLive(onFrame, onEnd, chatId),
+      (id, filename, bytes) =>
+        withProjectLock(id, async () => {
+          const project = loadProject(id);
+          if (project.deleted || project.archived) throw new Error("Inactive project cannot take uploads");
+          return saveUpload(ownedProjectDir(id), { filename, bytes });
+        }),
+      () => notifier.seq(),
+      () => remote,
+      (id) => durable(id),
+    );
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "EADDRINUSE" && "port" in error)) throw error;
+    inboxError = `Inbox unavailable: port ${error.port} is taken. Retrying in 30 seconds.`;
+    process.stderr.write(JSON.stringify({ event: "web-unavailable", error: inboxError }) + "\n");
+    if (!shutdownOperation)
+      bindRetry = setTimeout(() => void bindInbox().catch((error) => process.stderr.write(errorText(error) + "\n")), 30000);
+    return;
+  }
+  if (shutdownOperation) {
+    web.close();
+    return;
+  }
+  remote = createRemote({
+    webUrl: web.url,
+    report: (detail) => recordHostEvent("remote", detail),
+    changed: () => publishHost("remote"),
+    summary: async () => {
+      let needs = 0;
+      for (const project of listProjects().filter((project) => !project.deleted && !project.archived))
+        needs += inbox(projectDir(project.id)).filter((item) => !item.result).length;
+      return { needs };
+    },
+  });
+  try {
+    await remote.reload();
+  } catch {
+    recordHostEvent("remote", "Remote access could not start; inspect local configuration");
+  }
 }
+await bindInbox();
 const webhooks = await startWebhooks(async (id, event) => {
   if (closing) throw new Error("Host is stopping");
   const result = await (await durable(id)).ingestAutomationEvent(event);
@@ -2071,7 +2101,7 @@ const notifier = startNotifier({
   tickMs: Number(process.env.PI_PROJECTS_NOTIFY_TICK_MS ?? 3000),
   progress: (view) => void telegram.progress(view),
   onNotice: () => {
-    web.noticesChanged(notifier.seq());
+    web?.noticesChanged(notifier.seq());
     remote?.notices(notifier.feed(pushCursor).items);
     pushCursor = notifier.seq();
     void telegram?.flush();
@@ -2360,7 +2390,8 @@ function shutdown(restart?: (home: string) => never): Promise<void> {
       report(error);
     }
     try {
-      web.close();
+      clearTimeout(bindRetry);
+      web?.close();
     } catch (error) {
       report(error);
     }

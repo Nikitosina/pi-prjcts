@@ -257,7 +257,7 @@ The local inbox (`web/` served by the local host on `127.0.0.1`) shows and contr
 8. Each host sends its own Telegram notices. The multi-host inbox shows no browser notifications for remote hosts.
 9. A paired client gets every owner right on the remote host, as the PWA does. Pairing, renaming and revoking devices stay local to each host.
 10. Pairing uses the existing link from Settings → Remote access → Pair a device on the remote host, pasted into Add host in the local inbox.
-11. Version: every host reports an API version. A remote host whose version differs from the client's is shown as "needs update" and is not connected. The version is raised only for an incompatible `/api` change.
+11. Version: every host reports its API version through a read-only action. On each authenticated tunnel, the client makes that action its first request. Only an exact match with the client's version enables streams, project reads and writes. If the action or version is missing or the version differs, the client closes the tunnel and shows "needs update" without ever showing the host online. The version is raised only for an incompatible `/api` change. The relay protocol does not change.
 12. The inbox port is fixed, so the origin, and with it the device key in IndexedDB, survives host restarts. The list of remote hosts (host ID, name, relay origin; not secret) is kept in the local host's home.
 13. Offline read cache: the client keeps, in IndexedDB of the local origin, the answers of read actions it has already loaded (no prefetch), within a size limit. While a host is offline its cached views show with "data from HH:MM", and every control that writes to that host is disabled. Forget host and device revocation clear the host's cache. The owner accepts that a remote host's chats and diffs are stored on the client machine.
 14. A read that failed with a lost connection is retried automatically. A write is never retried; the UI says its result is unknown and asks the owner to check after reconnecting.
@@ -269,7 +269,7 @@ The local inbox (`web/` served by the local host on `127.0.0.1`) shows and contr
 
 ### Architecture
 
-- `web/api.js` stays the only module that talks to a host. `call`, `stream`, `authorizedFetch` and the URLs of artifacts, uploads and media take a host. The local host uses the bearer token as today; a remote host goes through its tunnel.
+- `web/api.js` stays the only module that talks to a host. Each view receives a host client object when it opens and uses `host.call(action, input)`, `host.stream(...)`, `host.authorizedFetch(...)` and `host.url(...)` for that host's requests and resources. A client owns its bearer token (local) or tunnel (remote), its online state and, in stage 4, its read cache. The local host is a client like any other: there is no sentinel string and no implicit current host. Switching views never redirects a pending request.
 - `web/` gets a tunnel client built on `wire.js`: one session per remote host, the same handshake and records as `relay/bootstrap/tunnel.js`, reconnect with backoff, and connection state for the sidebar.
 - Resources that the page loads by URL (`<img>`, media, downloads) are fetched through the tunnel and shown as `blob:` URLs, which the CSP already allows.
 - Machine-bound features act on the host that owns the project: a dropped local path is refused for a remote project, uploads and artifacts go through the tunnel, simulators are the remote host's.

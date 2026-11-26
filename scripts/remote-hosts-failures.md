@@ -16,7 +16,7 @@ Origin and identity
 9. Forget host leaves its tunnel open, its list entry or its device key usable for that host.
 
 Version
-10. A remote host on another API version connects and its actions fail later in confusing ways. A differing version shows "needs update" and no session opens. The same version connects.
+10. A remote host is used before its API version is checked. The first request on each authenticated tunnel is the read-only version action. Only an exact match enables streams, project reads and writes. If the action or version is missing or the version differs, the client closes the tunnel and shows "needs update" without ever showing the host online.
 11. A host from before this change (no version reported) is treated as compatible.
 
 Tunnel
@@ -29,6 +29,8 @@ Settings and Host agent
 16. The host switcher in Settings or the Host agent sends a change to a host other than the one shown. After a switch, every read and write goes to the newly selected host, and a late answer from the previous host is dropped.
 17. Pairing, renaming or revoking devices is offered for a remote host. It stays local to each host.
 18. A dropped local path is attached to a remote project's message. It is refused with a clear note.
+
+20. A taken inbox port prevents the backend, its socket or workers from starting, or starts remote transport against another process's listener. The host logs and reports the occupied port to inbox launch requests, retries only that port about every 30 seconds, and starts remote transport only after binding it.
 
 No remote hosts
 19. A host with no remote hosts configured behaves and looks exactly as before: no tunnel, no relay connection, no new sidebar rows.
