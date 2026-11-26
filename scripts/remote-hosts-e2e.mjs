@@ -41,7 +41,10 @@ await client.run(async () => {
     client.initRepo();
     const id = await client.createProject("Only at work");
     await client.ask(id, "Check worker without inbox");
-    client.check("Worker ran with occupied inbox port", client.result.calls.some((c) => c.role === "worker"));
+    client.check(
+      "Worker ran with occupied inbox port",
+      client.result.calls.some((c) => c.role === "worker"),
+    );
     assert.match(await client.rejects({ action: "web" }), /taken/i);
   } finally {
     await new Promise((ok) => occupied.close(ok));
