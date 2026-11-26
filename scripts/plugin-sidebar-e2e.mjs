@@ -131,7 +131,7 @@ await kit.run(async () => {
   await page.evaluate(`window.__side.failChat = null; window.__side.slowChat = null`);
   const mountsBefore = (await log()).mounts.length;
   await rpc({ action: "chat-create", id: alpha, title: "Three" });
-  await page.evaluate(`import("/workers.js").then((workers) => Promise.all([workers.loadJobs(), workers.loadSide()]))`);
+  await page.evaluate(`import("/app.js").then(({ workers }) => Promise.all([workers.loadJobs(), workers.loadSide()]))`);
   await select(alpha, two);
   await delay(1500);
   check(

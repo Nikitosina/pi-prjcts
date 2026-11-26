@@ -14,28 +14,30 @@ function open() {
   return db;
 }
 async function run(mode, work) {
-  const store = (await open()).transaction("kv", mode).objectStore("kv");
+  const tx = (await open()).transaction("kv", mode);
   return new Promise((resolve, reject) => {
-    const request = work(store);
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+    const request = work(tx.objectStore("kv"));
+    tx.oncomplete = () => resolve(request.result);
+    tx.onabort = () => reject(tx.error ?? Error("Device storage transaction aborted"));
   });
 }
 export const get = (key) => run("readonly", (store) => store.get(key));
 export const put = (key, value) => run("readwrite", (store) => store.put(value, key));
 
 /** One key per device for every host. Two tabs racing on first use keep whichever was stored first. */
-export async function device() {
-  const existing = await get("device");
+export async function device(key = "device") {
+  const existing = await get(key);
   if (existing) return existing;
   const pair = await generateSigningKey(false);
   const fresh = { privateKey: pair.privateKey, id: await keyId(pair.publicKey) };
-  const stored = await run("readwrite", (store) => store.add(fresh, "device")).then(
+  const stored = await run("readwrite", (store) => store.add(fresh, key)).then(
     () => fresh,
     () => null,
   );
-  return stored ?? (await get("device"));
+  return stored ?? (await get(key));
 }
+
+export const deleteKey = (key) => run("readwrite", (store) => store.delete(key));
 
 /** Paired hosts: `{hostId, name, pairedAt}`, in pairing order. */
 export const hosts = async () => (await get("hosts")) ?? [];

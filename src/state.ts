@@ -27,6 +27,14 @@ export const PromptOverrides = Type.Object(
   { additionalProperties: false },
 );
 
+export const InboxHost = Type.Object(
+  {
+    hostId: Type.String({ pattern: "^[a-zA-Z0-9_-]{43}$" }),
+    name: Type.String({ minLength: 1, maxLength: 80 }),
+    relayOrigin: Type.String({ minLength: 1, maxLength: 512 }),
+  },
+  { additionalProperties: false },
+);
 const text = Type.String({ minLength: 1, maxLength: 32000 });
 export const DEFAULT_VERIFY_ROUNDS = 3;
 /** Host-wide nightly deploy opt-in (`idle` keeps its stored name): hours of the local day, end exclusive (see deploy.ts). */
@@ -575,6 +583,10 @@ const reviewPath = Type.String({
 });
 export const Request = Type.Union([
   Type.Object({ action: Type.Literal("remote-reload") }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("api-version") }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("inbox-hosts") }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("inbox-host-add"), ...InboxHost.properties }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("inbox-host-forget"), hostId: InboxHost.properties.hostId }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("remote-status") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("remote-devices") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("remote-pair-start") }, { additionalProperties: false }),

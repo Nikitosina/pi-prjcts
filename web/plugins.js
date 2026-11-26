@@ -2,317 +2,320 @@
 // window.piProjects.register({ name, mount?(slot, panel), action?(name, node, panel), sidebar?: { mount(slot, section), action? } }) while it first runs.
 // Each script and style loads once per page; a panel mounts in its plugin's card while the section shows, and a project change mounts it again.
 // Plugin code is trusted, not isolated: the API only keeps it to its own slot, methods, routes and project.
-import { call, authorizedFetch } from "./api.js";
 import { clip, esc } from "./format.js";
 
-const RETIRED = ["render", "tick", "projectChanged", "hide"]; // the classic inbox's context-panel hooks
-const scripts = new Map(); // plugin name -> { definition, error, ready }
-const mounted = new Map(); // plugin name -> the functions that show a runtime error in each of its mounted panels and sections
-const isAbort = (error) => error?.name === "AbortError";
-const messageOf = (error) => clip(String(error?.message ?? error ?? "failed"), 500);
-const ownerOf = (src) => /^\/plugins\/([a-z][a-z0-9-]{0,39})\/ui\.js$/.exec(src ?? "")?.[1];
+export function mountPlugins(client) {
+  const RETIRED = ["render", "tick", "projectChanged", "hide"]; // the classic inbox's context-panel hooks
+  const scripts = new Map(); // plugin name -> { definition, error, ready }
+  const mounted = new Map(); // plugin name -> the functions that show a runtime error in each of its mounted panels and sections
+  const isAbort = (error) => error?.name === "AbortError";
+  const messageOf = (error) => clip(String(error?.message ?? error ?? "failed"), 500);
+  const ownerOf = (src) => /^\/plugins\/([a-z][a-z0-9-]{0,39})\/ui\.js$/.exec(src ?? "")?.[1];
 
-function register(definition) {
-  const owner = ownerOf(document.currentScript?.getAttribute("src")),
-    entry = owner && scripts.get(owner);
-  if (!entry) throw new Error("piProjects.register must be called while its ui.js runs");
-  const refuse = (reason) => {
-    if (!entry.definition) entry.refused = reason;
-    throw new Error(reason);
-  };
-  if (definition?.name !== owner)
-    refuse(`ui.js registered as "${clip(String(definition?.name), 60)}"; a script registers only its own plugin`);
-  if (entry.definition) refuse(`${owner} is already registered`);
-  const retired = RETIRED.filter((hook) => hook in definition);
-  if (retired.length) refuse(`ui.js uses the retired context-panel hooks (${retired.join(", ")}); a panel provides mount(slot, panel)`);
-  const hooks = (part) => part.action === undefined || typeof part.action === "function";
-  const sidebar = definition.sidebar;
-  if (sidebar !== undefined && (typeof sidebar?.mount !== "function" || !hooks(sidebar)))
-    refuse("a sidebar section needs mount(slot, section) and an optional action(name, node, section)");
-  if (sidebar === undefined && typeof definition.mount !== "function")
-    refuse("a panel needs mount(slot, panel) and an optional action(name, node, panel)");
-  if (definition.mount !== undefined && (typeof definition.mount !== "function" || !hooks(definition)))
-    refuse("a panel needs mount(slot, panel) and an optional action(name, node, panel)");
-  entry.definition = definition;
-}
-window.piProjects = Object.freeze({ register, esc });
+  function register(definition) {
+    const owner = ownerOf(document.currentScript?.getAttribute("src")),
+      entry = owner && scripts.get(owner);
+    if (!entry) throw new Error("piProjects.register must be called while its ui.js runs");
+    const refuse = (reason) => {
+      if (!entry.definition) entry.refused = reason;
+      throw new Error(reason);
+    };
+    if (definition?.name !== owner)
+      refuse(`ui.js registered as "${clip(String(definition?.name), 60)}"; a script registers only its own plugin`);
+    if (entry.definition) refuse(`${owner} is already registered`);
+    const retired = RETIRED.filter((hook) => hook in definition);
+    if (retired.length) refuse(`ui.js uses the retired context-panel hooks (${retired.join(", ")}); a panel provides mount(slot, panel)`);
+    const hooks = (part) => part.action === undefined || typeof part.action === "function";
+    const sidebar = definition.sidebar;
+    if (sidebar !== undefined && (typeof sidebar?.mount !== "function" || !hooks(sidebar)))
+      refuse("a sidebar section needs mount(slot, section) and an optional action(name, node, section)");
+    if (sidebar === undefined && typeof definition.mount !== "function")
+      refuse("a panel needs mount(slot, panel) and an optional action(name, node, panel)");
+    if (definition.mount !== undefined && (typeof definition.mount !== "function" || !hooks(definition)))
+      refuse("a panel needs mount(slot, panel) and an optional action(name, node, panel)");
+    entry.definition = definition;
+  }
+  window.piProjects = Object.freeze({ register, esc });
 
-// An uncaught error from a plugin's own file: while it loads it fails the panel, later it shows in the mounted panel.
-window.addEventListener("error", (event) => {
-  const name = ownerOf(event.filename ? new URL(event.filename, location.href).pathname : ""),
-    entry = name && scripts.get(name);
-  if (!entry) return;
-  const error = event.error ?? event.message;
-  if (!entry.loaded) entry.error ??= messageOf(error);
-  else for (const show of mounted.get(name) ?? []) show(error);
-});
+  // An uncaught error from a plugin's own file: while it loads it fails the panel, later it shows in the mounted panel.
+  window.addEventListener("error", (event) => {
+    const name = ownerOf(event.filename ? new URL(event.filename, location.href).pathname : ""),
+      entry = name && scripts.get(name);
+    if (!entry) return;
+    const error = event.error ?? event.message;
+    if (!entry.loaded) entry.error ??= messageOf(error);
+    else for (const show of mounted.get(name) ?? []) show(error);
+  });
 
-function load({ plugin, script, style }) {
-  if (scripts.has(plugin)) return scripts.get(plugin).ready;
-  const entry = { definition: null, error: null, refused: null, styleError: null, loaded: false, ready: null };
-  scripts.set(plugin, entry);
-  const styled = new Promise((resolve) => {
-    if (!style) return resolve();
-    const link = Object.assign(document.createElement("link"), { rel: "stylesheet", href: style });
-    link.addEventListener("load", resolve);
-    link.addEventListener("error", () => {
-      entry.styleError = `ui.css could not be loaded from ${style}`;
-      resolve();
+  function load({ plugin, script, style }) {
+    if (scripts.has(plugin)) return scripts.get(plugin).ready;
+    const entry = { definition: null, error: null, refused: null, styleError: null, loaded: false, ready: null };
+    scripts.set(plugin, entry);
+    const styled = new Promise((resolve) => {
+      if (!style) return resolve();
+      const link = Object.assign(document.createElement("link"), { rel: "stylesheet", href: style });
+      link.addEventListener("load", resolve);
+      link.addEventListener("error", () => {
+        entry.styleError = `ui.css could not be loaded from ${style}`;
+        resolve();
+      });
+      document.head.append(link);
     });
-    document.head.append(link);
-  });
-  const ran = new Promise((resolve) => {
-    const node = Object.assign(document.createElement("script"), { src: script });
-    node.addEventListener("load", () => {
-      // Any uncaught error during the first run fails the panel, also one thrown after a successful register.
-      entry.loaded = true;
-      if (!entry.definition) entry.error ??= entry.refused ?? "ui.js did not register a panel (window.piProjects.register)";
-      resolve();
+    const ran = new Promise((resolve) => {
+      const node = Object.assign(document.createElement("script"), { src: script });
+      node.addEventListener("load", () => {
+        // Any uncaught error during the first run fails the panel, also one thrown after a successful register.
+        entry.loaded = true;
+        if (!entry.definition) entry.error ??= entry.refused ?? "ui.js did not register a panel (window.piProjects.register)";
+        resolve();
+      });
+      node.addEventListener("error", () => {
+        entry.error = `ui.js could not be loaded from ${script}`;
+        resolve();
+      });
+      document.body.append(node);
     });
-    node.addEventListener("error", () => {
-      entry.error = `ui.js could not be loaded from ${script}`;
-      resolve();
-    });
-    document.body.append(node);
-  });
-  entry.ready = Promise.all([styled, ran]);
-  return entry.ready;
-}
-
-/** The project's on/off switch of a loaded plugin; a locked one stays on and says why (the host refuses the change as well). */
-function switchOf(plugin) {
-  if (plugin.state !== "loaded" || plugin.enabled === undefined) return "";
-  const locked = plugin.enabled && plugin.lock;
-  return `<label class="switch" aria-label="${esc(plugin.name)} in this project"><input type="checkbox" data-plugin-toggle="${esc(plugin.name)}" ${plugin.enabled ? "checked" : ""} ${locked ? "disabled" : ""} /><span class="track" aria-hidden="true"></span></label>`;
-}
-
-/** What the host loaded at its start: a change on disk shows here only after the next restart. */
-export function pluginRow(plugin) {
-  const loaded = plugin.state === "loaded";
-  const detail = loaded
-    ? `<p class="small muted">${esc(plugin.provides.join(", ") || "no capabilities")}</p>`
-    : `<p class="small plugin-error">${esc(clip(plugin.error ?? "failed", 300))}</p>${plugin.error?.includes(plugin.source) ? "" : `<p class="small muted mono">${esc(clip(plugin.source, 160))}</p>`}`;
-  return `<div class="plugin-row" data-plugin="${esc(plugin.name ?? "")}" data-state="${esc(plugin.state)}" title="${esc(plugin.source)}"><div class="plugin-head"><span class="mono">${esc(plugin.name ?? "unnamed")}</span>${plugin.version ? `<span class="muted small mono">${esc(plugin.version)}</span>` : ""}<span class="badge"${loaded ? "" : ' data-tone="bad"'}>${loaded ? "loaded" : "failed"}</span>${switchOf(plugin)}</div>${detail}${plugin.lock ? `<p class="small muted" data-plugin-lock>Cannot be turned off: ${esc(plugin.lock)}.</p>` : ""}</div>`;
-}
-
-/** One card per plugin of the `plugins` RPC: its status row and, for a loaded plugin with a script, an empty panel. */
-export function pluginCards({ plugins, web }) {
-  const panels = new Set(web.filter((item) => item.script).map((item) => item.plugin));
-  return plugins
-    .map((plugin) => {
-      const panel =
-        plugin.state === "loaded" && plugin.enabled !== false && panels.has(plugin.name)
-          ? `<section class="plugin-panel" data-plugin="${esc(plugin.name)}" data-state="loading" aria-label="${esc(plugin.name)} panel"><p class="plugin-error small" role="alert" hidden></p><div class="plugin-slot"></div></section>`
-          : "";
-      return `<div class="plugin-card" data-plugin="${esc(plugin.name ?? "")}" data-state="${esc(plugin.state)}">${pluginRow(plugin)}${panel}</div>`;
-    })
-    .join("");
-}
-
-/** Mounts every panel `pluginCards` rendered inside `container` for `projectId`; the returned function unmounts them. */
-export function mountPanels(container, projectId, web) {
-  const controller = new AbortController();
-  for (const node of container.querySelectorAll(".plugin-panel[data-plugin]")) {
-    if (!projectId) {
-      node.dataset.state = "idle";
-      node.querySelector(".plugin-slot").innerHTML = `<p class="muted small">Select a project to use this panel.</p>`;
-      continue;
-    }
-    const item = web.find((entry) => entry.plugin === node.dataset.plugin && entry.script);
-    if (item) void mountOne(node, item, { projectId }, controller.signal, "panel");
+    entry.ready = Promise.all([styled, ran]);
+    return entry.ready;
   }
-  return () => controller.abort();
-}
 
-/** The plugins that opted in to a right-panel section, in load order. */
-export const sidebarItems = (web) => web.filter((item) => item.script && item.sidebar);
-
-/** One empty section per opted-in plugin: a heading, an error line and the slot the plugin fills. */
-export function sectionNodes(web) {
-  return sidebarItems(web).map((item) => {
-    const node = document.createElement("section");
-    node.className = "ctx-section plugin-section";
-    node.dataset.plugin = item.plugin;
-    node.dataset.state = "loading";
-    node.setAttribute("aria-label", item.sidebar.title);
-    node.innerHTML = `<h2></h2><p class="plugin-error small" role="alert" hidden></p><div class="plugin-slot"></div>`;
-    node.querySelector("h2").textContent = item.sidebar.title;
-    return node;
-  });
-}
-
-/** Mounts the sections `sectionNodes` made for the selected project and chat; the returned function aborts them. */
-export function mountSections(nodes, web, context) {
-  const controller = new AbortController();
-  for (const node of nodes) {
-    const item = sidebarItems(web).find((entry) => entry.plugin === node.dataset.plugin);
-    if (item) void mountOne(node, item, context, controller.signal, "section");
+  /** The project's on/off switch of a loaded plugin; a locked one stays on and says why (the host refuses the change as well). */
+  function switchOf(plugin) {
+    if (plugin.state !== "loaded" || plugin.enabled === undefined) return "";
+    const locked = plugin.enabled && plugin.lock;
+    return `<label class="switch" aria-label="${esc(plugin.name)} in this project"><input type="checkbox" data-plugin-toggle="${esc(plugin.name)}" ${plugin.enabled ? "checked" : ""} ${locked ? "disabled" : ""} /><span class="track" aria-hidden="true"></span></label>`;
   }
-  return () => controller.abort();
-}
 
-async function mountOne(node, item, { projectId, chatId }, signal, kind) {
-  const name = item.plugin,
-    errorLine = node.querySelector(".plugin-error"),
-    slot = node.querySelector(".plugin-slot");
-  const show = (error) => {
-    if (signal.aborted || isAbort(error)) return;
-    errorLine.textContent = messageOf(error);
-    errorLine.hidden = false;
-  };
-  const fail = (error) => {
-    if (signal.aborted || isAbort(error)) return;
-    show(error);
-    node.dataset.state = "failed";
-    slot.replaceChildren();
-  };
-  await load(item);
-  const { definition, error, styleError } = scripts.get(name);
-  if (signal.aborted) return;
-  if (!definition || error) return fail(error);
-  const part = kind === "section" ? definition.sidebar : definition.mount ? definition : null;
-  if (!part) {
-    if (kind === "section") return fail(`${name} declares a sidebar section but its ui.js registered none (sidebar: { mount })`);
-    return node.remove();
+  /** What the host loaded at its start: a change on disk shows here only after the next restart. */
+  function pluginRow(plugin) {
+    const loaded = plugin.state === "loaded";
+    const detail = loaded
+      ? `<p class="small muted">${esc(plugin.provides.join(", ") || "no capabilities")}</p>`
+      : `<p class="small plugin-error">${esc(clip(plugin.error ?? "failed", 300))}</p>${plugin.error?.includes(plugin.source) ? "" : `<p class="small muted mono">${esc(clip(plugin.source, 160))}</p>`}`;
+    return `<div class="plugin-row" data-plugin="${esc(plugin.name ?? "")}" data-state="${esc(plugin.state)}" title="${esc(plugin.source)}"><div class="plugin-head"><span class="mono">${esc(plugin.name ?? "unnamed")}</span>${plugin.version ? `<span class="muted small mono">${esc(plugin.version)}</span>` : ""}<span class="badge"${loaded ? "" : ' data-tone="bad"'}>${loaded ? "loaded" : "failed"}</span>${switchOf(plugin)}</div>${detail}${plugin.lock ? `<p class="small muted" data-plugin-lock>Cannot be turned off: ${esc(plugin.lock)}.</p>` : ""}</div>`;
   }
-  if (styleError) show(styleError);
-  // A call after the panel went away is never sent, and a late answer rejects with an AbortError, so nothing reaches the next project.
-  const settled = async (send) => {
-    signal.throwIfAborted();
-    try {
-      const value = await send();
-      signal.throwIfAborted();
-      return value;
-    } catch (error) {
-      signal.throwIfAborted();
-      throw error;
-    }
-  };
-  const panel = Object.freeze({
-    projectId,
-    ...(chatId ? { chatId } : {}),
-    signal,
-    rpc: (method, params) => settled(() => call("plugin", { plugin: name, method, id: projectId, params })),
-    fetch: (route, query = {}) =>
-      settled(() =>
-        authorizedFetch(
-          `/plugins/${name}/${encodeURIComponent(route)}?${new URLSearchParams({ ...query, project: projectId, ...(chatId ? { chat: chatId } : {}) })}`,
-          { signal },
-        ),
-      ),
-  });
-  // Clicks inside the slot belong to the plugin: they never reach core handlers (data-cmd, data-profile, ...).
-  slot.addEventListener("click", (event) => {
-    event.stopPropagation();
-    const target = event.target.closest("[data-action]");
-    if (!part.action || !target || !slot.contains(target) || !target.dataset.action.startsWith(`${name}-`)) return;
-    Promise.resolve()
-      .then(() => part.action(target.dataset.action, target, panel))
-      .catch(show);
-  });
-  if (!mounted.has(name)) mounted.set(name, new Set());
-  mounted.get(name).add(show);
-  signal.addEventListener("abort", () => mounted.get(name)?.delete(show), { once: true });
-  try {
-    await part.mount(slot, panel);
-    if (!signal.aborted) node.dataset.state = "ready";
-  } catch (mountError) {
-    fail(mountError);
-  }
-}
 
-const CATALOG_STATES = {
-  available: { label: "available", tone: "" },
-  configured: { label: "restart required", tone: "t-needs" },
-  loaded: { label: "loaded", tone: "t-ready" },
-  failed: { label: "failed", tone: "bad" },
-};
-
-/** The plugins shipped with pi-prjcts and what this host does with each; the loaded plugins' cards stay below it. */
-const catalogAlert = (error) => `<p class="plugin-error small" role="alert">${esc(error)}</p>`;
-export function catalogBlock({ entries, instance, sha }, error = "") {
-  const rows = entries
-    .map((entry) => {
-      const state = CATALOG_STATES[entry.state];
-      const action =
-        entry.state === "available"
-          ? `<button type="button" class="ghost-btn small" data-catalog-activate="${esc(entry.id)}">Add plugin</button>`
-          : entry.state === "configured"
-            ? `<button type="button" class="primary small" data-catalog-restart>Restart to enable</button>`
+  /** One card per plugin of the `plugins` RPC: its status row and, for a loaded plugin with a script, an empty panel. */
+  function pluginCards({ plugins, web }) {
+    const panels = new Set((client.local ? web : []).filter((item) => item.script).map((item) => item.plugin));
+    return plugins
+      .map((plugin) => {
+        const panel =
+          plugin.state === "loaded" && plugin.enabled !== false && panels.has(plugin.name)
+            ? `<section class="plugin-panel" data-plugin="${esc(plugin.name)}" data-state="loading" aria-label="${esc(plugin.name)} panel"><p class="plugin-error small" role="alert" hidden></p><div class="plugin-slot"></div></section>`
             : "";
-      const note = entry.state === "failed" ? `<p class="small plugin-error">${esc(clip(entry.error ?? "failed", 300))}</p>` : "";
-      return `<div class="catalog-row" data-catalog="${esc(entry.id)}" data-state="${esc(entry.state)}"><div class="plugin-head"><span class="catalog-name mono">${esc(entry.name)}</span>${entry.version ? `<span class="muted small mono">${esc(entry.version)}</span>` : ""}<span class="badge ${state.tone}"${entry.state === "failed" ? ' data-tone="bad"' : ""}>${state.label}</span></div><p class="catalog-description small muted">${esc(entry.description)}</p>${note}${action ? `<div class="catalog-actions">${action}</div>` : ""}</div>`;
-    })
-    .join("");
-  return `<section class="plugin-catalog" data-instance="${esc(instance)}" data-sha="${esc(sha ?? "")}" aria-label="Plugins shipped with pi-prjcts"><h2 class="small">Shipped with pi-prjcts</h2><p class="small muted">Add a plugin for every project. It loads at the next host restart.</p>${error ? catalogAlert(error) : ""}${rows}</section>`;
-}
-
-async function waitForReplacement(instance, sha) {
-  const deadline = Date.now() + 45000;
-  while (Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    const catalog = await call("plugin-catalog", {}, AbortSignal.timeout(3000)).catch(() => null);
-    if (!catalog || catalog.instance === instance) continue;
-    if (catalog.previous !== instance || catalog.sha !== sha)
-      throw new Error("Connected to a different host instance or version. Restart not verified.");
-    return catalog;
+        return `<div class="plugin-card" data-plugin="${esc(plugin.name ?? "")}" data-state="${esc(plugin.state)}">${pluginRow(plugin)}${panel}</div>`;
+      })
+      .join("");
   }
-  throw new Error("Could not verify the restart. Reopen Plugins to check the current status. No restart was retried.");
-}
 
-export function wireCatalog(container, onCatalog, refresh) {
-  container.addEventListener("click", async (event) => {
-    const row = event.target.closest(".catalog-row");
-    if (!row) return;
-    const restart = row.querySelector("[data-catalog-restart]");
-    if (event.target.closest("[data-catalog-restart]")) {
-      const name = row.querySelector(".catalog-name").textContent;
-      restart.closest(".catalog-actions").hidden = true;
-      row.insertAdjacentHTML(
-        "beforeend",
-        `<div class="catalog-confirm" data-confirmation role="group" aria-labelledby="restart-${esc(row.dataset.catalog)}-title"><h3 id="restart-${esc(row.dataset.catalog)}-title">Restart to enable ${esc(name)}?</h3><p class="catalog-warning small">Running work in all projects will be interrupted.</p><p class="small muted">The host restarts on the same code version, then loads ${esc(name)}.</p><div class="confirm-actions"><button type="button" class="ghost-btn" data-cancel-restart>Cancel</button><button type="button" class="primary" data-confirm-restart>Restart and enable</button></div></div>`,
-      );
-      row.querySelector("[data-cancel-restart]").focus();
-      return;
-    }
-    if (event.target.closest("[data-cancel-restart]")) {
-      row.querySelector("[data-confirmation]").remove();
-      restart.closest(".catalog-actions").hidden = false;
-      restart.focus();
-      return;
-    }
-    if (event.target.closest("[data-confirm-restart]")) {
-      const { instance, sha } = row.closest(".plugin-catalog").dataset;
-      const status = row.querySelector("[data-confirmation]");
-      status.setAttribute("role", "status");
-      status.textContent = "Restarting host… Waiting to reconnect.";
-      try {
-        try {
-          await call("plugin-restart", { plugin: row.dataset.catalog, instance }, AbortSignal.timeout(15000));
-        } catch (error) {
-          if (error.refused || error.status === 403 || error.status === 401) throw error;
-        }
-        const catalog = await waitForReplacement(instance, sha);
-        onCatalog(catalog);
-        await refresh();
-      } catch (error) {
-        status.textContent = messageOf(error);
+  /** Mounts every panel `pluginCards` rendered inside `container` for `projectId`; the returned function unmounts them. */
+  function mountPanels(container, projectId, web) {
+    const controller = new AbortController();
+    for (const node of container.querySelectorAll(".plugin-panel[data-plugin]")) {
+      if (!projectId) {
+        node.dataset.state = "idle";
+        node.querySelector(".plugin-slot").innerHTML = `<p class="muted small">Select a project to use this panel.</p>`;
+        continue;
       }
-      return;
+      const item = web.find((entry) => entry.plugin === node.dataset.plugin && entry.script);
+      if (item) void mountOne(node, item, { projectId }, controller.signal, "panel");
     }
-    const button = event.target.closest("[data-catalog-activate]");
-    if (!button || button.disabled) return;
-    button.disabled = true;
+    return () => controller.abort();
+  }
+
+  /** The plugins that opted in to a right-panel section, in load order. */
+  const sidebarItems = (web) => (client.local ? web : []).filter((item) => item.script && item.sidebar);
+
+  /** One empty section per opted-in plugin: a heading, an error line and the slot the plugin fills. */
+  function sectionNodes(web) {
+    return sidebarItems(web).map((item) => {
+      const node = document.createElement("section");
+      node.className = "ctx-section plugin-section";
+      node.dataset.plugin = item.plugin;
+      node.dataset.state = "loading";
+      node.setAttribute("aria-label", item.sidebar.title);
+      node.innerHTML = `<h2></h2><p class="plugin-error small" role="alert" hidden></p><div class="plugin-slot"></div>`;
+      node.querySelector("h2").textContent = item.sidebar.title;
+      return node;
+    });
+  }
+
+  /** Mounts the sections `sectionNodes` made for the selected project and chat; the returned function aborts them. */
+  function mountSections(nodes, web, context) {
+    const controller = new AbortController();
+    for (const node of nodes) {
+      const item = sidebarItems(web).find((entry) => entry.plugin === node.dataset.plugin);
+      if (item) void mountOne(node, item, context, controller.signal, "section");
+    }
+    return () => controller.abort();
+  }
+
+  async function mountOne(node, item, { projectId, chatId }, signal, kind) {
+    const name = item.plugin,
+      errorLine = node.querySelector(".plugin-error"),
+      slot = node.querySelector(".plugin-slot");
+    const show = (error) => {
+      if (signal.aborted || isAbort(error)) return;
+      errorLine.textContent = messageOf(error);
+      errorLine.hidden = false;
+    };
+    const fail = (error) => {
+      if (signal.aborted || isAbort(error)) return;
+      show(error);
+      node.dataset.state = "failed";
+      slot.replaceChildren();
+    };
+    await load(item);
+    const { definition, error, styleError } = scripts.get(name);
+    if (signal.aborted) return;
+    if (!definition || error) return fail(error);
+    const part = kind === "section" ? definition.sidebar : definition.mount ? definition : null;
+    if (!part) {
+      if (kind === "section") return fail(`${name} declares a sidebar section but its ui.js registered none (sidebar: { mount })`);
+      return node.remove();
+    }
+    if (styleError) show(styleError);
+    // A call after the panel went away is never sent, and a late answer rejects with an AbortError, so nothing reaches the next project.
+    const settled = async (send) => {
+      signal.throwIfAborted();
+      try {
+        const value = await send();
+        signal.throwIfAborted();
+        return value;
+      } catch (error) {
+        signal.throwIfAborted();
+        throw error;
+      }
+    };
+    const panel = Object.freeze({
+      projectId,
+      ...(chatId ? { chatId } : {}),
+      signal,
+      rpc: (method, params) => settled(() => client.call("plugin", { plugin: name, method, id: projectId, params })),
+      fetch: (route, query = {}) =>
+        settled(() =>
+          client.authorizedFetch(
+            `/plugins/${name}/${encodeURIComponent(route)}?${new URLSearchParams({ ...query, project: projectId, ...(chatId ? { chat: chatId } : {}) })}`,
+            { signal },
+          ),
+        ),
+    });
+    // Clicks inside the slot belong to the plugin: they never reach core handlers (data-cmd, data-profile, ...).
+    slot.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const target = event.target.closest("[data-action]");
+      if (!part.action || !target || !slot.contains(target) || !target.dataset.action.startsWith(`${name}-`)) return;
+      Promise.resolve()
+        .then(() => part.action(target.dataset.action, target, panel))
+        .catch(show);
+    });
+    if (!mounted.has(name)) mounted.set(name, new Set());
+    mounted.get(name).add(show);
+    signal.addEventListener("abort", () => mounted.get(name)?.delete(show), { once: true });
     try {
-      const catalog = await call("plugin-activate", { plugin: button.dataset.catalogActivate });
-      onCatalog(catalog);
-      const block = container.querySelector(".plugin-catalog");
-      if (block) block.outerHTML = catalogBlock(catalog);
-    } catch (error) {
-      button.disabled = false;
-      const block = container.querySelector(".plugin-catalog");
-      block?.querySelector("[role=alert]")?.remove();
-      block?.querySelector("h2 + p")?.insertAdjacentHTML("afterend", catalogAlert(messageOf(error)));
+      await part.mount(slot, panel);
+      if (!signal.aborted) node.dataset.state = "ready";
+    } catch (mountError) {
+      fail(mountError);
     }
-  });
+  }
+
+  const CATALOG_STATES = {
+    available: { label: "available", tone: "" },
+    configured: { label: "restart required", tone: "t-needs" },
+    loaded: { label: "loaded", tone: "t-ready" },
+    failed: { label: "failed", tone: "bad" },
+  };
+
+  /** The plugins shipped with pi-prjcts and what this host does with each; the loaded plugins' cards stay below it. */
+  const catalogAlert = (error) => `<p class="plugin-error small" role="alert">${esc(error)}</p>`;
+  function catalogBlock({ entries, instance, sha }, error = "") {
+    const rows = entries
+      .map((entry) => {
+        const state = CATALOG_STATES[entry.state];
+        const action =
+          entry.state === "available"
+            ? `<button type="button" class="ghost-btn small" data-catalog-activate="${esc(entry.id)}">Add plugin</button>`
+            : entry.state === "configured"
+              ? `<button type="button" class="primary small" data-catalog-restart>Restart to enable</button>`
+              : "";
+        const note = entry.state === "failed" ? `<p class="small plugin-error">${esc(clip(entry.error ?? "failed", 300))}</p>` : "";
+        return `<div class="catalog-row" data-catalog="${esc(entry.id)}" data-state="${esc(entry.state)}"><div class="plugin-head"><span class="catalog-name mono">${esc(entry.name)}</span>${entry.version ? `<span class="muted small mono">${esc(entry.version)}</span>` : ""}<span class="badge ${state.tone}"${entry.state === "failed" ? ' data-tone="bad"' : ""}>${state.label}</span></div><p class="catalog-description small muted">${esc(entry.description)}</p>${note}${action ? `<div class="catalog-actions">${action}</div>` : ""}</div>`;
+      })
+      .join("");
+    return `<section class="plugin-catalog" data-instance="${esc(instance)}" data-sha="${esc(sha ?? "")}" aria-label="Plugins shipped with pi-prjcts"><h2 class="small">Shipped with pi-prjcts</h2><p class="small muted">Add a plugin for every project. It loads at the next host restart.</p>${error ? catalogAlert(error) : ""}${rows}</section>`;
+  }
+
+  async function waitForReplacement(instance, sha) {
+    const deadline = Date.now() + 45000;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      const catalog = await client.call("plugin-catalog", {}, AbortSignal.timeout(3000)).catch(() => null);
+      if (!catalog || catalog.instance === instance) continue;
+      if (catalog.previous !== instance || catalog.sha !== sha)
+        throw new Error("Connected to a different host instance or version. Restart not verified.");
+      return catalog;
+    }
+    throw new Error("Could not verify the restart. Reopen Plugins to check the current status. No restart was retried.");
+  }
+
+  function wireCatalog(container, onCatalog, refresh) {
+    container.addEventListener("click", async (event) => {
+      const row = event.target.closest(".catalog-row");
+      if (!row) return;
+      const restart = row.querySelector("[data-catalog-restart]");
+      if (event.target.closest("[data-catalog-restart]")) {
+        const name = row.querySelector(".catalog-name").textContent;
+        restart.closest(".catalog-actions").hidden = true;
+        row.insertAdjacentHTML(
+          "beforeend",
+          `<div class="catalog-confirm" data-confirmation role="group" aria-labelledby="restart-${esc(row.dataset.catalog)}-title"><h3 id="restart-${esc(row.dataset.catalog)}-title">Restart to enable ${esc(name)}?</h3><p class="catalog-warning small">Running work in all projects will be interrupted.</p><p class="small muted">The host restarts on the same code version, then loads ${esc(name)}.</p><div class="confirm-actions"><button type="button" class="ghost-btn" data-cancel-restart>Cancel</button><button type="button" class="primary" data-confirm-restart>Restart and enable</button></div></div>`,
+        );
+        row.querySelector("[data-cancel-restart]").focus();
+        return;
+      }
+      if (event.target.closest("[data-cancel-restart]")) {
+        row.querySelector("[data-confirmation]").remove();
+        restart.closest(".catalog-actions").hidden = false;
+        restart.focus();
+        return;
+      }
+      if (event.target.closest("[data-confirm-restart]")) {
+        const { instance, sha } = row.closest(".plugin-catalog").dataset;
+        const status = row.querySelector("[data-confirmation]");
+        status.setAttribute("role", "status");
+        status.textContent = "Restarting host… Waiting to reconnect.";
+        try {
+          try {
+            await client.call("plugin-restart", { plugin: row.dataset.catalog, instance }, AbortSignal.timeout(15000));
+          } catch (error) {
+            if (error.refused || error.status === 403 || error.status === 401) throw error;
+          }
+          const catalog = await waitForReplacement(instance, sha);
+          onCatalog(catalog);
+          await refresh();
+        } catch (error) {
+          status.textContent = messageOf(error);
+        }
+        return;
+      }
+      const button = event.target.closest("[data-catalog-activate]");
+      if (!button || button.disabled) return;
+      button.disabled = true;
+      try {
+        const catalog = await client.call("plugin-activate", { plugin: button.dataset.catalogActivate });
+        onCatalog(catalog);
+        const block = container.querySelector(".plugin-catalog");
+        if (block) block.outerHTML = catalogBlock(catalog);
+      } catch (error) {
+        button.disabled = false;
+        const block = container.querySelector(".plugin-catalog");
+        block?.querySelector("[role=alert]")?.remove();
+        block?.querySelector("h2 + p")?.insertAdjacentHTML("afterend", catalogAlert(messageOf(error)));
+      }
+    });
+  }
+
+  return { pluginRow, pluginCards, mountPanels, sidebarItems, sectionNodes, mountSections, catalogBlock, wireCatalog };
 }

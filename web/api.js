@@ -33,12 +33,11 @@ export class HostError extends Error {
     this.refused = refused;
   }
 }
-export async function call(action, input = {}, signal) {
-  if (!token) throw new HostError("Not signed in", 401);
+async function requestAction(fetch, action, input = {}, signal) {
   const response = await fetch("/api", {
     method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-    body: JSON.stringify({ action, ...input }),
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...input, action }),
     signal,
   });
   let body;
@@ -52,15 +51,18 @@ export async function call(action, input = {}, signal) {
 }
 
 /** An authenticated GET of a host path outside `/api` (plugin routes). */
-export function authorizedFetch(path, init = {}) {
-  return fetch(path, { ...init, headers: { ...init.headers, authorization: `Bearer ${token}` } });
+function localFetch(path, init = {}) {
+  if (!token) throw new HostError("Not signed in", 401);
+  const url = new URL(path, location.origin);
+  if (url.origin !== location.origin) throw new Error("Expected a host path");
+  return fetch(url.pathname + url.search, { ...init, redirect: "error", headers: { ...init.headers, authorization: `Bearer ${token}` } });
 }
 
 /**
  * Reads one SSE stream (`/live` or `/changes`) and calls `onFrame` per JSON frame. Reconnects with backoff until `stop()`.
  * `onState(up)` reports the connection for the status line. A 4xx (e.g. host streams before the backend merge) backs off to 60 s.
  */
-export function stream(path, onFrame, onState = () => {}) {
+function openStream(host, path, onFrame, onState = () => {}) {
   let controller = null,
     stopped = false,
     retry = 1000,
@@ -69,7 +71,7 @@ export function stream(path, onFrame, onState = () => {}) {
     controller = new AbortController();
     let failed = false;
     try {
-      const response = await fetch(path, { headers: { authorization: `Bearer ${token}` }, signal: controller.signal });
+      const response = await host.authorizedFetch(path, { signal: controller.signal });
       if (!response.ok || !response.body) {
         failed = response.status >= 400 && response.status < 500;
         return;
@@ -117,6 +119,85 @@ export function stream(path, onFrame, onState = () => {}) {
       controller?.abort();
     },
   };
+}
+
+const reads = new Set(
+  `approvals-list automation-snapshot chat-history coordinator-skills deploy-snapshot host-agent-history jobs-snapshot knowledge-read limits-snapshot list machine-status memory-index memory-recent memory-writes plugin-catalog plugins profile-tools profiles-get prompt-blocks-get prompt-render prs remote-devices remote-status schedule-history schedule-snapshot search settings-snapshot show storage-status storage-summary telegram-snapshot thread-history tiers-get tool-summaries-usage transcript-image ui-get usage-snapshot worker-contexts pr-review-files pr-review-file pr-review-lines pr-review-tour-status`.split(
+    " ",
+  ),
+);
+function hostClient(transport) {
+  const run = transport.run ?? ((_read, _signal, work) => work(transport.authorizedFetch));
+  return Object.assign(transport, {
+    storagePrefix: transport.local ? "" : `pi-host:${transport.hostId}:`,
+    call(action, input, signal) {
+      return run(
+        reads.has(action) || (action === "pr-review-open" && !input?.seen) || (action === "host-agent-settings" && !input?.patch),
+        signal,
+        (fetch) => requestAction(fetch, action, input, signal),
+      );
+    },
+    stream(path, onFrame, onState) {
+      return openStream(transport, path, onFrame, onState);
+    },
+    async url(path, { image, maxBytes, ...options } = {}) {
+      return run(true, options.signal, async (fetch) => {
+        const response = await fetch(path, options);
+        if (maxBytes && Number(response.headers.get("content-length")) > maxBytes) {
+          await response.body?.cancel();
+          throw Error("Resource too large");
+        }
+        if (!response.ok) {
+          await response.body?.cancel();
+          throw new HostError(`Resource unavailable (${response.status})`, response.status);
+        }
+        const data = await response.blob();
+        const type = /^(image\/(png|jpeg|webp|gif)|audio\/(mpeg|wav|ogg)|video\/(mp4|webm))$/.test(data.type)
+          ? data.type
+          : "application/octet-stream";
+        if (image && !type.startsWith("image/")) throw Error("Not an image");
+        return URL.createObjectURL(data.slice(0, data.size, type));
+      });
+    },
+  });
+}
+export const localHost = hostClient({ local: true, authorizedFetch: localFetch });
+
+const clients = new Map();
+export async function remoteHost(entry) {
+  if (clients.has(entry.hostId)) return clients.get(entry.hostId);
+  const creating = (async () => {
+    const { remoteTransport } = await import("./remote-client.js");
+    const transport = await remoteTransport(entry);
+    return hostClient(transport);
+  })();
+  clients.set(entry.hostId, creating);
+  try {
+    return await creating;
+  } catch (error) {
+    clients.delete(entry.hostId);
+    throw error;
+  }
+}
+export async function pairingEntry(link) {
+  const { parsePairFragment } = await import("/inbox-wire/wire.js");
+  const url = new URL(link);
+  if (url.protocol !== "https:" || url.pathname !== "/" || url.username || url.password || url.search) throw Error("Invalid pairing link");
+  const value = parsePairFragment(url.hash);
+  if (!value) throw Error("Invalid pairing link");
+  return {
+    entry: { hostId: value.hostId, name: value.hostName, relayOrigin: url.origin },
+    pair: { code: value.code, name: "Local inbox" },
+  };
+}
+export async function forgetHost(id) {
+  const { forgetDevice, stopViews } = await import("./remote-client.js");
+  await navigator.locks.request(`pair:${id}`, async () => {
+    await localHost.call("inbox-host-forget", { hostId: id });
+    stopViews(id);
+    await forgetDevice(id);
+    clients.delete(id);
+  });
 }
 
 export const uuid = () => crypto.randomUUID();

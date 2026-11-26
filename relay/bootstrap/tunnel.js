@@ -52,9 +52,14 @@ const json = (data) => {
  * Connect to `hostId`. With `pair: {code, name}` the hello pairs this device first; the session then continues as the device.
  * Resolves once the host's welcome verified against the pinned hostId.
  */
-export async function openTunnel({ hostId, pair = null }) {
-  const me = await device();
-  const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
+export async function openTunnel({
+  hostId,
+  pair = null,
+  identity = device,
+  endpoint = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`,
+}) {
+  const me = await identity();
+  const ws = new WebSocket(endpoint);
   ws.binaryType = "arraybuffer";
   const next = reader(ws);
   const timer = setTimeout(() => ws.close(4000, "Handshake timed out"), HANDSHAKE_MS);
@@ -108,6 +113,9 @@ class Tunnel {
   }
 
   async start(state, welcome) {
+    // A close during the welcome verification keeps its code, so a revocation is not mistaken for an outage.
+    let early = null;
+    this.#ws.onclose = (event) => (early = event);
     this.#session = await clientFinish(state, welcome, {
       send: (record) => this.#ws.send(record),
       onMessage: (header, body) => this.#receive(header, body),
@@ -117,6 +125,8 @@ class Tunnel {
       if (typeof event.data !== "string") void this.#session.receive(event.data);
     };
     this.#ws.onclose = (event) => this.#end(closeError(event));
+    if (early) throw closeError(early);
+    if (this.#ws.readyState > 1) throw new TunnelError("Connection closed during the handshake");
   }
 
   close() {

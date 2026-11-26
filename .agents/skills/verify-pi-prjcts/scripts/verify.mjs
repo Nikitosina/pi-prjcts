@@ -707,7 +707,7 @@ async function ui2Images(run, page, record, dir, sinks) {
     "missing artifact degrades to a labelled note",
   );
   const facts = await page.evaluate(`(async () => {
-    const { transcriptHtml } = await import('/chat.js');
+    const { transcriptHtml } = (await import('/app.js')).chat;
     const only = transcriptHtml([{ kind: 'message', role: 'assistant', entryId: 9e9, at: 0, text: '', ref: '1.0', truncated: false, images: [{ ref: '1.0.0', mime: 'image/png', bytes: 2048 }] },
       { kind: 'message', role: 'user', origin: 'owner', entryId: 9e9 + 1, at: 0, text: '', ref: '2.0', truncated: false, images: [{ ref: '2.0.1', mime: 'image/"png', bytes: 10 }] }], false);
     const box = document.createElement('div');
@@ -2250,7 +2250,7 @@ const journeys = {
       );
       // Two quick changes: the host's answer to the first must not undo the second while it is still being written.
       const race = await page.evaluate(`(async () => {
-        const { setUi } = await import('/ui.js'), { state } = await import('/state.js');
+        const { setUi } = (await import('/app.js')).ui, { state } = await import('/state.js');
         const first = setUi({ statusLine: true });
         const second = setUi({ statusItems: state.ui.statusItems.map(item => item.id === 'model' ? { ...item, enabled: false } : item) });
         await first;
