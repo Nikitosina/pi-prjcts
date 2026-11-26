@@ -120,7 +120,6 @@ export function createSimulators(api: HostPluginApi) {
       version: Type.Literal(2),
       projectId: Uuid,
       enabled: Type.Boolean(),
-      sourceUdid: Type.Union([Uuid, Type.Null()]),
       keepCategories: Type.Optional(KeepCategories),
       owned: Type.Array(Owned, { maxItems: MAX_OWNED }),
       pending: Type.Union([Pending, Type.Null()]),
@@ -176,26 +175,21 @@ export function createSimulators(api: HostPluginApi) {
   const testingRoot = () => join(homedir(), "Library/Developer/XCTestDevices");
   const simulatorEnabled = (id: string) => readStore(id).enabled;
 
-  /** Management is on by default; the owner may turn it off (keeping the clones and all their data) or pin the default clone source. */
+  /** Management is on by default; the owner may turn it off (keeping the clones and all their data). */
   async function configureSimulator(
     id: string,
-    input: { enabled?: boolean; sourceUdid?: string; keepCategories?: Static<typeof KeepCategories>; requestId: string },
+    input: { enabled?: boolean; keepCategories?: Static<typeof KeepCategories>; requestId: string },
   ) {
     await locked(id, async () => {
       activeProject(id);
       const store = readStore(id),
         fingerprint = JSON.stringify({
           enabled: input.enabled,
-          sourceUdid: input.sourceUdid?.toUpperCase() ?? null,
+          sourceUdid: null, // Keep existing enablement and category request receipts replayable.
           keepCategories: input.keepCategories,
         });
       if (repeated(store, input.requestId, fingerprint)) return;
       if (store.pending || tasks.has(id)) throw Error("Simulator operation is still running or unresolved");
-      if (input.sourceUdid) {
-        const source = (await inventory()).find((device) => device.udid === input.sourceUdid?.toUpperCase() && device.set === "default");
-        if (!source) throw Error("Choose an available iOS simulator in the default device set");
-        store.sourceUdid = source.udid;
-      }
       if (input.enabled !== undefined) store.enabled = input.enabled;
       if (input.keepCategories) store.keepCategories = input.keepCategories;
       store.receipts[input.requestId] = { fingerprint, status: "done" };
@@ -247,6 +241,8 @@ export function createSimulators(api: HostPluginApi) {
   ) {
     if (caller.kind === "leaseHolder" && !WORKER_OPERATIONS.some((allowed) => allowed === operation))
       throw Error(`Only boot and shutdown run under a worker's lease; ask the Coordinator to ${operation} a simulator`);
+    if (operation === "create" && !target.sourceUdid)
+      throw Error("Create requires sourceUdid from the shut-down sources in projects_simulator_status");
     await locked(id, async () => {
       activeProject(id);
       const store = readStore(id),
@@ -262,8 +258,7 @@ export function createSimulators(api: HostPluginApi) {
         resource: string;
       if (operation === "create") {
         if (store.owned.length >= MAX_OWNED) throw Error(`This project already owns ${MAX_OWNED} simulators; delete one first`);
-        // An explicit source, else the owner's pin, else the newest shut-down iPhone. The source itself is never changed.
-        sourceUdid = wanted.sourceUdid ?? store.sourceUdid ?? defaultSource(devices)?.udid ?? null;
+        sourceUdid = wanted.sourceUdid;
         const source = devices.find((device) => device.udid === sourceUdid && device.set === "default");
         if (!source) throw Error("Choose a source from the default device set (sources in projects_simulator_status)");
         if (store.owned.some((owned) => owned.udid === source.udid))
@@ -389,10 +384,8 @@ export function createSimulators(api: HostPluginApi) {
     const mine = new Set(store.owned.map((item) => item.udid));
     return {
       enabled: store.enabled,
-      sourceUdid: store.sourceUdid,
       categories,
       keepCategories: store.keepCategories ?? [],
-      defaultSourceUdid: store.sourceUdid ?? defaultSource(devices)?.udid ?? null,
       maxOwned: MAX_OWNED,
       status,
       devices: owned,
@@ -615,15 +608,6 @@ export function createSimulators(api: HostPluginApi) {
     const devices = parse(Type.Array(Device), JSON.parse(await command(simslim(), ["list", "--json"], signal)));
     return devices.map((item) => ({ ...item, udid: item.udid.toUpperCase() }));
   }
-  function defaultSource(devices: Device[]): Device | undefined {
-    const version = (device: Device) => device.osVersion.split(".").map(Number);
-    return devices
-      .filter((device) => device.set === "default" && device.state === "Shutdown" && device.name.startsWith("iPhone"))
-      .sort((a, b) => {
-        const [x, y] = [version(a), version(b)];
-        return y[0] - x[0] || (y[1] ?? 0) - (x[1] ?? 0) || a.name.localeCompare(b.name);
-      })[0];
-  }
   /** The clone an action names; without a UDID only when the project owns exactly one. */
   function targetOf(store: Store, udid: string | null, preferBooted = false): Owned {
     if (udid) {
@@ -674,8 +658,9 @@ export function createSimulators(api: HostPluginApi) {
   function readStore(id: string): Store {
     const path = statePath(id);
     const raw = existsSync(path) ? (readJson(path) as { version?: number }) : null;
+    if (raw?.version === 2 && "sourceUdid" in raw) delete raw.sourceUdid;
     const store: Store = !raw
-      ? { version: 2, projectId: id, enabled: true, sourceUdid: null, owned: [], pending: null, uncertain: null, receipts: {} }
+      ? { version: 2, projectId: id, enabled: true, owned: [], pending: null, uncertain: null, receipts: {} }
       : raw.version === 1
         ? migrate(parse(StoreV1, raw))
         : parse(Store, raw);
@@ -686,7 +671,7 @@ export function createSimulators(api: HostPluginApi) {
     }
     return store;
   }
-  function migrate(old: Static<typeof StoreV1>): Store {
+  function migrate({ sourceUdid, ...old }: Static<typeof StoreV1>): Store {
     return {
       ...old,
       version: 2,
@@ -695,7 +680,7 @@ export function createSimulators(api: HostPluginApi) {
         ? {
             ...old.pending,
             udid: old.pending.operation === "create" ? null : (old.owned?.udid ?? null),
-            sourceUdid: old.pending.operation === "create" ? old.sourceUdid : null,
+            sourceUdid: old.pending.operation === "create" ? sourceUdid : null,
           }
         : null,
     };

@@ -46,12 +46,12 @@ export default {
     const Id = Type.String({ pattern: "^[a-f0-9-]{36}$" }),
       Udid = Type.Optional(Type.String({ pattern: "^[a-fA-F0-9-]{36}$" }));
     const Configure = Type.Union([
-      Type.Object({ enabled: Type.Boolean(), sourceUdid: Udid, requestId: Id }, { additionalProperties: false }),
+      Type.Object({ enabled: Type.Boolean(), requestId: Id }, { additionalProperties: false }),
       Type.Object({ keepCategories: simulators.KeepCategories, requestId: Id }, { additionalProperties: false }),
     ]);
     const Act = Type.Object(
       { operation: simulators.SimulatorAction, requestId: Id, udid: Udid, sourceUdid: Udid },
-      { additionalProperties: false },
+      { additionalProperties: false, if: { properties: { operation: { const: "create" } } }, then: { required: ["sourceUdid"] } },
     );
     const Recover = Type.Object({ confirm: Id, requestId: Id }, { additionalProperties: false });
     const project = (context: PluginRpcContext) => {
@@ -88,8 +88,10 @@ export default {
         snapshot: async (context) => simulators.snapshot(project(context)),
         configure: async (context) => simulators.configure(project(context), params(Configure, context.params)),
         action: async (context) => {
-          const id = project(context),
-            input = params(Act, context.params);
+          const id = project(context);
+          const input = context.params;
+          if (!Value.Check(Act, input))
+            throw Error("Invalid simulator action. For create, pass a valid sourceUdid from projects_simulator_status.");
           return simulators.act(id, input.operation, input.requestId, { udid: input.udid, sourceUdid: input.sourceUdid });
         },
         recover: async (context) => simulators.recover(project(context), params(Recover, context.params)),

@@ -113,7 +113,7 @@
     const cancel = button("Cancel", "cancel");
     if (c.kind === "new") {
       const available = s.sources.filter((source) => source.state === "Shutdown");
-      return `<p><b>New project simulator</b></p><p class="small">Choose a shut-down simulator to clone. Its apps and settings are copied; the source is not changed. The coordinator can also do this itself.</p><label class="small simulator-field">Clone source <select data-simulator-source>${s.sources
+      return `<p><b>New project simulator</b></p><p class="small">Choose a shut-down simulator to clone. Its apps and settings are copied; the source is not changed. The coordinator can also do this itself.</p><label class="small simulator-field">Clone source <select data-simulator-source><option value="" disabled>Choose a source</option>${s.sources
         .map(
           (source) =>
             `<option value="${esc(source.udid)}"${source.state !== "Shutdown" ? " disabled" : ""}>${esc(source.name)} · iOS ${esc(source.osVersion)} · ${esc(source.state)}</option>`,
@@ -222,7 +222,7 @@
       const picker = confirm.querySelector("[data-simulator-source]");
       if (picker) {
         const free = s.sources.filter((source) => source.state === "Shutdown").map((source) => source.udid);
-        picker.value = [chosen, s.defaultSourceUdid].find((udid) => udid && free.includes(udid)) ?? free[0] ?? "";
+        picker.value = free.includes(chosen) ? chosen : "";
       }
     }
     confirm.hidden = !v.confirm;
@@ -247,7 +247,7 @@
     if (s)
       patch(
         $("details"),
-        `${d ? `<p class="small muted">View only: the screenshot refreshes about every 4 seconds, and no clicks or keyboard input are sent to the simulator.</p>` : ""}<p class="small muted">Agents create, boot, shut down, reset and delete up to ${esc(s.maxOwned)} clones for this project while management is on. Source simulators, shared runtimes and global caches are never changed.</p><dl class="simulator-facts"><dt>Default source</dt><dd>${esc(sourceName(v, s.defaultSourceUdid) ?? "Newest shut-down iPhone")}</dd>${d ? `<dt>Cloned from</dt><dd>${esc(sourceName(v, d.sourceUdid) ?? d.sourceUdid)}</dd><dt>iOS</dt><dd>${esc(d.osVersion)}</dd><dt>Device</dt><dd class="mono">${esc(d.udid)}</dd><dt>Slimming</dt><dd>${d.slim ? `${esc(d.slim.managedDisabled)}/${esc(d.slim.managedTotal)} services disabled${d.slim.persistent ? ", persistent" : ""}` : "Not reported"}</dd>` : ""}</dl>`,
+        `${d ? `<p class="small muted">View only: the screenshot refreshes about every 4 seconds, and no clicks or keyboard input are sent to the simulator.</p>` : ""}<p class="small muted">Agents create, boot, shut down, reset and delete up to ${esc(s.maxOwned)} clones for this project while management is on. Source simulators, shared runtimes and global caches are never changed.</p><dl class="simulator-facts">${d ? `<dt>Cloned from</dt><dd>${esc(sourceName(v, d.sourceUdid) ?? d.sourceUdid)}</dd><dt>iOS</dt><dd>${esc(d.osVersion)}</dd><dt>Device</dt><dd class="mono">${esc(d.udid)}</dd><dt>Slimming</dt><dd>${d.slim ? `${esc(d.slim.managedDisabled)}/${esc(d.slim.managedTotal)} services disabled${d.slim.persistent ? ", persistent" : ""}` : "Not reported"}</dd>` : ""}</dl>`,
       );
     if (s) {
       $("kept").textContent = s.keepCategories.join(", ") || "None";

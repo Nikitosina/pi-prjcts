@@ -59,7 +59,7 @@ writeFileSync(
     version: 2,
     projectId,
     enabled: true,
-    sourceUdid: null,
+    sourceUdid: source,
     owned: [
       { udid, name, sourceUdid: source, directory: realpathSync(device), device: facts.dev, inode: facts.ino, born: facts.birthtimeMs },
     ],
@@ -101,6 +101,16 @@ const call = (threadId, conversationId, args, callId = randomUUID()) =>
 writeFileSync(calls, "");
 
 try {
+  const action = tools
+    .coordinator({ projectId, isCoordinator: () => true })
+    .tools.find((tool) => tool.name === "projects_simulator_action");
+  await assert.rejects(
+    () => action.execute({ operation: "create", requestId: randomUUID() }, { conversationId: 1 }),
+    /sourceUdid/,
+    "Create without sourceUdid must be refused, even with a legacy source saved",
+  );
+  const snapshot = await simulators.snapshot(projectId);
+  assert.ok(!("sourceUdid" in snapshot || "defaultSourceUdid" in snapshot));
   assert.ok(boot("job-a", 7), "the worker gets projects_worker_simulator_boot");
 
   // W1 no lease, no effect.
