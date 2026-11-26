@@ -21,6 +21,8 @@ since the browser may deliver it after the layout already changed. Each transcri
   stream stops at the old bottom. (Red: coordinator-workers-ui-e2e S1 failed 2 of 6 runs under load with `gap 882`; the trace showed
   the event of a programmatic pin dispatched after the 390 px resize, read as the owner leaving the bottom.) A transcript that
   changes size while following is not re-pinned to the newest line.
+- F15 At the end of the transcript, the draft grows (several lines typed or pasted) and covers the newest lines instead of pushing
+  them up, because an upward wheel that could not move the view (the macOS trackpad bounce at the end) stopped following.
 - F6 A drag up while a reply streams (the scrollbar, or a text selection past the top edge) is pulled back to the bottom by the next
   chunk. Headless Chrome on macOS has overlay scrollbars, so the test drags a selection.
 - F7 Returning to the bottom (End, or scrolling down to the end) does not resume following.

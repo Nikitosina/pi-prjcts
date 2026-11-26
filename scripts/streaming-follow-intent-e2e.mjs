@@ -321,6 +321,29 @@ await k.run(async () => {
   await page.evaluate(
     `(() => { const box = document.querySelector('#composer-input'); box.value = ''; box.dispatchEvent(new Event('input')); })()`,
   );
+  await frames();
+
+  // F15: an upward wheel that cannot move the view (the trackpad bounce at the end) stops following; a growing draft still keeps the
+  // newest line above the composer while the view is at the end. Scroll anchoring is off as in Safari, where it hides nothing.
+  await page.evaluate(`document.querySelector('#feed').style.overflowAnchor = 'none'`);
+  await wheel("#feed", 100000);
+  k.check("F15 fixture: the view is at the end", (await at("#feed")).gap < 2, await at("#feed"));
+  const shown = () => page.evaluate(`document.querySelector('#feed').clientHeight`);
+  const tall = await shown();
+  await page.evaluate(`document.querySelector('#feed').dispatchEvent(new WheelEvent('wheel', { deltaY: -4 }))`);
+  await page.evaluate(
+    `(() => { const box = document.querySelector('#composer-input'); box.value = 'draft line\\n'.repeat(8); box.dispatchEvent(new Event('input')); })()`,
+  );
+  await frames();
+  k.check("F15 fixture: the draft took room from the transcript", (await shown()) < tall - 100, { tall, now: await shown() });
+  journeyCheck("F15 a draft growing at the end pushes the transcript up", (await at("#feed")).gap < 3, await at("#feed"));
+  await more(1);
+  journeyCheck("F15 the next chunk is followed again", (await at("#feed")).gap < 3, await at("#feed"));
+  await page.evaluate(
+    `(() => { const box = document.querySelector('#composer-input'); box.value = ''; box.dispatchEvent(new Event('input')); })()`,
+  );
+  await page.evaluate(`document.querySelector('#feed').style.overflowAnchor = ''`);
+  await wheel("#feed", 100000);
   await page.viewport(900, 1000);
   await frames();
   const narrowed = await at("#feed");

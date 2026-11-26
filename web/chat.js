@@ -847,8 +847,12 @@ document.querySelector("#questions").addEventListener("submit", (event) => {
 // ---------------------------------------------------------------------------------------------------------------- composer
 
 function grow() {
+  const atEnd = feed.clientHeight > 0 && feed.scrollHeight - feed.scrollTop - feed.clientHeight < 2,
+    before = input.style.height;
   input.style.height = "auto";
   input.style.height = `${Math.min(input.scrollHeight, 240)}px`;
+  // At the end the draft pushes the transcript up even when following stopped without moving the view (a trackpad bounce, F15).
+  if (atEnd && input.style.height !== before) follow.follow();
 }
 input.addEventListener("input", grow);
 form.addEventListener("dragover", (event) => {
