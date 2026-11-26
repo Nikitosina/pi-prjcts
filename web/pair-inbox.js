@@ -1,15 +1,15 @@
-import { remoteHost } from "./api.js";
+import { authenticatePair } from "./remote-client.js";
+
+history.replaceState(null, "", location.pathname);
 if (window.opener) {
   async function receive(event) {
     if (event.origin !== location.origin || event.source !== window.opener) return;
     removeEventListener("message", receive);
-    let result = "failed";
     try {
-      const client = await remoteHost(event.data.entry, event.data.pair);
-      if (client.state === "online") result = "paired";
-      if (client.state === "needs update") result = "incompatible";
-    } finally {
-      window.opener.postMessage(result, location.origin);
+      const identity = await authenticatePair(event.data.entry, event.data.pair);
+      window.opener.postMessage({ identity }, location.origin);
+    } catch {
+      window.opener.postMessage("failed", location.origin);
     }
   }
   addEventListener("message", receive);

@@ -1,10 +1,20 @@
-import { localHost, pairingEntry } from "./api.js";
+import { localHost, pairingEntry, remoteHost, forgetHost } from "./api.js";
 
 const inbox = () => location.hostname === "127.0.0.1";
-export function workspace(host, view = "projects") {
-  const url = new URL("/workspace.html", location.origin);
+export async function hostForPage() {
+  const id = new URL(location.href).searchParams.get("host");
+  if (!inbox() || !id) return localHost;
+  const entry = (await localHost.call("inbox-hosts")).find((item) => item.hostId === id);
+  if (!entry) {
+    location.replace("/");
+    throw Error("Unknown host");
+  }
+  return remoteHost(entry);
+}
+function inboxUrl(host, view = "projects") {
+  const url = new URL("/", location.origin);
   url.searchParams.set("host", host.hostId);
-  url.searchParams.set("view", view);
+  url.searchParams.set("panel", view);
   return url;
 }
 export async function hostSwitcher(container, selected = localHost, view = "projects") {
@@ -17,9 +27,25 @@ export async function hostSwitcher(container, selected = localHost, view = "proj
   for (const entry of entries) picker.append(new Option(entry.name, entry.hostId, false, entry.hostId === selected.hostId));
   picker.onchange = () => {
     const host = entries.find((e) => e.hostId === picker.value);
-    location.assign(host ? workspace(host, view) : `/?panel=${view}`);
+    location.assign(host ? inboxUrl(host, view) : `/?panel=${view}`);
   };
+  container.hidden = false;
   container.replaceChildren(picker);
+  if (!selected.local) {
+    const forget = document.createElement("button");
+    forget.type = "button";
+    forget.textContent = "Forget host";
+    forget.onclick = async () => {
+      if (!confirm(`Forget ${selected.name} on this machine?`)) return;
+      try {
+        await forgetHost(selected.hostId);
+        location.assign("/");
+      } catch (error) {
+        forget.textContent = error.message;
+      }
+    };
+    container.append(forget);
+  }
 }
 export function addHostControl(container) {
   if (!inbox()) return;
@@ -49,29 +75,45 @@ export function addHostControl(container) {
     }
     try {
       const { entry, pair } = await pairingEntry(link);
-      await localHost.call("inbox-host-add", entry);
-      const timeout = setTimeout(() => finish("Pairing timed out."), 30000);
-      function finish(message) {
-        clearTimeout(timeout);
-        removeEventListener("message", receive);
-        child.close();
-        button.disabled = false;
-        if (message) error.textContent = message;
-        else location.assign(workspace(entry));
-      }
-      function receive(e) {
-        if (e.origin !== location.origin || e.source !== child) return;
-        if (e.data === "ready") child.postMessage({ entry, pair }, location.origin);
-        else if (e.data === "paired") finish();
-        else if (e.data === "incompatible") finish();
-        else if (e.data === "failed") finish("Pairing failed. Check the host and use a fresh pairing link.");
-      }
       button.disabled = true;
-      addEventListener("message", receive);
-      child.location.replace("/pair-inbox.html");
-    } catch {
+      error.textContent = "";
+      await navigator.locks.request(`pair:${entry.hostId}`, async () => {
+        if ((await localHost.call("inbox-hosts")).some((host) => host.hostId === entry.hostId))
+          throw Error("Already paired. Forget this host before pairing again.");
+        const page = await localHost.authorizedFetch("/inbox/pair-window", { method: "POST", body: entry.relayOrigin });
+        if (!page.ok) throw Error("Could not open pairing window.");
+        const path = await page.text();
+        const identity = await new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => finish(), 30000);
+          function finish(identity) {
+            clearTimeout(timeout);
+            removeEventListener("message", receive);
+            if (identity) resolve(identity);
+            else reject(Error("Pairing failed. Use a fresh pairing link."));
+          }
+          function receive(e) {
+            if (e.origin !== location.origin || e.source !== child) return;
+            if (e.data === "ready") child.postMessage({ entry, pair }, location.origin);
+            else finish(e.data?.identity);
+          }
+          addEventListener("message", receive);
+          child.location.replace(path);
+        });
+        const { saveDevice, forgetDevice } = await import("./remote-client.js");
+        await saveDevice(entry.hostId, identity);
+        try {
+          await localHost.call("inbox-host-add", entry);
+        } catch (error) {
+          await forgetDevice(entry.hostId);
+          throw error;
+        }
+      });
+      location.assign(inboxUrl(entry));
+    } catch (problem) {
+      error.textContent = problem.message;
+    } finally {
+      button.disabled = false;
       child.close();
-      error.textContent = "Invalid pairing link, or the host list could not be saved.";
     }
   };
 }

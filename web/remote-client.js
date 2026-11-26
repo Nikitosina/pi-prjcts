@@ -1,70 +1,117 @@
 import { openTunnel } from "/inbox-wire/tunnel.js";
-import { device, deleteKey } from "/inbox-wire/store.js";
+import { get, put, deleteKey } from "/inbox-wire/store.js";
+import { generateSigningKey, keyId } from "/inbox-wire/wire.js";
 
-export async function remoteTransport(entry, pair) {
-  const { hostId, relayOrigin } = entry;
-  const key = `inbox-device:${hostId}`;
+const deviceKey = (id) => `inbox-device:${id}`;
+const endpoint = (entry) => `wss://${new URL(entry.relayOrigin).host}/ws`;
+async function compatible(session) {
+  const response = await session.request({
+    method: "POST",
+    path: "/api",
+    headers: { "content-type": "application/json" },
+    body: new TextEncoder().encode(JSON.stringify({ action: "api-version" })),
+  });
+  const text = await response.text();
+  try {
+    const reply = JSON.parse(text);
+    return response.ok && reply.ok === true && reply.data?.version === 1;
+  } catch {
+    return false;
+  }
+}
+export async function authenticatePair(entry, pair) {
+  const keys = await generateSigningKey(false);
+  const identity = { privateKey: keys.privateKey, id: await keyId(keys.publicKey) };
+  const session = await openTunnel({ hostId: entry.hostId, pair, endpoint: endpoint(entry), identity: () => identity });
+  try {
+    await compatible(session);
+    return identity;
+  } finally {
+    session.close();
+  }
+}
+export const saveDevice = (hostId, identity) => put(deviceKey(hostId), identity);
+export const forgetDevice = (hostId) => deleteKey(deviceKey(hostId));
+
+export async function remoteTransport(entry) {
   let active,
     timer,
     delay = 1000,
     stopped = false;
-  const client = Object.assign(new EventTarget(), {
+  const channel = new BroadcastChannel(deviceKey(entry.hostId));
+  const client = Object.assign(new EventTarget(), entry, {
+    local: false,
     state: "offline",
-    ...entry,
-    async authorizedFetch(path, init = {}) {
+    close,
+    async run(read, signal, operation) {
       const session = active;
-      if (!session || client.state !== "online") throw Error(client.state);
-      const body = init.body == null ? null : await new Response(init.body).arrayBuffer();
-      return session.request({ method: init.method, path, headers: init.headers, body, signal: init.signal });
+      if (client.state !== "online" || !session) throw Error(client.state);
+      const execute = (s) =>
+        operation(async (path, init = {}) => {
+          const body = init.body == null ? null : await new Response(init.body).arrayBuffer();
+          return s.request({ ...init, path, body });
+        });
+      try {
+        return await execute(session);
+      } catch (error) {
+        if (signal?.aborted || !session.closed) throw error;
+        if (!read) throw Error("Result unknown, check after reconnecting.");
+        if (client.state === "offline")
+          await new Promise((resolve, reject) => {
+            const finish = () => {
+              client.removeEventListener("statechange", finish);
+              signal?.removeEventListener("abort", finish);
+              signal?.aborted ? reject(signal.reason) : resolve();
+            };
+            client.addEventListener("statechange", finish);
+            signal?.addEventListener("abort", finish, { once: true });
+          });
+        if (client.state !== "online" || !active) throw Error(client.state);
+        return execute(active);
+      }
     },
-    async forget() {
-      stopped = true;
-      clearTimeout(timer);
-      active?.close();
-      await deleteKey(key);
+    authorizedFetch(path, init = {}) {
+      return client.run((init.method ?? "GET") === "GET", init.signal, (fetch) => fetch(path, init));
     },
   });
   function state(value) {
     client.state = value;
     client.dispatchEvent(new Event("statechange"));
   }
+  function close(reason = "offline") {
+    stopped = true;
+    clearTimeout(timer);
+    active?.close();
+    active = null;
+    channel.close();
+    state(reason);
+  }
   function lost(error) {
     active = null;
     if (stopped) return;
-    if (error.code === 4403) {
-      stopped = true;
-      state("revoked");
-      return;
-    }
+    if (error.code === 4403) return close("revoked");
     state("offline");
     clearTimeout(timer);
     timer = setTimeout(connect, delay);
     delay = Math.min(30000, delay * 2);
   }
+  channel.onmessage = ({ data }) => {
+    if (data === "forget") close("forgotten");
+  };
+  addEventListener("pagehide", () => close(), { once: true });
+  addEventListener("pageshow", (e) => {
+    if (e.persisted) location.reload();
+  });
   async function connect() {
     let session;
     try {
-      session = await openTunnel({ hostId, pair, endpoint: `wss://${new URL(relayOrigin).host}/ws`, identity: () => device(key) });
-      pair = null;
-      if (stopped) {
-        session.close();
-        return;
-      }
-      const response = await session.request({
-        method: "POST",
-        path: "/api",
-        headers: { "content-type": "application/json" },
-        body: new TextEncoder().encode(JSON.stringify({ action: "api-version" })),
-      });
-      const reply = await response.json();
-      if (!response.ok || !reply.ok || reply.data?.version !== 1) {
-        stopped = true;
-        session.close();
-        state("needs update");
-        return;
-      }
-      if (session.closed || stopped) throw Error("Disconnected");
+      const identity = await get(deviceKey(entry.hostId));
+      if (!identity) return close("not paired");
+      session = await openTunnel({ hostId: entry.hostId, endpoint: endpoint(entry), identity: () => identity });
+      if (stopped) return session.close();
       active = session;
+      if (!(await compatible(session))) return close("needs update");
+      if (stopped || session.closed) throw Error("Disconnected");
       session.onClose = lost;
       delay = 1000;
       state("online");
@@ -75,4 +122,9 @@ export async function remoteTransport(entry, pair) {
   }
   await connect();
   return client;
+}
+export function stopViews(hostId) {
+  const channel = new BroadcastChannel(deviceKey(hostId));
+  channel.postMessage("forget");
+  channel.close();
 }

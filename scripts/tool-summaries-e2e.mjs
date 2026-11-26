@@ -458,7 +458,7 @@ await kit.run(async () => {
   const olderPage = await rpc({ action: "chat-history", id, before: partial.before, limit: 100, messageText: "full" });
   // The production renderer draws both pages: one line for the group, with its earlier calls counted until they load.
   const drawn = await page.evaluate(`(async () => {
-    const { transcriptHtml, mergeGroups } = await import('/chat.js');
+    const { transcriptHtml, mergeGroups } = (await import('/app.js')).chat;
     const draw = (items, groups) => {
       const box = document.createElement('div');
       box.innerHTML = transcriptHtml(items, false, 'Coordinator', { groups });
@@ -482,7 +482,7 @@ await kit.run(async () => {
   // A message shows its thinking before its calls, though a call came first: `[call B, thinking]` after `[call A]` is still one
   // group of A and B. A failure on an earlier page stays marked, and pages merge by the group's progress, not by their order.
   const edge = await page.evaluate(`(async () => {
-    const { transcriptHtml, mergeGroups } = await import('/chat.js');
+    const { transcriptHtml, mergeGroups } = (await import('/app.js')).chat;
     const call = (entryId, callId) => ({ kind: 'tool-call', entryId, at: entryId, callId, name: 'bash', argsPreview: '{}' });
     const done = (entryId, callId) => ({ kind: 'tool-result', entryId, at: entryId, callId, isError: false, preview: 'ok' });
     const items = [

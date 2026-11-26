@@ -1,4 +1,6 @@
 import { createServer } from "node:net";
+import { fork } from "node:child_process";
+import { once } from "node:events";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -34,6 +36,7 @@ await client.run(async () => {
   await client.stopHost();
   const occupied = createServer((socket) => socket.destroy());
   await new Promise((ok, fail) => occupied.once("error", fail).listen(Number(url.port), "127.0.0.1", ok));
+  const bindStarted = Date.now();
   try {
     client.startHost();
     await client.waitHost();
@@ -53,6 +56,7 @@ await client.run(async () => {
     timeout: 45000,
     interval: 500,
   });
+  assert.ok(Date.now() - bindStarted >= 28000, "port retry must back off");
   assert.equal(new URL((await client.rpc({ action: "web" })).url).origin, url.origin);
   assert.deepEqual(await call("inbox-hosts"), [entry]);
   await call("inbox-host-forget", { hostId: entry.hostId });
@@ -93,17 +97,30 @@ await client.run(async () => {
         `document.querySelector('[data-cmd="settings"]').click(); document.querySelector('nav [data-section="remote"]').click()`,
       );
       await page.waitFor(`!!document.querySelector('[aria-label="Host pairing link"]')`, "Add host from link", 3);
-      await page.evaluate(`document.querySelector('[aria-label="Host pairing link"]').focus()`);
-      await page.cdp("Input.insertText", { text: link });
-      const { x, y } = await page.evaluate(
-        `(() => {const r = document.querySelector('[data-add-host]').getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2};})()`,
+      async function addLink(link) {
+        await page.evaluate(`document.querySelector('[aria-label="Host pairing link"]').focus()`);
+        await page.cdp("Input.insertText", { text: link });
+        const { x, y } = await page.evaluate(
+          `(() => {const r = document.querySelector('[data-add-host]').getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2};})()`,
+        );
+        for (const type of ["mousePressed", "mouseReleased"])
+          await page.cdp("Input.dispatchMouseEvent", { type, x, y, button: "left", clickCount: 1 });
+      }
+      await other.rpc({ action: "remote-pair-cancel" });
+      await addLink(link);
+      await page.waitFor(
+        `document.querySelector('[data-add-host]').form.querySelector('[role=alert]').textContent.length > 0`,
+        "expired pairing refused",
       );
-      for (const type of ["mousePressed", "mouseReleased"])
-        await page.cdp("Input.dispatchMouseEvent", { type, x, y, button: "left", clickCount: 1 });
+      assert.deepEqual(await call("inbox-hosts"), [], "failed pairing must not add a host");
+      assert.equal(await csp(), "connect-src 'self'");
+      await addLink((await other.rpc({ action: "remote-pair-start" })).link);
       await page.waitFor(`document.body.innerText.includes('Only at home')`, "remote project tree");
+      assert.equal(await page.evaluate(`location.pathname`), "/", "remote projects open in the real inbox");
+      assert.ok(await page.evaluate(`!!document.querySelector('#composer-input')`));
       assert.ok(!(await page.evaluate(`document.body.innerText.includes('Only at work')`)));
       async function submit(label, text) {
-        const field = `document.querySelector('textarea[aria-label="${label}"]')`;
+        const field = label === "Answer" ? `document.querySelector("#questions textarea")` : `document.querySelector("#composer-input")`;
         await page.waitFor(`!!${field}`, label);
         await page.evaluate(`${field}.focus()`);
         await page.cdp("Input.insertText", { text });
@@ -117,8 +134,57 @@ await client.run(async () => {
       );
       await page.shot("remote-inbox", { force: true });
       await other.stopHost();
-      await page.waitFor(`document.querySelector('#connection')?.textContent === 'offline'`, "remote offline");
+      await page.waitFor(`document.querySelector('#host-connection')?.textContent.includes('offline')`, "remote offline");
       await page.shot("remote-offline", { force: true });
+      const peer = fork(new URL("./lib/inbox-version-peer.mjs", import.meta.url), {
+        env: { ...other.hostEnv, INBOX_TEST_ROOT: other.root },
+        stdio: ["ignore", "inherit", "inherit", "ipc"],
+      });
+      const ended = once(peer, "exit");
+      try {
+        await once(peer, "message");
+        let seq = 0;
+        async function control(op, value) {
+          const reply = once(peer, "message");
+          peer.send({ id: ++seq, op, value });
+          const [data] = await reply;
+          assert.equal(data.error, undefined);
+          return data;
+        }
+        const statusIs = (s) => `document.querySelector('#host-connection')?.textContent.endsWith(${JSON.stringify(s)})`;
+        await page.waitFor(statusIs("needs update"), "incompatible host");
+        await page.shot("needs-update", { force: true });
+        assert.deepEqual((await control("status")).requests, ["api-version"]);
+        await control("restart", null);
+        await page.reload();
+        await page.waitFor(statusIs("needs update"), "missing version");
+        assert.deepEqual((await control("status")).requests, ["api-version", "api-version"]);
+        await control("restart", 1);
+        await page.reload();
+        await page.waitFor(statusIs("online"), "compatible host");
+        await page.evaluate(
+          `(async()=>{ const {localHost,remoteHost}=await import('/api.js'); window.probe=await remoteHost((await localHost.call('inbox-hosts'))[0]); window.readResult=probe.call('search',{query:'retry probe'}); window.writeResult=probe.call('message',{text:'no replay'}).catch(e=>e.message); })()`,
+        );
+        await other.waitFor(async () => {
+          const r = await control("status");
+          return r.requests.includes("search") && r.requests.includes("message");
+        }, "both probes in flight");
+        await control("stop");
+        await page.waitFor(statusIs("offline"), "lost replies");
+        assert.match(await page.evaluate("writeResult"), /result unknown, check after reconnecting/i);
+        await control("restart", 1);
+        assert.equal(await page.evaluate("readResult"), "retry probe");
+        const requests = (await control("status")).requests;
+        assert.equal(requests.filter((r) => r === "message").length, 1);
+        assert.equal(requests.filter((r) => r === "search").length, 2);
+        await page.evaluate(`(async()=>{window.large = await probe.authorizedFetch('/large');})()`);
+        assert.equal((await page.evaluate(`probe.call('list')`)).length, 0);
+        assert.match(await page.evaluate(`probe.authorizedFetch('/changes?project=host').then(r=>r.text())`), /sync/);
+        assert.equal(await page.evaluate(`large.arrayBuffer().then(b=>b.byteLength)`), 8 << 20);
+      } finally {
+        peer.disconnect();
+        await ended;
+      }
     });
     assert.equal(other.result.status, "passed", other.result.failure);
   } finally {

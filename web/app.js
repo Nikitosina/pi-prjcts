@@ -1,32 +1,59 @@
 // UI 2.0 entry: selection, center focus, streams, status pill and line, hotkeys and the command palette.
 // Three areas on every screen: list (left), focus (center), context (right); the Host agent drawer opens over them.
-import { call, setToken, stream, token } from "./api.js";
+import { setToken, token } from "./api.js";
 import { clip, esc } from "./format.js";
 import { register, paintHints, onBindingsChange, typing } from "./hotkeys.js";
 import { emit, fail, on, project, stale, state, toast } from "./state.js";
-import { loadUi, setUi } from "./ui.js";
-import { paintStatusLine } from "./statusline.js";
-import { loadLimits } from "./limits.js";
 import { closeLimitDetail, limitDetailOpen } from "./limit-detail.js";
-import { closeDiskDetail, diskDetailOpen } from "./disk-detail.js";
-import {
-  archiveDialogOpen,
-  closeArchiveDialog,
-  loadProjects,
-  markSeen,
-  rememberChats,
-  renderTree,
-  requestArchive,
-  visibleChats,
-} from "./tree.js";
-import { currentChat, loadChat, stopTurn, toggleSteer } from "./chat.js";
-import "./sidebar.js";
-import { closeReview, renderReview } from "./review.js";
-import { reviewEntries, closeMergeDialog, loadJobs, loadSide, mergeDialogOpen, renderWorker } from "./workers.js";
-import { refreshRecentMemory, renderMemoryEntry, renderMemoryList } from "./memory.js";
-import { closeSettings, openSettings, SECTIONS, settingsBack, settingsOpen, showSection } from "./settings.js";
-import {
-  isOpen as drawerOpen,
+import { mountUi } from "./ui.js";
+import { mountLimits } from "./limits.js";
+import { mountDiskDetail } from "./disk-detail.js";
+import { mountStatusline } from "./statusline.js";
+import { mountTree } from "./tree.js";
+import { mountMedia } from "./media.js";
+import { mountSlash } from "./slash.js";
+import { mountMemory } from "./memory.js";
+import { mountChat } from "./chat.js";
+import { mountPlugins } from "./plugins.js";
+import { mountSidebar } from "./sidebar.js";
+import { mountReview } from "./review.js";
+import { mountWorkers } from "./workers.js";
+import { mountPrompts } from "./prompts.js";
+import { mountSettings } from "./settings.js";
+import { mountHostagent } from "./hostagent.js";
+import { mountPalette } from "./palette.js";
+import { hostForPage, hostSwitcher } from "./host-switcher.js";
+
+const client = await hostForPage();
+const ui = mountUi(client);
+const limits = mountLimits(client);
+const diskDetail = mountDiskDetail(client);
+const statusline = mountStatusline(client, ui, limits, diskDetail);
+const tree = mountTree(client);
+const media = mountMedia(client);
+const slash = mountSlash(client);
+const memory = mountMemory(client);
+const chat = mountChat(client, media, slash, memory);
+const plugins = mountPlugins(client);
+mountSidebar(client, plugins);
+const review = mountReview(client);
+const workers = mountWorkers(client, chat, media);
+const prompts = mountPrompts(client);
+const settings = mountSettings(client, ui, statusline, prompts, limits, plugins);
+const hostagent = mountHostagent(client, chat, media);
+const palette = mountPalette(client);
+const { loadUi, setUi } = ui;
+const { paintStatusLine } = statusline;
+const { loadLimits } = limits;
+const { closeDiskDetail, diskDetailOpen } = diskDetail;
+const { archiveDialogOpen, closeArchiveDialog, loadProjects, markSeen, rememberChats, renderTree, requestArchive, visibleChats } = tree;
+const { currentChat, loadChat, stopTurn, toggleSteer } = chat;
+const { closeReview, renderReview } = review;
+const { reviewEntries, closeMergeDialog, loadJobs, loadSide, mergeDialogOpen, renderWorker } = workers;
+const { refreshRecentMemory, renderMemoryEntry, renderMemoryList } = memory;
+const { closeSettings, openSettings, SECTIONS, settingsBack, settingsOpen, showSection } = settings;
+const {
+  isOpen: drawerOpen,
   loadApprovals,
   loadHostAgent,
   onHostTopic,
@@ -35,10 +62,11 @@ import {
   resetHostAgent,
   stopHostAgent,
   toggleHostAgent,
-} from "./hostagent.js";
-import { closePalette, openPalette, paletteOpen, setPaletteSource } from "./palette.js";
-import { closeSlashMenu, slashMenuOpen } from "./slash.js";
-import { closeLightbox, lightboxOpen } from "./media.js";
+} = hostagent;
+const { closePalette, openPalette, paletteOpen, setPaletteSource } = palette;
+const { closeSlashMenu, slashMenuOpen } = slash;
+const { closeLightbox, lightboxOpen } = media;
+export { workers, chat, ui };
 
 const app = document.querySelector("#app"),
   center = document.querySelector("#center"),
@@ -73,7 +101,7 @@ async function select(projectId, chatId = "main", { keepFocus = false } = {}) {
     changes?.stop();
     const gen = state.generation;
     let connected = false; // the first sync of a stream is the opening read; a later one is a reconnect, after which missed changes are possible
-    changes = stream(
+    changes = client.stream(
       `/changes?project=${encodeURIComponent(projectId)}`,
       (change) => {
         if (state.projectId !== projectId) return;
@@ -239,8 +267,8 @@ function jumpToStatus() {
 async function loadUsage() {
   const gen = state.generation;
   const [usage, profiles] = await Promise.all([
-    call("usage-snapshot", { id: state.projectId, limit: 1 }).catch(() => null),
-    call("profiles-get", { projectId: state.projectId }).catch(() => null),
+    client.call("usage-snapshot", { id: state.projectId, limit: 1 }).catch(() => null),
+    client.call("profiles-get", { projectId: state.projectId }).catch(() => null),
   ]);
   if (stale(gen)) return;
   state.usage = usage;
@@ -379,10 +407,12 @@ setPaletteSource(() => [
     label: state.view?.paused ? "Resume project" : "Pause project",
     hint: "project",
     run: () =>
-      void call(state.view?.paused ? "resume" : "pause", {
-        id: state.projectId,
-        ...(state.view?.paused ? { confirm: state.projectId } : {}),
-      }).then(() => loadChat(), fail),
+      void client
+        .call(state.view?.paused ? "resume" : "pause", {
+          id: state.projectId,
+          ...(state.view?.paused ? { confirm: state.projectId } : {}),
+        })
+        .then(() => loadChat(), fail),
   },
   {
     id: "x:open-id",
@@ -441,8 +471,29 @@ async function start() {
   paintHints();
   paintStatusLine();
   if (!token) return signIn();
+  for (const [selector, view] of [
+    ["#inbox-host", "projects"],
+    ["#agent-host", "agent"],
+  ]) {
+    void hostSwitcher(document.querySelector(selector), client, view).catch(fail);
+  }
+  if (!client.local) {
+    const status = document.querySelector("#host-connection");
+    const paint = () => {
+      status.hidden = false;
+      status.textContent = `${client.name} · ${client.state}`;
+    };
+    paint();
+    client.addEventListener("statechange", paint);
+    if (client.state !== "online") {
+      client.addEventListener("statechange", () => {
+        if (client.state === "online") location.reload();
+      });
+      return;
+    }
+  }
   try {
-    await call("list");
+    await client.call("list");
   } catch (error) {
     return signIn(error.status === 401 ? "This link's token is no longer valid. Copy the current inbox link." : error.message);
   }
@@ -453,10 +504,13 @@ async function start() {
     first = state.projects.find((item) => item.id === wanted) ?? state.projects[0];
   if (first) await select(first.id, first.id === wanted ? (url.searchParams.get("chat") ?? "main") : "main");
   else document.body.dataset.ready = "1";
+  const panel = url.searchParams.get("panel");
+  if (panel === "settings") openSettings();
+  if (panel === "agent") toggleHostAgent(true);
   void loadLimits(); // the host's last readings; providers are asked only by the refresh button
   void loadApprovals();
   // Host topics: approvals reach the status pill and ui_focus moves the page even while the drawer is closed.
-  hostChanges = stream("/changes?project=host", (change) => {
+  hostChanges = client.stream("/changes?project=host", (change) => {
     if (change.t === "sync") {
       void loadApprovals();
       if (drawerOpen()) void loadHostAgent();

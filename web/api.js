@@ -33,8 +33,8 @@ export class HostError extends Error {
     this.refused = refused;
   }
 }
-async function requestAction(host, action, input = {}, signal) {
-  const response = await host.authorizedFetch("/api", {
+async function requestAction(fetch, action, input = {}, signal) {
+  const response = await fetch("/api", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ ...input, action }),
@@ -121,33 +121,51 @@ function openStream(host, path, onFrame, onState = () => {}) {
   };
 }
 
+const reads = new Set(
+  `approvals-list automation-snapshot chat-history coordinator-skills deploy-snapshot host-agent-history jobs-snapshot knowledge-read limits-snapshot list machine-status memory-index memory-recent memory-writes plugin-catalog plugins profile-tools profiles-get prompt-blocks-get prompt-render prs remote-devices remote-status schedule-history schedule-snapshot search settings-snapshot show storage-status storage-summary telegram-snapshot thread-history tiers-get tool-summaries-usage transcript-image ui-get usage-snapshot worker-contexts pr-review-files pr-review-file pr-review-lines pr-review-tour-status`.split(
+    " ",
+  ),
+);
 function hostClient(transport) {
+  const run = transport.run ?? ((_read, _signal, work) => work(transport.authorizedFetch));
   return Object.assign(transport, {
+    storagePrefix: transport.local ? "" : `pi-host:${transport.hostId}:`,
     call(action, input, signal) {
-      return requestAction(transport, action, input, signal);
+      return run(
+        reads.has(action) || (action === "pr-review-open" && !input?.seen) || (action === "host-agent-settings" && !input?.patch),
+        signal,
+        (fetch) => requestAction(fetch, action, input, signal),
+      );
     },
     stream(path, onFrame, onState) {
       return openStream(transport, path, onFrame, onState);
     },
-    async url(path, options) {
-      const response = await transport.authorizedFetch(path, options);
-      if (!response.ok) throw new HostError(`Resource unavailable (${response.status})`, response.status);
-      const data = await response.blob();
-      const type = /^(image\/(png|jpeg|webp|gif)|audio\/(mpeg|wav|ogg)|video\/(mp4|webm))$/.test(data.type)
-        ? data.type
-        : "application/octet-stream";
-      return URL.createObjectURL(data.slice(0, data.size, type));
+    async url(path, { image, maxBytes, ...options } = {}) {
+      return run(true, options.signal, async (fetch) => {
+        const response = await fetch(path, options);
+        if (maxBytes && Number(response.headers.get("content-length")) > maxBytes) {
+          await response.body?.cancel();
+          throw Error("Resource too large");
+        }
+        if (!response.ok) throw new HostError(`Resource unavailable (${response.status})`, response.status);
+        const data = await response.blob();
+        const type = /^(image\/(png|jpeg|webp|gif)|audio\/(mpeg|wav|ogg)|video\/(mp4|webm))$/.test(data.type)
+          ? data.type
+          : "application/octet-stream";
+        if (image && !type.startsWith("image/")) throw Error("Not an image");
+        return URL.createObjectURL(data.slice(0, data.size, type));
+      });
     },
   });
 }
 export const localHost = hostClient({ local: true, authorizedFetch: localFetch });
-export const { call, stream, authorizedFetch } = localHost;
+
 const clients = new Map();
-export async function remoteHost(entry, pair = null) {
+export async function remoteHost(entry) {
   if (clients.has(entry.hostId)) return clients.get(entry.hostId);
   const creating = (async () => {
     const { remoteTransport } = await import("./remote-client.js");
-    const transport = await remoteTransport(entry, pair);
+    const transport = await remoteTransport(entry);
     return hostClient(transport);
   })();
   clients.set(entry.hostId, creating);
@@ -169,9 +187,14 @@ export async function pairingEntry(link) {
     pair: { code: value.code, name: "Local inbox" },
   };
 }
-export async function pairHost(link) {
-  const { entry, pair } = await pairingEntry(link);
-  return remoteHost(entry, pair);
+export async function forgetHost(id) {
+  const { forgetDevice, stopViews } = await import("./remote-client.js");
+  await navigator.locks.request(`pair:${id}`, async () => {
+    await localHost.call("inbox-host-forget", { hostId: id });
+    stopViews(id);
+    await forgetDevice(id);
+    clients.delete(id);
+  });
 }
 
 export const uuid = () => crypto.randomUUID();

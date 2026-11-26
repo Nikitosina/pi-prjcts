@@ -1,4 +1,4 @@
-import { inboxHosts } from "./inbox-hosts.ts";
+import { inboxHosts, relayOrigin } from "./inbox-hosts.ts";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type ServerResponse } from "node:http";
 import { inboxAssetNames, readBrowserAsset } from "./host-assets.ts";
@@ -156,6 +156,7 @@ export async function startWeb(
     const target = path === "/ui2/boot.js" ? "/theme.js" : path.slice("/ui2".length);
     return path.startsWith("/ui2/") && target !== "/" && assets.has(target) ? target : undefined;
   };
+  const pairingPages = new Map<string, { host: string; expires: number }>();
   const server = createServer(async (request, response) => {
     const headers = {
       "cache-control": "no-store",
@@ -183,6 +184,17 @@ export async function startWeb(
         if (matches) response.writeHead(304, assetHeaders).end();
         else response.writeHead(200, assetHeaders).end(content);
       };
+      if (request.method === "GET" && url.pathname === "/pair-inbox.html") {
+        const ticket = url.searchParams.get("ticket") ?? "";
+        const page = pairingPages.get(ticket);
+        pairingPages.delete(ticket);
+        if (!page || page.expires <= Date.now()) throw Error("Pairing window expired");
+        headers["content-security-policy"] =
+          `default-src 'none'; script-src 'self'; connect-src wss://${page.host}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
+        const asset = assets.get(url.pathname)!;
+        response.writeHead(200, { ...headers, "content-type": asset.mime }).end(asset.content);
+        return;
+      }
       const asset = assets.get(url.pathname);
       if (request.method === "GET" && asset) {
         sendAsset(asset);
@@ -223,6 +235,15 @@ export async function startWeb(
       if (request.headers["sec-fetch-site"] === "cross-site") {
         status = 403;
         throw new Error("Cross-site request denied");
+      }
+      if (url.pathname === "/inbox/pair-window" && request.method === "POST" && local) {
+        const host = relayOrigin(await body(request)).host;
+        for (const [key, page] of pairingPages) if (page.expires <= Date.now()) pairingPages.delete(key);
+        if (pairingPages.size >= 8) throw Error("Too many pairing windows");
+        const ticket = randomBytes(24).toString("hex");
+        pairingPages.set(ticket, { host, expires: Date.now() + 30000 });
+        response.writeHead(200, { ...headers, "content-type": "text/plain" }).end(`/pair-inbox.html?ticket=${ticket}`);
+        return;
       }
       if (url.pathname === "/remote/summary" && request.method === "GET" && remote?.status().enabled) {
         response
