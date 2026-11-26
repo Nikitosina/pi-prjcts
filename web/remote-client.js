@@ -59,6 +59,7 @@ export async function remoteTransport(entry) {
         if (client.state === "offline")
           await new Promise((resolve, reject) => {
             const finish = () => {
+              if (client.state === "offline" && !signal?.aborted && !stopped) return;
               client.removeEventListener("statechange", finish);
               signal?.removeEventListener("abort", finish);
               signal?.aborted ? reject(signal.reason) : resolve();

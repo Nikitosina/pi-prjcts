@@ -185,11 +185,11 @@ export function mountPrompts(client) {
       return `<section class="pb-editor" aria-label="Block editor" data-block="${esc(saved.key ?? saved.id)}">
 <header class="pb-editor-head"><button type="button" class="icon-btn small pb-back" aria-label="Back to blocks">←</button>${
         custom
-          ? `<input class="pb-title" aria-label="Block name" maxlength="${model.limits.maxNameChars}" placeholder="Block name" value="${esc(now.name)}"/>`
+          ? `<input class="pb-title" aria-label="Block name" maxlength="${esc(model.limits.maxNameChars)}" placeholder="Block name" value="${esc(now.name)}"/>`
           : `<h2 class="pb-title">${esc(saved.name)}</h2>`
       }${saved.id === "new" ? "" : badge(saved)}<span class="grow"></span><span class="pb-tok mono" data-live-tokens>${tokens(estimate(now.text))} tokens</span></header>
 ${conflict ? `<div class="pb-conflict" role="alert"><span>Changed elsewhere since you started. Your text is kept.</span><button type="button" class="ghost-btn small" data-conflict="reload">Load latest</button></div>` : ""}
-<textarea class="pb-text" aria-label="${esc(now.name || "New block")} text" spellcheck="false" maxlength="${saved.kind === "project" ? 32000 : model.limits.maxBlockChars}" placeholder="What the agent should do, in plain words.">${esc(now.text)}</textarea>
+<textarea class="pb-text" aria-label="${esc(now.name || "New block")} text" spellcheck="false" maxlength="${saved.kind === "project" ? 32000 : esc(model.limits.maxBlockChars)}" placeholder="What the agent should do, in plain words.">${esc(now.text)}</textarea>
 <footer class="pb-actions"><button type="button" class="primary small" id="pb-save" ${(draft || saved.id === "new") && !conflict ? "" : "disabled"}>Save <kbd>⌘↵</kbd></button><button type="button" class="ghost-btn small" id="pb-revert" ${draft ? "" : "disabled"}>Revert</button>${
         saved.kind === "builtin" && saved.edited
           ? `<button type="button" class="ghost-btn small" id="pb-restore">Restore default</button>`
@@ -241,7 +241,7 @@ ${conflict ? `<div class="pb-conflict" role="alert"><span>Changed elsewhere sinc
         const [label, hint] = SIDE_LABELS[view.target];
         return `<p class="pb-group">${label} <span class="muted small">${hint}</span></p><ul role="listbox" aria-label="${label} blocks" data-group="${view.target}">${view.blocks.map(row).join("")}</ul>`;
       };
-      const list = `<div class="pb-list">${project ? `<ul role="listbox" aria-label="Project instructions" class="pb-project">${row(project)}</ul>` : ""}${others.map(group).join("")}<p class="pb-group">Behavior</p><ul role="listbox" aria-label="Behavior blocks">${model.blocks.map(row).join("")}</ul><button type="button" class="ghost-btn small pb-new" id="pb-new" ${full ? `disabled title="At most ${model.limits.maxCustom} custom blocks"` : ""}>+ New block</button>${
+      const list = `<div class="pb-list">${project ? `<ul role="listbox" aria-label="Project instructions" class="pb-project">${row(project)}</ul>` : ""}${others.map(group).join("")}<p class="pb-group">Behavior</p><ul role="listbox" aria-label="Behavior blocks">${model.blocks.map(row).join("")}</ul><button type="button" class="ghost-btn small pb-new" id="pb-new" ${full ? `disabled title="At most ${esc(model.limits.maxCustom)} custom blocks"` : ""}>+ New block</button>${
         generated().length
           ? `<details class="pb-generated"><summary>Generated · read-only <span class="muted">${generated().length}</span></summary><ul>${generated().map(generatedRow).join("")}</ul></details>`
           : ""

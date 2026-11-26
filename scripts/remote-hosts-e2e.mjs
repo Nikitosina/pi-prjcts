@@ -172,6 +172,7 @@ await client.run(async () => {
         await control("stop");
         await page.waitFor(statusIs("offline"), "lost replies");
         assert.match(await page.evaluate("writeResult"), /result unknown, check after reconnecting/i);
+        await page.evaluate(`new Promise(resolve => probe.addEventListener('statechange', resolve, {once:true}))`);
         await control("restart", 1);
         assert.equal(await page.evaluate("readResult"), "retry probe");
         const requests = (await control("status")).requests;

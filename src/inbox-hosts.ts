@@ -20,7 +20,9 @@ let unreadable = false;
 export function inboxHosts() {
   if (!hosts) {
     try {
-      hosts = existsSync(path()) ? parse(list, readJson(path())).map(validate) : [];
+      const loaded = existsSync(path()) ? parse(list, readJson(path())).map(validate) : [];
+      if (new Set(loaded.map((entry) => entry.hostId)).size !== loaded.length) throw Error("Duplicate host ID");
+      hosts = loaded;
     } catch {
       unreadable = true;
       hosts = [];

@@ -14,11 +14,11 @@ function open() {
   return db;
 }
 async function run(mode, work) {
-  const store = (await open()).transaction("kv", mode).objectStore("kv");
+  const tx = (await open()).transaction("kv", mode);
   return new Promise((resolve, reject) => {
-    const request = work(store);
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+    const request = work(tx.objectStore("kv"));
+    tx.oncomplete = () => resolve(request.result);
+    tx.onabort = () => reject(tx.error ?? Error("Device storage transaction aborted"));
   });
 }
 export const get = (key) => run("readonly", (store) => store.get(key));

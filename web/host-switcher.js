@@ -104,8 +104,13 @@ export function addHostControl(container) {
         try {
           await localHost.call("inbox-host-add", entry);
         } catch (error) {
-          await forgetDevice(entry.hostId);
-          throw error;
+          // The write may have landed. Never replay it or discard the only key for a committed pairing.
+          const hosts = await localHost.call("inbox-hosts").catch(() => null);
+          if (!hosts) throw Error("Result unknown, check after reconnecting.");
+          if (!hosts.some((host) => host.hostId === entry.hostId && host.relayOrigin === entry.relayOrigin)) {
+            await forgetDevice(entry.hostId);
+            throw error;
+          }
         }
       });
       location.assign(inboxUrl(entry));

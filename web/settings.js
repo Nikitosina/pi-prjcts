@@ -218,8 +218,8 @@ export function mountSettings(client, ui, statusline, promptView, limits, plugin
     const live = state.view?.context ?? {};
     const settings = snap.values.context ?? { autoCompact: true };
     const window = settings.contextWindow ?? live.window ?? live.catalogWindow ?? 128000;
-    let threshold = settings.thresholdPercent ?? 80;
-    const keep = settings.keepRecentTokens ?? 20000;
+    let threshold = Number.isFinite(settings.thresholdPercent) ? settings.thresholdPercent : 80;
+    const keep = Number.isFinite(settings.keepRecentTokens) ? settings.keepRecentTokens : 20000;
     const used = profile === "coordinator" ? (live.tokens ?? 0) : null;
     let saving = null;
     const draw = () => {

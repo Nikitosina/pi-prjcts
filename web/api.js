@@ -147,7 +147,10 @@ function hostClient(transport) {
           await response.body?.cancel();
           throw Error("Resource too large");
         }
-        if (!response.ok) throw new HostError(`Resource unavailable (${response.status})`, response.status);
+        if (!response.ok) {
+          await response.body?.cancel();
+          throw new HostError(`Resource unavailable (${response.status})`, response.status);
+        }
         const data = await response.blob();
         const type = /^(image\/(png|jpeg|webp|gif)|audio\/(mpeg|wav|ogg)|video\/(mp4|webm))$/.test(data.type)
           ? data.type

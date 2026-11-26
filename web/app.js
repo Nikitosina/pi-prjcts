@@ -24,7 +24,12 @@ import { mountHostagent } from "./hostagent.js";
 import { mountPalette } from "./palette.js";
 import { hostForPage, hostSwitcher } from "./host-switcher.js";
 
-const client = await hostForPage();
+const client = await hostForPage().catch((error) => {
+  if (error.status !== 401) throw error;
+  signIn("Open the local inbox link to sign in.");
+  // Sign-in reloads this bookmark. Never mount local views as a fallback for a remote host.
+  return new Promise(() => {});
+});
 const ui = mountUi(client);
 const limits = mountLimits(client);
 const diskDetail = mountDiskDetail(client);
@@ -480,6 +485,11 @@ async function start() {
   if (!client.local) {
     const status = document.querySelector("#host-connection");
     const paint = () => {
+      if (client.state === "forgotten") {
+        document.body.replaceChildren();
+        location.replace("/");
+        return;
+      }
       status.hidden = false;
       status.textContent = `${client.name} · ${client.state}`;
     };

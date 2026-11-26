@@ -47,11 +47,16 @@ export function mountMedia(client) {
   }
   async function artifactBlob(project, key, { image }) {
     const [thread, ...path] = key.split("/");
-    return client.url(`/artifacts/${project}/${thread}/${path.map(encodeURIComponent).join("/")}`, {
-      image,
-      maxBytes: MAX_BYTES,
-      signal: AbortSignal.timeout(120000),
-    });
+    try {
+      return await client.url(`/artifacts/${project}/${thread}/${path.map(encodeURIComponent).join("/")}`, {
+        image,
+        maxBytes: MAX_BYTES,
+        signal: AbortSignal.timeout(120000),
+      });
+    } catch (error) {
+      if (error.status === 404) throw new MediaError("missing");
+      throw error;
+    }
   }
   function keyOf(slot, source) {
     return slot.dataset.imageRef
