@@ -228,7 +228,7 @@ Decrypted record = `[u32 BE header length][header JSON][body bytes]`.
 2. **Relay and tunnel.** `relay/`, `src/remote.ts`, bootstrap PWA, QR pairing, device list with revoke, signed device list, HTTP over the tunnel.
 3. **Remote host mode.** `remote enable/disable/status`, LaunchAgent, `caffeinate`, host switcher with online state.
 4. **Web Push.** Telegram is already configured per host (`<home>/telegram.json`), so the per-host switch exists today and needs no new work.
-5. **Later, not in this change.** Pairing approval from an existing device; merged inbox (first HQ step).
+5. **Later, not in this change.** Pairing approval from an existing device. The merged inbox is now [Multi-host inbox](#multi-host-inbox).
 
 ### Stage 2 done criteria (owner-run, in a disposable `PI_PROJECTS_HOME`, never the production home)
 - An iPhone on cellular with its usual VPN on pairs the PWA with the home Mac host, answers a question, and watches the live stream.
@@ -236,6 +236,60 @@ Decrypted record = `[u32 BE header length][header JSON][body bytes]`.
 - nginx and relay logs contain no plaintext payload, project name or device name.
 - The same flow works with the work Mac as host, connecting through the corporate VPN.
 - Each check is a local red/green run whose artifacts stay local; no new committed tests.
+
+## Multi-host inbox
+
+Owner-approved design from the owner's design interview on 2026-11-26. It supersedes "merged inbox" in [Out of scope](#out-of-scope) and Stage 5 of [Stages](#stages). The relay protocol, the end-to-end session and HTTP over the tunnel above stay unchanged.
+
+### Goal
+
+The local inbox (`web/` served by the local host on `127.0.0.1`) shows and controls the projects of several hosts in one sidebar, exactly as it works with the local host today. A remote host runs on its own; a client is only a screen and keyboard for it. The first real use is the work Mac as client and the home Mac as remote host.
+
+### Owner decisions
+
+1. Hosts are the owner's Macs only. Linux and VPS hosts are not a goal, but nothing in the contract is macOS-only.
+2. The client only connects to a host that is already installed and has run `remote enable`. Every host keeps deploying itself from its own branch.
+3. Transport is the existing relay and its end-to-end protocol (`relay/bootstrap/wire.js`), with no protocol change.
+4. The browser page owns the tunnels. The local host serves the page and never proxies a remote host's traffic. When the local host is down, the PWA on the relay is the fallback.
+5. One sidebar, grouped by host: the local host first, then each remote host with its online state; an offline host collapses to one row. The Decision inbox is shared across hosts.
+6. Settings and the Host agent open for one selected host, chosen by a host switcher in their header.
+7. Every action goes to exactly one host. Moving or copying projects or chats between hosts is not a goal.
+8. Each host sends its own Telegram notices. The multi-host inbox shows no browser notifications for remote hosts.
+9. A paired client gets every owner right on the remote host, as the PWA does. Pairing, renaming and revoking devices stay local to each host.
+10. Pairing uses the existing link from Settings → Remote access → Pair a device on the remote host, pasted into Add host in the local inbox.
+11. Version: every host reports an API version. A remote host whose version differs from the client's is shown as "needs update" and is not connected. The version is raised only for an incompatible `/api` change.
+12. The inbox port is fixed, so the origin, and with it the device key in IndexedDB, survives host restarts. The list of remote hosts (host ID, name, relay origin; not secret) is kept in the local host's home.
+13. Offline read cache: the client keeps, in IndexedDB of the local origin, the answers of read actions it has already loaded (no prefetch), within a size limit. While a host is offline its cached views show with "data from HH:MM", and every control that writes to that host is disabled. Forget host and device revocation clear the host's cache. The owner accepts that a remote host's chats and diffs are stored on the client machine.
+14. A read that failed with a lost connection is retried automatically. A write is never retried; the UI says its result is unknown and asks the owner to check after reconnecting.
+15. Security rule: the local inbox never executes anything that came from the relay or a remote host. `wire.js` and every other script come from the local `web/`; remote data is only rendered as escaped text, under the CSP `script-src 'self'`.
+16. Plugin browser code is removed from the plugin contract: `web.script` and `web.style` go away for every host, local included. A plugin provides declarative sections (title, rows of text, status and links, and buttons that call its RPC methods declared in `rpcPolicy`), and core `web/` renders them. Tasks and network-gate move to declarative sections; the simulator panel is deleted.
+17. The local inbox token stays in `localStorage`. The CSP and the absence of foreign code protect it.
+18. The CSP of `src/web.ts` adds `wss://<relay host>` to `connect-src` for each configured relay origin.
+19. The PWA is not changed. The client module in `web/` is written so the PWA can reuse it later.
+
+### Architecture
+
+- `web/api.js` stays the only module that talks to a host. `call`, `stream`, `authorizedFetch` and the URLs of artifacts, uploads and media take a host. The local host uses the bearer token as today; a remote host goes through its tunnel.
+- `web/` gets a tunnel client built on `wire.js`: one session per remote host, the same handshake and records as `relay/bootstrap/tunnel.js`, reconnect with backoff, and connection state for the sidebar.
+- Resources that the page loads by URL (`<img>`, media, downloads) are fetched through the tunnel and shown as `blob:` URLs, which the CSP already allows.
+- Machine-bound features act on the host that owns the project: a dropped local path is refused for a remote project, uploads and artifacts go through the tunnel, simulators are the remote host's.
+
+### Stages
+
+Each stage is its own PR, with its failure modes written in `scripts/<name>-failures.md` before the code.
+
+1. **Host-aware client.** Tunnel client in `web/`, host-aware `web/api.js`, fixed inbox port, API version check, the remote host list in the local home, Add host and Forget host, the host switcher in Settings and the Host agent, the CSP change.
+2. **Declarative plugin sections.** New contract in `src/plugin-types.ts`, `PLUGINS.md` and `docs/plugins/`; removal of `web.script` and `web.style`; Tasks and network-gate as declarative sections; the simulator panel deleted.
+3. **Shared sidebar and Decision inbox.** Projects grouped by host, online state, shared Decision inbox.
+4. **Offline read cache.** IndexedDB cache, "data from HH:MM", disabled writes while offline, clearing on Forget host and revocation.
+
+### Verification
+
+Every stage is proven by a script: two private hosts in temporary homes, a local relay from `relay/`, the fake provider and headless Chrome, following `.agents/skills/verify-pi-prjcts/SKILL.md`. The [Constraints](#constraints) of the first remote stages (suspended verification, no new committed tests) do not apply here; `AGENTS.md` applies. A live check from the work Mac to the home Mac runs at the end, only with the owner's permission.
+
+### Out of scope
+
+Actions across hosts; browser or Web Push notifications in the multi-host inbox; installing or deploying remote hosts; transports other than the relay; isolating plugin code in iframes (plugin browser code is removed instead); changes to the PWA.
 
 ## Constraints
 
@@ -246,4 +300,4 @@ Decrypted record = `[u32 BE header length][header JSON][body bytes]`.
 
 ## Out of scope
 
-Native iOS app; Telegram changes; merged multi-host inbox; pairing approval from an existing device; running the relay on a VPS; protecting against an actively malicious relay serving a modified bootstrap (detected, not prevented).
+Native iOS app; Telegram changes; pairing approval from an existing device; running the relay on a VPS; protecting against an actively malicious relay serving a modified bootstrap (detected, not prevented).
