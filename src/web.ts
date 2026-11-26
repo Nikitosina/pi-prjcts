@@ -146,6 +146,10 @@ export async function startWeb(
             : "text/javascript; charset=utf-8";
       assets.set(file === "index.html" ? "/" : `/${file}`, webFile(readBrowserAsset(join(webDir, file)), mime));
     }
+  for (const name of ["wire.js", "tunnel.js", "store.js"]) {
+    const file = join(webDir, "../relay/bootstrap", name);
+    assets.set(`/inbox-wire/${name}`, webFile(readBrowserAsset(file), "text/javascript; charset=utf-8"));
+  }
   /** Where an old `/ui2/` link or cached asset lives now (the inbox moved to `/` on 2026-11-04); only known targets, never the request path. */
   const movedFromUi2 = (path: string) => {
     if (path === "/ui2" || path === "/ui2/") return "/";

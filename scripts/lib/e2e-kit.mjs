@@ -366,7 +366,7 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
       });
       chrome.stdio[3].write(JSON.stringify({ id: key, method, params, ...(sessionId ? { sessionId } : {}) }) + "\0");
     });
-  kit.openPage = async (url, { video = "all" } = {}) => {
+  kit.openPage = async (url, { video = "all", trustedSpki } = {}) => {
     const clog = createWriteStream(join(artifacts, "chrome.log"), { flags: "a", mode: 0o600 });
     chrome = spawn(
       "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -377,6 +377,7 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
         "--no-default-browser-check",
         "--disable-background-networking",
         `--user-data-dir=${join(root, "chrome-profile")}`,
+        ...(trustedSpki ? [`--ignore-certificate-errors-spki-list=${trustedSpki}`] : []),
         "--remote-debugging-pipe",
         "about:blank",
       ],

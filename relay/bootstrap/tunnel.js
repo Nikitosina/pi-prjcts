@@ -52,9 +52,14 @@ const json = (data) => {
  * Connect to `hostId`. With `pair: {code, name}` the hello pairs this device first; the session then continues as the device.
  * Resolves once the host's welcome verified against the pinned hostId.
  */
-export async function openTunnel({ hostId, pair = null }) {
-  const me = await device();
-  const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
+export async function openTunnel({
+  hostId,
+  pair = null,
+  identity = device,
+  endpoint = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`,
+}) {
+  const me = await identity();
+  const ws = new WebSocket(endpoint);
   ws.binaryType = "arraybuffer";
   const next = reader(ws);
   const timer = setTimeout(() => ws.close(4000, "Handshake timed out"), HANDSHAKE_MS);

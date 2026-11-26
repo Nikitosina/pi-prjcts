@@ -1,5 +1,8 @@
 import { createServer } from "node:net";
 import assert from "node:assert/strict";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { inboxRelay } from "./lib/inbox-relay.mjs";
 import { createKit } from "./lib/e2e-kit.mjs";
 
 const client = await createKit("inbox-client");
@@ -43,4 +46,27 @@ await client.run(async () => {
   await call("inbox-host-forget", { hostId: entry.hostId });
   assert.deepEqual(await call("inbox-hosts"), []);
   assert.equal(await csp(), "connect-src 'self'");
+  const relay = await inboxRelay();
+  try {
+    const other = await createKit("inbox-remote", { env: { NODE_EXTRA_CA_CERTS: relay.cert } });
+    await other.run(async () => {
+      mkdirSync(join(other.home, "remote"), { recursive: true });
+      writeFileSync(join(other.home, "remote/config.json"), JSON.stringify({ enabled: true, relay: relay.origin, hostName: "Home Mac" }));
+      const status = await other.rpc({ action: "remote-reload" });
+      relay.allow(status.hostId);
+      await other.waitFor(async () => (await other.rpc({ action: "remote-status" })).connection === "connected", "remote host connected");
+      const { link } = await other.rpc({ action: "remote-pair-start" });
+      other.initRepo();
+      await other.createProject("Only at home");
+      await call("inbox-host-add", { hostId: status.hostId, name: "Home Mac", relayOrigin: relay.origin });
+      const page = await client.openPage(url.href, { trustedSpki: relay.spki });
+      const projects = await page.evaluate(
+        `(async () => { const api = await import('/api.js'); const remote = await api.pairHost(${JSON.stringify(link)}); return (await remote.call('list')).map(p => p.name); })()`,
+      );
+      assert.deepEqual(projects, ["Only at home"]);
+    });
+    assert.equal(other.result.status, "passed", other.result.failure);
+  } finally {
+    await relay.close();
+  }
 });

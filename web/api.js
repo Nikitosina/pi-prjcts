@@ -33,12 +33,11 @@ export class HostError extends Error {
     this.refused = refused;
   }
 }
-export async function call(action, input = {}, signal) {
-  if (!token) throw new HostError("Not signed in", 401);
-  const response = await fetch("/api", {
+async function requestAction(host, action, input = {}, signal) {
+  const response = await host.authorizedFetch("/api", {
     method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-    body: JSON.stringify({ action, ...input }),
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...input, action }),
     signal,
   });
   let body;
@@ -52,15 +51,18 @@ export async function call(action, input = {}, signal) {
 }
 
 /** An authenticated GET of a host path outside `/api` (plugin routes). */
-export function authorizedFetch(path, init = {}) {
-  return fetch(path, { ...init, headers: { ...init.headers, authorization: `Bearer ${token}` } });
+function localFetch(path, init = {}) {
+  if (!token) throw new HostError("Not signed in", 401);
+  const url = new URL(path, location.origin);
+  if (url.origin !== location.origin) throw new Error("Expected a host path");
+  return fetch(url.pathname + url.search, { ...init, redirect: "error", headers: { ...init.headers, authorization: `Bearer ${token}` } });
 }
 
 /**
  * Reads one SSE stream (`/live` or `/changes`) and calls `onFrame` per JSON frame. Reconnects with backoff until `stop()`.
  * `onState(up)` reports the connection for the status line. A 4xx (e.g. host streams before the backend merge) backs off to 60 s.
  */
-export function stream(path, onFrame, onState = () => {}) {
+function openStream(host, path, onFrame, onState = () => {}) {
   let controller = null,
     stopped = false,
     retry = 1000,
@@ -69,7 +71,7 @@ export function stream(path, onFrame, onState = () => {}) {
     controller = new AbortController();
     let failed = false;
     try {
-      const response = await fetch(path, { headers: { authorization: `Bearer ${token}` }, signal: controller.signal });
+      const response = await host.authorizedFetch(path, { signal: controller.signal });
       if (!response.ok || !response.body) {
         failed = response.status >= 400 && response.status < 500;
         return;
@@ -117,6 +119,59 @@ export function stream(path, onFrame, onState = () => {}) {
       controller?.abort();
     },
   };
+}
+
+function hostClient(transport) {
+  return Object.assign(transport, {
+    call(action, input, signal) {
+      return requestAction(transport, action, input, signal);
+    },
+    stream(path, onFrame, onState) {
+      return openStream(transport, path, onFrame, onState);
+    },
+    async url(path, options) {
+      const response = await transport.authorizedFetch(path, options);
+      if (!response.ok) throw new HostError(`Resource unavailable (${response.status})`, response.status);
+      const data = await response.blob();
+      const type = /^(image\/(png|jpeg|webp|gif)|audio\/(mpeg|wav|ogg)|video\/(mp4|webm))$/.test(data.type)
+        ? data.type
+        : "application/octet-stream";
+      return URL.createObjectURL(data.slice(0, data.size, type));
+    },
+  });
+}
+export const localHost = hostClient({ local: true, authorizedFetch: localFetch });
+export const { call, stream, authorizedFetch } = localHost;
+const clients = new Map();
+export async function remoteHost(entry, pair = null) {
+  if (clients.has(entry.hostId)) return clients.get(entry.hostId);
+  const creating = (async () => {
+    const { remoteTransport } = await import("./remote-client.js");
+    const transport = await remoteTransport(entry, pair);
+    return hostClient(transport);
+  })();
+  clients.set(entry.hostId, creating);
+  try {
+    return await creating;
+  } catch (error) {
+    clients.delete(entry.hostId);
+    throw error;
+  }
+}
+export async function pairingEntry(link) {
+  const { parsePairFragment } = await import("/inbox-wire/wire.js");
+  const url = new URL(link);
+  if (url.protocol !== "https:" || url.pathname !== "/" || url.username || url.password || url.search) throw Error("Invalid pairing link");
+  const value = parsePairFragment(url.hash);
+  if (!value) throw Error("Invalid pairing link");
+  return {
+    entry: { hostId: value.hostId, name: value.hostName, relayOrigin: url.origin },
+    pair: { code: value.code, name: "Local inbox" },
+  };
+}
+export async function pairHost(link) {
+  const { entry, pair } = await pairingEntry(link);
+  return remoteHost(entry, pair);
 }
 
 export const uuid = () => crypto.randomUUID();
