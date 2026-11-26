@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en" data-theme="claude">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Remote inbox · pi-prjcts</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/workspace.css" />
+    <script type="module" src="/workspace.js"></script>
+  </head>
+  <body>
+    <main class="workspace">
+      <header>
+        <a href="/">Local inbox</a>
+        <h1 id="name">Remote host</h1>
+        <output id="connection" aria-live="polite">Connecting…</output><span id="switch"></span>
+      </header>
+      <nav aria-label="Host views">
+        <button data-view="projects">Projects</button><button data-view="settings">Settings</button
+        ><button data-view="agent">Host agent</button>
+      </nav>
+      <p id="error" role="alert"></p>
+      <section id="content"></section>
+    </main>
+  </body>
+</html>

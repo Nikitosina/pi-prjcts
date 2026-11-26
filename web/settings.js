@@ -1,6 +1,7 @@
 // Settings overlay (⌘,): left nav with a letter hotkey and a Project/Host scope label per item; the core four (Context, Model,
 // Prompt, Tools) per profile; Automations as cards; Host sections. Every section reads and writes the host directly.
-import { call } from "./api.js";
+import { call, localHost } from "./api.js";
+import { addHostControl, hostSwitcher } from "./host-switcher.js";
 import { ago, clip, esc, oneLine, shortModel, size, tokens, usd } from "./format.js";
 import { bindings, captureNext, conflicts, display, paintHints, DEFAULTS } from "./hotkeys.js";
 import { emit, inline, on, stale, state, toast } from "./state.js";
@@ -116,6 +117,9 @@ function paint(keepScroll = false) {
     .join("");
   const projectName = state.projects.find((item) => item.id === state.projectId)?.name ?? "";
   dialog.innerHTML = `<div class="settings-shell"><nav aria-label="Settings sections">${nav}<p class="nav-foot muted small"><kbd>Esc</kbd> close · letters jump</p></nav><section class="settings-main"><header class="settings-head"><h1>${esc(current.label)}</h1>${scope === "project" ? `<span class="scope project">Project · ${esc(clip(projectName, 30))}</span>` : `<span class="scope host">Host</span>`}<span class="settings-status inline-status" role="status" aria-live="polite"></span><span class="grow"></span><button type="button" class="icon-btn" data-cmd="settings" aria-label="Close settings">✕</button></header>${current.profile ? `<div class="profiles" role="tablist" aria-label="Profile">${tabs.map((item) => `<button type="button" role="tab" data-profile="${item.id}" aria-selected="${item.id === profile}">${item.label}</button>`).join("")}</div>` : ""}<div class="settings-body"><p class="loading-line">Loading…</p></div></section></div>`;
+  const switcher = document.createElement("span");
+  dialog.querySelector(".settings-head h1").after(switcher);
+  void hostSwitcher(switcher, localHost, "settings").catch(sayFail);
   paintHints(dialog);
   // A status said just before a repaint (a save redraws the section) stays visible in the new header.
   if (said && said.section === section && Date.now() - said.at < 3000) inline(dialog.querySelector(".settings-status"), said.text, said);
@@ -1361,6 +1365,7 @@ async function remote(body, alive) {
   await read();
   if (!alive()) return;
   body.innerHTML = `${line("Reach this host from your phone through the relay.", "Each device pairs once with a one-time QR code or link from this machine. A revoked device is cut off at once.")}<div id="remote-access"></div>`;
+  if (local) addHostControl(body);
   const box = body.querySelector("#remote-access");
   const button = (attr, label, tone = "ghost-btn", extra = "") =>
     `<button type="button" class="${tone} small" ${attr}${extra}${busy ? ` aria-disabled="true"` : ""}>${label}</button>`;

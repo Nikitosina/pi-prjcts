@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { inboxRelay } from "./lib/inbox-relay.mjs";
-import { createKit } from "./lib/e2e-kit.mjs";
+import { createKit, call as tool, say } from "./lib/e2e-kit.mjs";
 
 const client = await createKit("inbox-client");
 await client.run(async () => {
@@ -48,7 +48,13 @@ await client.run(async () => {
   assert.equal(await csp(), "connect-src 'self'");
   const relay = await inboxRelay();
   try {
-    const other = await createKit("inbox-remote", { env: { NODE_EXTRA_CA_CERTS: relay.cert } });
+    const other = await createKit("inbox-remote", {
+      env: { NODE_EXTRA_CA_CERTS: relay.cert },
+      handler: ({ role, user, results }) =>
+        role === "coordinator" && user.includes("Remote journey") && !results.length
+          ? tool("projects_question", { question: "Which colour for the remote project?" })
+          : say("Noted on Home Mac."),
+    });
     await other.run(async () => {
       mkdirSync(join(other.home, "remote"), { recursive: true });
       writeFileSync(join(other.home, "remote/config.json"), JSON.stringify({ enabled: true, relay: relay.origin, hostName: "Home Mac" }));
@@ -57,13 +63,41 @@ await client.run(async () => {
       await other.waitFor(async () => (await other.rpc({ action: "remote-status" })).connection === "connected", "remote host connected");
       const { link } = await other.rpc({ action: "remote-pair-start" });
       other.initRepo();
-      await other.createProject("Only at home");
-      await call("inbox-host-add", { hostId: status.hostId, name: "Home Mac", relayOrigin: relay.origin });
+      const remoteProject = await other.createProject("Only at home");
+      client.initRepo();
+      await client.createProject("Only at work");
       const page = await client.openPage(url.href, { trustedSpki: relay.spki });
-      const projects = await page.evaluate(
-        `(async () => { const api = await import('/api.js'); const remote = await api.pairHost(${JSON.stringify(link)}); return (await remote.call('list')).map(p => p.name); })()`,
+      await page.waitFor(`document.body.dataset.ready === '1'`, "inbox ready");
+      await page.evaluate(
+        `document.querySelector('[data-cmd="settings"]').click(); document.querySelector('nav [data-section="remote"]').click()`,
       );
-      assert.deepEqual(projects, ["Only at home"]);
+      await page.waitFor(`!!document.querySelector('[aria-label="Host pairing link"]')`, "Add host from link", 3);
+      await page.evaluate(`document.querySelector('[aria-label="Host pairing link"]').focus()`);
+      await page.cdp("Input.insertText", { text: link });
+      const { x, y } = await page.evaluate(
+        `(() => {const r = document.querySelector('[data-add-host]').getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2};})()`,
+      );
+      for (const type of ["mousePressed", "mouseReleased"])
+        await page.cdp("Input.dispatchMouseEvent", { type, x, y, button: "left", clickCount: 1 });
+      await page.waitFor(`document.body.innerText.includes('Only at home')`, "remote project tree");
+      assert.ok(!(await page.evaluate(`document.body.innerText.includes('Only at work')`)));
+      async function submit(label, text) {
+        const field = `document.querySelector('textarea[aria-label="${label}"]')`;
+        await page.waitFor(`!!${field}`, label);
+        await page.evaluate(`${field}.focus()`);
+        await page.cdp("Input.insertText", { text });
+        await page.evaluate(`${field}.form.requestSubmit()`);
+      }
+      await submit("Send message", "Remote journey");
+      await submit("Answer", "Purple");
+      await other.waitFor(
+        async () => (await other.rpc({ action: "show", id: remoteProject })).inbox.some((q) => q.kind === "question" && q.result),
+        "answer stored on remote",
+      );
+      await page.shot("remote-inbox", { force: true });
+      await other.stopHost();
+      await page.waitFor(`document.querySelector('#connection')?.textContent === 'offline'`, "remote offline");
+      await page.shot("remote-offline", { force: true });
     });
     assert.equal(other.result.status, "passed", other.result.failure);
   } finally {
