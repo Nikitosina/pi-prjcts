@@ -18,20 +18,18 @@ import type {
   ProjectPauseControl,
   PluginCapabilities,
   PluginModule,
-  PluginRoute,
   PluginRpcHandler,
   PluginRpcKind,
   PluginStatus,
   PrProvider,
+  SectionContext,
   VcsProvider,
-  WebContribution,
   WorkerToolsProvider,
   WorkspaceProvider,
 } from "./plugin-types.ts";
 import { usePluginPromptBlocks } from "./prompt-blocks.ts";
 import { hostLeases } from "./resource-leases.ts";
-import { readBrowserAsset } from "./host-assets.ts";
-import { webFile, type WebFile } from "./web-file.ts";
+import { checkSections, checkView, sectionEntry, type SectionEntry, type SectionViewData } from "./plugin-sections.ts";
 import { home, listProjects, loadProject, projectDir, workerWorktreeRoot, type Project } from "./state.ts";
 import { verifiedWorkspaceRoots } from "./workspace-roots.ts";
 import { runCli, findVcsRoot } from "./vcs.ts";
@@ -50,8 +48,7 @@ import { command } from "./workspace-isolation.ts";
  * A plugin that fails to import, has the wrong shape, throws in register, conflicts with another plugin or times out is recorded
  * (status(), the `plugins` RPC, the UI) and contributes nothing; the host keeps running.
  */
-/** `web` holds the declared browser files as they were at load, so a later change on disk waits for the restart like the plugin's code. */
-type Loaded = { plugin: string; builtIn?: true; capabilities: PluginCapabilities; web?: { "ui.js"?: WebFile; "ui.css"?: WebFile } };
+type Loaded = { plugin: string; builtIn?: true; capabilities: PluginCapabilities };
 const loaded: Loaded[] = [];
 const statuses: PluginStatus[] = [];
 /** The loader's result per resolved plugin directory, as the running host started: what a later change to the configuration does not touch. */
@@ -466,27 +463,37 @@ export const plugins = {
   close: async (): Promise<void> => {
     await Promise.allSettled(each((caps) => caps.lifecycle).map((hooks) => hooks.close?.()));
   },
-  /** Browser contributions of loaded plugins (asset URLs only). */
-  web: (): Array<{ plugin: string; script: string | null; style: string | null; sidebar: { title: string } | null }> =>
-    loaded
-      .filter((item) => item.capabilities.web?.script || item.capabilities.web?.style)
-      .map((item) => ({
-        plugin: item.plugin,
-        script: item.capabilities.web?.script ? `/plugins/${item.plugin}/ui.js` : null,
-        style: item.capabilities.web?.style ? `/plugins/${item.plugin}/ui.css` : null,
-        sidebar:
-          item.capabilities.web?.script && item.capabilities.web.sidebar
-            ? { title: item.capabilities.web.sidebar.title ?? item.plugin }
-            : null,
-      })),
-  /** The declared browser file for /plugins/<name>/ui.js|ui.css; nothing else below a plugin is served. */
-  webAsset: (plugin: string, file: string): WebFile | undefined => {
-    const web = loaded.find((item) => item.plugin === plugin)?.web;
-    return file === "ui.js" || file === "ui.css" ? web?.[file] : undefined;
+  /** Declared sections of loaded plugins in load order; with a project, only of plugins that are on in it. */
+  sections: (projectId?: string): SectionEntry[] =>
+    loaded.flatMap((item) =>
+      projectId && gate.isOff(projectId, item.plugin)
+        ? []
+        : Object.entries(item.capabilities.sections ?? {}).map(([id, section]) => sectionEntry(item.plugin, id, section)),
+    ),
+  section: (plugin: string, id: string) => {
+    const sections = loaded.find((item) => item.plugin === plugin)?.capabilities.sections;
+    return sections && Object.hasOwn(sections, id) ? sections[id] : undefined;
   },
-  route: (plugin: string, name: string): PluginRoute | undefined => {
-    const routes = loaded.find((item) => item.plugin === plugin)?.capabilities.web?.routes;
-    return routes && Object.hasOwn(routes, name) ? routes[name] : undefined;
+  /** Runs a section's `read` and answers the checked view; a read that does not settle in time fails like a throwing one. */
+  readSection: async (plugin: string, id: string, context: SectionContext): Promise<SectionViewData> => {
+    const section = plugins.section(plugin, id);
+    if (!section) throw new Error(`Plugin section ${plugin}.${id} is unavailable: the plugin is not loaded or has no such section`);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const view = await Promise.race([
+      section.read(context),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`Section ${plugin}.${id} did not answer within ${SECTION_READ_MS / 1000} s`)),
+          SECTION_READ_MS,
+        );
+      }),
+    ]).finally(() => clearTimeout(timer));
+    const rpc = loaded.find((item) => item.plugin === plugin)?.capabilities.rpc;
+    try {
+      return checkView(view, (method, params) => (rpc && Object.hasOwn(rpc, method) ? plugins.rpcKind(plugin, method, params) : undefined));
+    } catch (error) {
+      throw new Error(`Section ${plugin}.${id} returned an invalid view: ${message(error)}`);
+    }
   },
   rpc: (plugin: string, method: string): PluginRpcHandler | undefined =>
     loaded.find((item) => item.plugin === plugin)?.capabilities.rpc?.[method],
@@ -546,6 +553,7 @@ export const plugins = {
 };
 
 const timeoutMs = () => Number(process.env.PI_PROJECTS_PLUGIN_TIMEOUT_MS) || 15_000;
+const SECTION_READ_MS = 15000;
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const NAME = /^[a-z][a-z0-9-]{0,39}$/;
 const VERSION = /^\S{1,40}$/;
@@ -609,9 +617,17 @@ const requireStrings = (what: string, value: object, names: string[]) => {
 /** Fields that older plugins still provide: the host ignores them with one log line instead of refusing the plugin. */
 function dropRetired(name: string, caps: PluginCapabilities): void {
   const follow = caps.follow as (typeof caps.follow & { autoMerge?: unknown }) | undefined;
-  if (follow?.autoMerge === undefined) return;
-  delete follow.autoMerge;
-  process.stderr.write(`plugin ${name}: follow.autoMerge is retired and ignored; approve a PR to merge it\n`);
+  if (follow?.autoMerge !== undefined) {
+    delete follow.autoMerge;
+    process.stderr.write(`plugin ${name}: follow.autoMerge is retired and ignored; approve a PR to merge it\n`);
+  }
+  const retired = caps as PluginCapabilities & { web?: unknown };
+  if (retired.web !== undefined) {
+    delete retired.web;
+    process.stderr.write(
+      `plugin ${name}: web (browser script, style and routes) is removed and ignored; declare sections instead (PLUGINS.md)\n`,
+    );
+  }
 }
 function validate(caps: PluginCapabilities): void {
   if (caps.vcs) {
@@ -648,24 +664,7 @@ function validate(caps: PluginCapabilities): void {
   for (const hook of ["pause", "unresolved", "close"] as const)
     if (caps.lifecycle?.[hook] !== undefined && typeof caps.lifecycle[hook] !== "function")
       throw new Error(`lifecycle.${hook} must be a function`);
-  for (const file of ["script", "style"] as const) {
-    const path = caps.web?.[file];
-    if (path !== undefined && (typeof path !== "string" || !isAbsolute(path) || !existsSync(path)))
-      throw new Error(`web.${file} must be an absolute path to an existing file`);
-  }
-  const sidebar = caps.web?.sidebar;
-  if (sidebar !== undefined) {
-    if (!caps.web?.script) throw new Error("web.sidebar needs web.script");
-    if (
-      typeof sidebar !== "object" ||
-      sidebar === null ||
-      (sidebar.title !== undefined && (typeof sidebar.title !== "string" || !sidebar.title.trim() || sidebar.title.length > 60))
-    )
-      throw new Error("web.sidebar must be { title?: string of 1 to 60 characters }");
-  }
-  for (const [route, handler] of Object.entries(caps.web?.routes ?? {}))
-    if (!/^[a-z][a-z0-9-]{0,63}$/.test(route) || route === "ui.js" || route === "ui.css" || typeof handler !== "function")
-      throw new Error(`web.routes.${route} must be a function with a kebab-case name`);
+  checkSections(caps.sections);
   for (const [method, handler] of Object.entries(caps.rpc ?? {}))
     if (!/^[a-z][a-z0-9-]{0,63}$/.test(method) || typeof handler !== "function")
       throw new Error(`rpc.${method} must be a function with a kebab-case name`);
@@ -770,19 +769,6 @@ async function withTimeout<T>(work: Promise<T>, label: string): Promise<T> {
   }
 }
 
-/** A declared file that cannot be read is not served (404), as before; it does not fail the plugin. */
-function webFiles(web: WebContribution | undefined): Loaded["web"] {
-  const read = (path: string | undefined, mime: string) => {
-    if (!path) return undefined;
-    try {
-      return webFile(readBrowserAsset(path), mime);
-    } catch {
-      return undefined;
-    }
-  };
-  return { "ui.js": read(web?.script, "text/javascript; charset=utf-8"), "ui.css": read(web?.style, "text/css; charset=utf-8") };
-}
-
 async function loadOne(source: string, path: string, builtIn = false): Promise<PluginStatus> {
   const status: PluginStatus = { source, name: null, version: null, state: "failed", provides: [], loadedAtMs: Date.now() };
   try {
@@ -805,7 +791,7 @@ async function loadOne(source: string, path: string, builtIn = false): Promise<P
     const clash = conflict(module.name, stage, builtIn);
     if (clash) throw new Error(clash);
     const capabilities = builtIn ? { ...coreCapabilities(module.name), ...stage } : stage;
-    loaded.push({ plugin: module.name, ...(builtIn ? { builtIn: true as const } : {}), capabilities, web: webFiles(stage.web) });
+    loaded.push({ plugin: module.name, ...(builtIn ? { builtIn: true as const } : {}), capabilities });
     if (stage.leaseName) hostLeases.addNaming(stage.leaseName);
     status.state = "loaded";
     status.provides = provides(capabilities);

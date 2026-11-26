@@ -1,7 +1,25 @@
-import { fileURLToPath } from "node:url";
-import type { HostPluginApi, PluginRpcContext } from "../../src/plugin-types.ts";
-import { createTaskStore, isChatId } from "./store.ts";
+import type { HostPluginApi, PluginRpcContext, SectionRow, SectionTone } from "../../src/plugin-types.ts";
+import { createTaskStore, isChatId, type Stage, type Task } from "./store.ts";
 import { COORDINATOR_NOTE, createTaskTools } from "./tools.ts";
+
+const STAGES: Record<Stage, { label: string; tone: SectionTone }> = {
+  planned: { label: "Planned", tone: "neutral" },
+  "in-progress": { label: "In progress", tone: "work" },
+  "in-review": { label: "In review", tone: "neutral" },
+  blocked: { label: "Blocked", tone: "needs" },
+  done: { label: "Done", tone: "neutral" },
+};
+
+function row(task: Task): SectionRow {
+  const pr = task.pr && `${task.pr.provider} ${task.pr.repository}#${task.pr.number}`;
+  const detail = [...(pr && task.pr?.url ? [] : [pr ?? "no PR"]), ...(task.job ? [task.job] : []), ...(task.note ? [task.note] : [])];
+  return {
+    text: task.title,
+    status: STAGES[task.stage],
+    ...(pr && task.pr?.url ? { links: [{ label: pr, url: task.pr.url }] } : {}),
+    detail,
+  };
+}
 
 /**
  * Optional task lists for the Coordinator: one durable list per project and chat, written only by the tools of that chat's own
@@ -33,10 +51,20 @@ export default {
         },
       },
       rpcPolicy: { list: "read" },
-      web: {
-        script: fileURLToPath(new URL("ui.js", import.meta.url)),
-        style: fileURLToPath(new URL("ui.css", import.meta.url)),
-        sidebar: { title: "Tasks" },
+      sections: {
+        tasks: {
+          title: "Tasks",
+          place: "chat",
+          refreshMs: 3000,
+          read: async ({ projectId, chatId }) => {
+            if (!projectId || !isChatId(chatId)) throw new Error("Tasks need a project and a chat");
+            api.projects.load(projectId);
+            const tasks = store.list(projectId, chatId),
+              open = tasks.filter((task) => task.stage !== "done"),
+              finished = tasks.length - open.length;
+            return { rows: open.map(row), empty: "No open tasks.", ...(finished ? { footer: `${finished} finished` } : {}) };
+          },
+        },
       },
     });
   },

@@ -122,7 +122,7 @@ function openStream(host, path, onFrame, onState = () => {}) {
 }
 
 const reads = new Set(
-  `approvals-list automation-snapshot chat-history coordinator-skills deploy-snapshot host-agent-history jobs-snapshot knowledge-read limits-snapshot list machine-status memory-index memory-recent memory-writes plugin-catalog plugins profile-tools profiles-get prompt-blocks-get prompt-render prs remote-devices remote-status schedule-history schedule-snapshot search settings-snapshot show storage-status storage-summary telegram-snapshot thread-history tiers-get tool-summaries-usage transcript-image ui-get usage-snapshot worker-contexts pr-review-files pr-review-file pr-review-lines pr-review-tour-status`.split(
+  `approvals-list automation-snapshot chat-history coordinator-skills deploy-snapshot host-agent-history jobs-snapshot knowledge-read limits-snapshot list machine-status memory-index memory-recent memory-writes plugin-catalog plugin-section plugins profile-tools profiles-get prompt-blocks-get prompt-render prs remote-devices remote-status schedule-history schedule-snapshot search settings-snapshot show storage-status storage-summary telegram-snapshot thread-history tiers-get tool-summaries-usage transcript-image ui-get usage-snapshot worker-contexts pr-review-files pr-review-file pr-review-lines pr-review-tour-status`.split(
     " ",
   ),
 );

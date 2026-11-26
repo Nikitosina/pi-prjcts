@@ -40,7 +40,7 @@ const slash = mountSlash(client);
 const memory = mountMemory(client);
 const chat = mountChat(client, media, slash, memory);
 const plugins = mountPlugins(client);
-mountSidebar(client, plugins);
+mountSidebar(client);
 const review = mountReview(client);
 const workers = mountWorkers(client, chat, media);
 const prompts = mountPrompts(client);

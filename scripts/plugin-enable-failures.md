@@ -10,7 +10,7 @@ Refusal
 
 Enforcement for existing threads
 5. A thread that already holds the plugin's tools (a frozen worker tool set, a coordinator chat) keeps running them after the disable. Every tool call checks the flag when it executes and fails with "plugin is disabled in this project".
-6. A plugin RPC or web route answers for a project that disabled it. Both refuse with the same reason.
+6. A plugin RPC or plugin section answers for a project that disabled it. Both refuse with the same reason.
 7. A background step (Workspace cleanup, Storage usage) of the plugin runs for a disabled project. It is skipped.
 8. New workers get the tools of a disabled plugin, or the coordinator prompt names them. Offers and prompt blocks follow the flag.
 

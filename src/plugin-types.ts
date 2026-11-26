@@ -31,7 +31,7 @@ import type { WorkspaceAuthority } from "./workspace-capabilities.ts";
  *  - leaseName  canonical name for host lease resources the plugin owns (aliases share one lease).
  *  - lifecycle  pause around project lifecycle changes; close at host shutdown.
  *  - cleanup    a step of each project's Workspace cleanup routine (for example erasing idle devices the plugin owns).
- *  - web        browser script/style for the project screen and authenticated GET routes.
+ *  - sections   declarative views in Settings → Plugins and the chat's right panel, rendered by core (no plugin browser code).
  */
 
 /** Libraries the plugin must use instead of importing its own copies (Durable docs and tools only work with the host's instances). */
@@ -556,15 +556,57 @@ export type LifecycleHooks = {
   /** Host shutdown: abort outstanding work. */
   close?(): Promise<void>;
 };
-export type PluginRoute = (input: { projectId: string; query: URLSearchParams }) => Promise<{ mime: string; bytes: Uint8Array }>;
-export type WebContribution = {
-  /** Absolute paths of the browser script and stylesheet, served unauthenticated as /plugins/<name>/ui.js and /plugins/<name>/ui.css; the script registers the plugin's Settings panel. */
-  script?: string;
-  style?: string;
-  /** Opt-in: the script also registers a `sidebar` section, mounted under Workers and Pull requests of the selected chat. `title` defaults to the plugin name. */
-  sidebar?: { title?: string };
-  /** Bearer-authenticated GET /plugins/<name>/<route>?project=<id>. */
-  routes?: Record<string, PluginRoute>;
+/** Settings → Plugins (the plugin's card) or the chat's right panel, under Workers and Pull requests. */
+export type SectionPlace = "settings" | "chat";
+export type SectionTone = "neutral" | "good" | "work" | "needs" | "bad";
+export type SectionContext = {
+  /** The selected project; a settings section may be read without one. */
+  projectId: string | undefined;
+  /** The selected chat (`main` or a chat id); only chat sections get one. */
+  chatId: string | undefined;
+};
+/** A view core renders as escaped text. Every string is plain text; the host refuses a view that breaks a limit. */
+export type PluginSection = {
+  /** 1 to 60 characters. */
+  title: string;
+  place: SectionPlace;
+  /** Read again every N ms (an integer, at least 2000) while the section is shown and the page is visible. */
+  refreshMs?: number;
+  read(context: SectionContext): Promise<SectionView>;
+};
+export type SectionView = {
+  /** At most 50. */
+  rows: SectionRow[];
+  /** Shown instead of the rows when there are none; up to 300 characters. */
+  empty?: string;
+  /** One muted line under the rows; up to 300 characters. */
+  footer?: string;
+};
+export type SectionRow = {
+  /** A muted key before the text (key/value rows); up to 60 characters. */
+  label?: string;
+  /** Up to 500 characters. */
+  text: string;
+  /** A badge; the label is up to 40 characters. */
+  status?: { label: string; tone?: SectionTone };
+  /** Muted lines under the text: at most 3 of up to 500 characters. */
+  detail?: string[];
+  /** At most 3; http and https only, opened in a new tab. */
+  links?: SectionLink[];
+  /** At most 3. */
+  buttons?: SectionButton[];
+};
+/** The label is up to 300 characters, the URL up to 500. */
+export type SectionLink = { label: string; url: string };
+export type SectionButton = {
+  /** Up to 40 characters. */
+  label: string;
+  /** A method of this plugin's `rpc` with an `rpcPolicy` entry. */
+  method: string;
+  /** JSON of at most 2 KB, sent as the call's params. */
+  params?: unknown;
+  /** Asks the owner first; required when the policy for these params is "dangerous". Up to 300 characters. */
+  confirm?: string;
 };
 
 export type PluginCapabilities = {
@@ -591,7 +633,8 @@ export type PluginCapabilities = {
     unusedDays: number;
     signal: AbortSignal;
   }) => Promise<(Omit<import("./storage-usage.ts").StorageMeasure, "note"> & { label: string; note?: string }) | null>;
-  web?: WebContribution;
+  /** Declarative sections by id (kebab-case, at most 4). */
+  sections?: Record<string, PluginSection>;
 };
 export type LeaseHolder = { projectId: string; threadId: string };
 export type LeaseAnswer =

@@ -14,7 +14,7 @@ async function compatible(session) {
   const text = await response.text();
   try {
     const reply = JSON.parse(text);
-    return response.ok && reply.ok === true && reply.data?.version === 1;
+    return response.ok && reply.ok === true && reply.data?.version === 2;
   } catch {
     return false;
   }

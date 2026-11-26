@@ -19,7 +19,7 @@ Export it as the default export, or export `name`, `version` and `register` by n
 - `version` is optional. When present it is 1 to 40 characters without spaces. A plugin without it shows `version: null`.
 - Import and `register` each have to finish within `PI_PROJECTS_PLUGIN_TIMEOUT_MS` (15 seconds by default).
 - `register` calls `api.provide({...})` once or more, each capability at most once. Nothing is visible until `register` returns. If it throws, nothing it provided stays registered.
-- After `register`, the loader checks every provided capability: required methods are functions, RPC method and route names are kebab-case (`/^[a-z][a-z0-9-]{0,63}$/`), every `rpcPolicy` key names an `rpc` method, `web.script` and `web.style` are absolute paths to existing files, and `web.sidebar` needs a `script` and a `title` of 1 to 60 characters when given. It also refuses a provider id or checkout kind that another plugin already provides.
+- After `register`, the loader checks every provided capability: required methods are functions, RPC method names are kebab-case (`/^[a-z][a-z0-9-]{0,63}$/`), every `rpcPolicy` key names an `rpc` method, and `sections` follow the declaration rules of [Sections](#sections), with an error that names the field. It also refuses a provider id or checkout kind that another plugin already provides.
 
 A plugin that fails any rule is recorded as `failed` with the reason and contributes nothing; the host keeps running.
 
@@ -80,7 +80,7 @@ Use these instead of importing your own copies. Durable tools and documents only
 | `leaseName` | canonical names for resources the plugin owns | [Resource leases](#resource-leases) |
 | `lifecycle` | hooks around project pause, resume, archive, delete and host shutdown | [Lifecycle](#lifecycle) |
 | `cleanup`, `usage` | a step of the Workspace cleanup routine and a row in Settings → Storage | [Cleanup and storage](#cleanup-and-storage) |
-| `web` | a panel in Settings → Plugins, an optional right-panel section and authenticated GET routes | [Web](#web) |
+| `sections` | declarative sections in Settings → Plugins and in the chat's right panel | [Sections](#sections) |
 | `vcs`, `workspace`, `prs`, `follow`, `merge`, `uncertainWrites` | a checkout kind or PR service | [`PLUGINS.md`](../../PLUGINS.md) |
 
 ## RPC methods and agent tools
@@ -233,93 +233,86 @@ usage?: (input: { projectId: string; unusedDays: number; signal: AbortSignal }) 
 - `cleanup` is a step of the project's Workspace cleanup routine, after the core steps. Remove only what the plugin owns, nobody uses now, and nobody used within `unusedDays`. Resolve with a one-line summary, or `""` for nothing to say; throw to fail the run.
 - `usage` is the plugin's row in Settings → Storage, or `null` when it keeps nothing for the project. `reclaimableBytes` is what `cleanup` would free now. A throw shows the row as unknown; other rows still answer.
 
-### Web
+### Sections
+
+A plugin shows things to the owner only through sections: data it returns, which the inbox draws itself. No plugin code runs in the browser. This holds for every host, local or paired, so a remote host or the relay can never run code in the owner's page.
 
 ```ts
-web?: {
-  script?: string;   // absolute path, served as /plugins/<name>/ui.js
-  style?: string;    // absolute path, served as /plugins/<name>/ui.css
-  sidebar?: { title?: string }; // opt-in: a section in the chat's right panel (see Right-panel section)
-  routes?: Record<string, (input: { projectId: string; query: URLSearchParams }) => Promise<{ mime: string; bytes: Uint8Array }>>;
+sections?: Record<string, PluginSection>; // at most 4, keyed by a kebab-case id of up to 40 characters
+
+type PluginSection = {
+  title: string;              // 1 to 60 characters
+  place: "settings" | "chat";
+  refreshMs?: number;         // read again every N ms while shown and the page is visible: an integer from 2000 to 3600000
+  read(context: { projectId: string | undefined; chatId: string | undefined }): Promise<SectionView>;
+};
+type SectionView = { rows: SectionRow[]; empty?: string; footer?: string };
+type SectionRow = {
+  label?: string;                                   // a muted key before the text
+  text: string;
+  status?: { label: string; tone?: "neutral" | "good" | "work" | "needs" | "bad" };
+  detail?: string[];                                // muted lines under the text
+  links?: { label: string; url: string }[];         // http and https only
+  buttons?: { label: string; method: string; params?: unknown; confirm?: string }[];
 };
 ```
 
-- A route answers bearer-authenticated `GET /plugins/<name>/<route>?project=<id>`. The host checks that the project exists before calling it, and refuses a malformed `mime`.
-- The host reads `script` and `style` once at load and serves them without authentication. A change to them shows after a host restart and a page reload.
+Where a section shows:
 
-### Settings panel
+- `settings`: in the plugin's card in Settings → Plugins, for the selected project. `read` gets `projectId` (or none when no project is selected) and never a `chatId`.
+- `chat`: in the chat's right panel, under Workers and Pull requests, in plugin load order. `read` gets the selected `projectId` and `chatId` (`"main"` for the main chat).
 
-Settings → Plugins lists every plugin the host loaded, one card each. A loaded plugin with a `script` gets a panel in its card. The inbox loads each `ui.js` and `ui.css` once per page, the first time the owner opens the section. The panel is mounted while the section shows: again after Settings closes and reopens, and again for each project the owner selects. With no project selected, the card says so and nothing mounts.
+A section shows only for projects where its plugin is on. Turning the plugin off removes its sections at once.
 
-`ui.js` is a classic script. Wrap your declarations in a block (`{ ... }`) so helpers of two plugins copied from the example do not share top-level lexical names. While it first runs, it registers its panel:
+Reading:
 
-```js
-window.piProjects.register({
-  name: "notes",                       // the plugin's own name
-  async mount(slot, panel) { ... },    // fill `slot`; may return a promise
-  async action(name, node, panel) { ... }, // optional: a click on [data-action="notes-..."] inside the slot
-});
-```
+- The browser reads a section with the `plugin-section` action, `{ action: "plugin-section", plugin, section, id?, chatId? }`, through the host that owns the project. It is a read: the Host agent may call it too.
+- The host refuses a chat section without a project and a chat, a settings section with a chat, an unknown section, and a plugin that is off for the project. It gives `read` 15 seconds.
+- The inbox runs one read of a section at a time. It reads on mount, every `refreshMs`, and when the page becomes visible again. It stops when the section goes away: Settings closes, the owner leaves Plugins, or selects another project or chat. An answer for a previous selection is dropped.
+- A `read` that throws shows its message in the section. A failed refresh keeps the last rows and says "Could not refresh". Other sections keep working.
 
-`panel` belongs to one mount:
+Limits. The host checks every view and refuses one that breaks a rule, with a message that names the field, for example `rows[0].links[0].url must be an absolute http or https URL`. Only the fields above leave the host.
 
-| field | |
+| field | limit |
 | --- | --- |
-| `projectId` | the project selected when the panel mounted |
-| `signal` | an `AbortSignal` that aborts when the panel goes away: Settings closes, the owner leaves the section, or selects another project |
-| `rpc(method, params?)` | calls this plugin's RPC method for `projectId` with the owner's token; resolves to the method's result |
-| `fetch(route, query?)` | a `GET` of this plugin's route with `project=<projectId>`, the `query` fields and the token; resolves to the `Response` |
+| `rows` | at most 50 |
+| `label` | up to 60 characters |
+| `text`, each `detail` line | up to 500 characters; at most 3 detail lines |
+| `status.label` | 1 to 40 characters |
+| `links` | at most 3; label up to 300 characters, URL up to 500, absolute `http:` or `https:` |
+| `buttons` | at most 3; label 1 to 40 characters, `confirm` up to 300 |
+| button `params` | JSON of at most 2 KB |
+| `empty`, `footer` | up to 300 characters |
 
-`window.piProjects.esc(text)` escapes text for HTML. It and `register` are the whole browser API.
+Buttons:
 
-Rules:
+- `method` names one of the plugin's `rpc` methods that has an `rpcPolicy` entry. A click sends one `plugin` call with that method and `params`, for the section's project, and reads the section again.
+- The host attaches the call's kind from `rpcPolicy` for these exact `params`. A `"dangerous"` call needs a `confirm` text; the inbox shows it inline with Cancel focused. A `confirm` on any other call asks too.
+- A write is never retried. When its answer is lost, the section says the result is unknown. Put a request id in `params` when a repeated call must not act twice, and keep it the same while nothing changed, or every refresh redraws the section.
 
-- Render only into `slot`. It is a fresh element on every mount. Listeners on it and its children go away with it, so a mount never stacks on an earlier one. Clicks inside it do not reach the inbox's own handlers.
-- After `signal` aborts, `rpc` and `fetch` send nothing and reject with an `AbortError`; a call already sent rejects the same way when its answer arrives. Let it propagate: the inbox ignores it, so an answer for the previous project never renders. Stop your own timers on `abort`.
-- Escape everything you put into HTML that came from a project, a user or the host, with `esc` or `textContent`.
-- `ui.css` applies to the whole page. Scope its selectors to your panel, as the example does with `.notes-panel`.
-- The inbox shows errors in the plugin's card: a `ui.js` that throws during its first run (also after `register`) or never registers, a `ui.css` that cannot be loaded (the panel still mounts), a refused registration, a `mount` that throws or rejects, and an `action` that throws or rejects. An exception your file leaves uncaught while the panel is mounted shows there too; an unhandled promise rejection does not, so return or await your promises. Other panels and Settings sections keep working.
-- `register` refuses a second call, a name other than the plugin's own, a call after `ui.js` finished its first run, and the hooks of the retired context-panel card (`render`, `tick`, `projectChanged`, `hide`).
+Every string is drawn as text, never as HTML. Links open in a new tab with `noopener noreferrer`, and the browser checks their protocol again.
 
-The code is trusted, not isolated: it runs in the owner's page with the owner's token. The API keeps a well-behaved panel to its own slot, plugin and project; it does not stop code that ignores it. There is no hot reload, and a panel cannot place anything elsewhere in the inbox.
-
-The [example plugin](examples/notes/ui.js) lists the project's notes and adds one.
-
-### Right-panel section
-
-A plugin can also put its own section in the chat's right panel, under Workers and Pull requests. It is opt-in and independent of the Settings panel: a plugin may have either or both. Plugins that do not opt in add nothing there, not even a status row.
-
-Declare it in `web` and register it in `ui.js`:
+From the example:
 
 ```js
-api.provide({ web: { script, style, sidebar: { title: "Notes" } } }); // title is optional, default: the plugin's name
-```
-
-```js
-window.piProjects.register({
-  name: "notes",
-  sidebar: {
-    async mount(slot, section) { ... },          // fill `slot`; may return a promise
-    async action(name, node, section) { ... },   // optional, as for the Settings panel
+sections: {
+  notes: {
+    title: "Notes",
+    place: "settings",
+    read: async ({ projectId }) => {
+      if (!projectId) return { rows: [], empty: "Select a project to see its notes." };
+      const notes = read(projectId);
+      const summary = {
+        label: "Saved",
+        text: String(notes.length),
+        buttons: notes.length ? [{ label: "Clear notes", method: "clear", confirm: "Delete every note of this project?" }] : [],
+      };
+      return { rows: [summary, ...latest(projectId, 49).map(noteRow)] };
+    },
   },
-});
+},
 ```
 
-`mount` is optional when `sidebar` is present, so a sidebar-only plugin has no panel in its Settings card. A plugin without `sidebar` is unchanged. A plugin that declares `web.sidebar` but registers no `sidebar` shows an error in its own section.
+The [example plugin](examples/notes/index.mjs) also has a chat section with the three latest notes.
 
-`section` has the fields of `panel` (`projectId`, `signal`, `rpc`, `fetch`) and one more:
-
-| field | |
-| --- | --- |
-| `chatId` | the chat selected when the section mounted (`"main"` for the main chat) |
-| `fetch(route, query?)` | as for `panel`, and it also sends `chat=<chatId>`; `rpc` sends only `project`, so pass `chatId` in `params` when the method needs it |
-
-Rules, in addition to those of the Settings panel:
-
-- The section mounts once per selection of a project or chat. Selecting another chat or project aborts `signal` and mounts a fresh section in a fresh slot with the new `chatId`. Refreshes of workers, jobs, the chat and the PR list do not mount it again, and selecting the chat that is already selected does nothing. On hosts with per-project plugin disable, only enabled plugins mount; changing that set aborts and replaces the sections.
-- Everything from the old selection is cut off after the abort: `rpc` and `fetch` send nothing and reject with an `AbortError`, also a call already sent and a call that rejects late, so a slow answer never renders into the next chat. Keep timers and polling tied to `signal`.
-- One failing section shows its error line in that section only. Other sections, Workers, Pull requests and the chat keep working.
-- Sections follow plugin load order. The panel is a narrow column (about 300 px, a sheet on small screens): wrap long text, avoid fixed widths, and scope your CSS to your own classes, as `.notes-panel` does. Core styles `.plugin-section` only for spacing, the heading and the error line.
-- The code is trusted, not isolated, as for the Settings panel. A plugin that wants to show something for a feature of its own (a task list, a status) reads its own RPC methods or routes; core has no knowledge of any plugin's data.
-
-The [example plugin](examples/notes/ui.js) shows the three latest notes and the selected chat.
+Removed: the `web` capability (`web.script`, `web.style`, `web.sidebar`, `web.routes`) and `window.piProjects`. A plugin that still provides `web` loads without it, and the host logs one line saying so.

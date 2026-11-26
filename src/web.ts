@@ -11,7 +11,6 @@ import { openArtifact } from "./artifacts.ts";
 import { closeSync, createReadStream } from "node:fs";
 import { errorText, home, loadProject, parse, projectDir, Refused, Request, saveJson, type Request as RequestData } from "./state.ts";
 import { join } from "node:path";
-import { plugins } from "./plugins.ts";
 import { webFile, type WebFile } from "./web-file.ts";
 import { feed, HOST_FEED, type FeedEvent } from "./change-feed.ts";
 import type { RemoteAccess } from "./remote.ts";
@@ -210,13 +209,6 @@ export async function startWeb(
         response.writeHead(404, { ...headers, "content-type": "text/plain; charset=utf-8" }).end("Not found");
         return;
       }
-      // Only the files a plugin declared (web.script, web.style); never another path below the plugin.
-      const pluginFile = request.method === "GET" ? /^\/plugins\/([a-z][a-z0-9-]{0,39})\/(ui\.js|ui\.css)$/.exec(url.pathname) : null;
-      const pluginAsset = pluginFile ? plugins.webAsset(pluginFile[1]!, pluginFile[2]!) : undefined;
-      if (pluginAsset) {
-        sendAsset(pluginAsset);
-        return;
-      }
       if (url.pathname === "/favicon.ico") {
         response.writeHead(204, headers).end();
         return;
@@ -270,19 +262,6 @@ export async function startWeb(
         }
         const data = await dispatch(input);
         response.writeHead(200, { ...headers, "content-type": "application/json" }).end(JSON.stringify({ ok: true, data }));
-        return;
-      }
-      const pluginRoute =
-        request.method === "GET" ? /^\/plugins\/([a-z][a-z0-9-]{0,39})\/([a-z][a-z0-9-]{0,63})$/.exec(url.pathname) : null;
-      const route = pluginRoute ? plugins.route(pluginRoute[1]!, pluginRoute[2]!) : undefined;
-      if (route) {
-        const id = url.searchParams.get("project") ?? "";
-        if (!/^[a-f0-9-]{36}$/.test(id)) throw new Error("Invalid project ID");
-        loadProject(id);
-        status = 409;
-        const result = await plugins.gate.run(id, pluginRoute![1]!, () => route({ projectId: id, query: url.searchParams }));
-        if (!/^[a-z]+\/[a-z0-9.+-]+$/.test(result.mime)) throw new Error("Plugin returned an invalid content type");
-        response.writeHead(200, { ...headers, "content-type": result.mime, "content-length": result.bytes.length }).end(result.bytes);
         return;
       }
       if (request.method === "GET" && (url.pathname === "/live" || url.pathname === "/changes")) {

@@ -10,7 +10,7 @@ export function mountSettings(client, ui, statusline, promptView, limits, plugin
   const { STATUS_ITEMS } = statusline;
   const { promptSection } = promptView;
   const { connectCursor, limitShown, loadLimits, refreshLimits, setLimitShown } = limits;
-  const { catalogBlock, mountPanels, pluginCards, wireCatalog } = pluginView;
+  const { catalogBlock, mountCardSections, pluginCards, wireCatalog } = pluginView;
 
   const dialog = document.querySelector("#settings");
   const PROFILES = [
@@ -45,7 +45,7 @@ export function mountSettings(client, ui, statusline, promptView, limits, plugin
     paintGen = 0,
     prompts = null, // the open Prompt section: back() for Esc, refresh() for writes from elsewhere
     back = null, // another open section's own Esc step (an inline edit); true when it stepped back
-    unmount = null; // the open Plugins section's panels, unmounted before a repaint and when Settings closes
+    unmount = null; // the open Plugins section's plugin sections, unmounted before a repaint and when Settings closes
 
   const settingsOpen = () => dialog.open;
   function openSettings(id) {
@@ -579,14 +579,14 @@ ${live.compactionFailure && !live.compacting ? `<details class="compaction-failu
   let pluginsRefresh = null;
   // The bundled catalog is host-wide: it is read once per opening of Settings, not at every project selection.
   let hostCatalog = null;
-  const pluginsSignature = (status) =>
-    JSON.stringify(status.plugins.map((plugin) => [plugin.name, plugin.state, plugin.enabled, plugin.lock]));
+  const pluginsSignature = (status, projectId) =>
+    JSON.stringify([projectId, status.plugins.map((plugin) => [plugin.name, plugin.state, plugin.enabled, plugin.lock]), status.sections]);
   on("connection", (up) => {
     if (!up) hostCatalog = null;
   });
   on("plugins-changed", () => void pluginsRefresh?.().catch(() => {}));
 
-  /** Every plugin the host loaded, and the panels plugins provide for this project (web/plugins.js). */
+  /** Every plugin the host loaded, and the settings sections plugins provide for this project (web/plugins.js). */
   async function pluginsSection(body, alive) {
     let shown = null,
       readId = 0;
@@ -595,17 +595,18 @@ ${live.compactionFailure && !live.compacting ? `<details class="compaction-failu
     const draw = async (force = false) => {
       if (force) shown = null; // A newer feed read must also restore a refused switch.
       const ask = ++readId;
-      const status = await client.call("plugins", state.projectId ? { id: state.projectId } : {});
+      const projectId = state.projectId;
+      const status = await client.call("plugins", projectId ? { id: projectId } : {});
       if (!alive() || ask !== readId) return;
-      const signature = pluginsSignature(status);
+      const signature = pluginsSignature(status, projectId);
       if (signature === shown) return;
       const catalog = hostCatalog ?? (await client.call("plugin-catalog"));
       if (!alive() || ask !== readId) return;
       hostCatalog = catalog;
       shown = signature;
       unmount?.();
-      body.innerHTML = `${line("Plugins this host loaded at its start. Turn one off to stop it in this project only; its saved data stays.", "A plugin with active work, or one this project's checkout needs, cannot be turned off. A panel is the plugin's own code running in this page. A changed plugin shows here after a host restart and a page reload.")}${catalogBlock(catalog)}${pluginCards(status) || `<p class="muted">No plugins are loaded. List one in plugins.json and restart the host.</p>`}`;
-      unmount = mountPanels(body, state.projectId, status.web);
+      body.innerHTML = `${line("Plugins this host loaded at its start. Turn one off to stop it in this project only; its saved data stays.", "A plugin with active work, or one this project's checkout needs, cannot be turned off. A plugin section shows the plugin's data; its buttons call the plugin on this host. A changed plugin shows here after a host restart and a page reload.")}${catalogBlock(catalog)}${pluginCards(status) || `<p class="muted">No plugins are loaded. List one in plugins.json and restart the host.</p>`}`;
+      unmount = mountCardSections(body, projectId, status.sections);
     };
     pluginsRefresh = draw;
     body.addEventListener("change", async (event) => {

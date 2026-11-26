@@ -108,5 +108,5 @@ coordinatorTools: {
 
 ## Next
 
-- [Reference](reference.md) for every capability, including a [panel in Settings → Plugins](reference.md#settings-panel).
+- [Reference](reference.md) for every capability, including [sections](reference.md#sections) the inbox draws for your plugin.
 - [Development and activation](development.md) to load the plugin on a real host.

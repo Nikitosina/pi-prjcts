@@ -1,9 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { Static, TSchema } from "typebox";
 import type { HostPluginApi, PluginRpcContext } from "../../src/plugin-types.ts";
 import { createSimulators, leaseName } from "./simulator.ts";
+import { requestIds, simulatorView, slimmingView } from "./section.ts";
 import { pruneEnabledProjects } from "./test-products.ts";
 import { COORDINATOR_NOTE, WORKER_NOTE, createSimulatorTools } from "./tools.ts";
 
@@ -14,7 +15,7 @@ const summary = ({ removed, bytes }: { removed: number; bytes: number }) =>
 
 /**
  * Optional iOS simulators per project: owner-enabled clones of a shut-down simulator, managed by the coordinator,
- * leased to whole-repository workers and shown read-only in a project card. Needs simslim and XcodeBuildMCP on a Mac.
+ * leased to whole-repository workers and listed in a Settings → Plugins section (section.ts). Needs simslim and XcodeBuildMCP on a Mac.
  * Ownership and request receipts persist in each project's `simulator.json`. Failure cases: FAILURES.md.
  */
 export default {
@@ -54,6 +55,14 @@ export default {
       { additionalProperties: false, if: { properties: { operation: { const: "create" } } }, then: { required: ["sourceUdid"] } },
     );
     const Recover = Type.Object({ confirm: Id, requestId: Id }, { additionalProperties: false });
+    // Section buttons carry request ids that change after each configure or recover and with each host start (FAILURES.md C5).
+    const start = randomUUID(),
+      changes = new Map<string, number>();
+    const ids = (id: string) => requestIds(`${start}:${id}:${changes.get(id) ?? 0}`);
+    const changed = <T>(id: string, result: T) => {
+      changes.set(id, (changes.get(id) ?? 0) + 1);
+      return result;
+    };
     const project = (context: PluginRpcContext) => {
       if (!context.projectId) throw new Error("Simulator requests need a project id");
       api.projects.load(context.projectId);
@@ -86,7 +95,8 @@ export default {
       usage: (input) => simulators.usage(input.projectId, input.unusedDays, input.signal),
       rpc: {
         snapshot: async (context) => simulators.snapshot(project(context)),
-        configure: async (context) => simulators.configure(project(context), params(Configure, context.params)),
+        configure: async (context) =>
+          changed(project(context), await simulators.configure(project(context), params(Configure, context.params))),
         action: async (context) => {
           const id = project(context);
           const input = context.params;
@@ -94,7 +104,7 @@ export default {
             throw Error("Invalid simulator action. For create, pass a valid sourceUdid from projects_simulator_status.");
           return simulators.act(id, input.operation, input.requestId, { udid: input.udid, sourceUdid: input.sourceUdid });
         },
-        recover: async (context) => simulators.recover(project(context), params(Recover, context.params)),
+        recover: async (context) => changed(project(context), await simulators.recover(project(context), params(Recover, context.params))),
       },
       // Erasing or deleting a device and settling an unknown outcome lose state, so agents need the owner's approval for them.
       rpcPolicy: {
@@ -109,15 +119,24 @@ export default {
             : "write",
         recover: "dangerous",
       },
-      web: {
-        script: fileURLToPath(new URL("web/ui.js", import.meta.url)),
-        style: fileURLToPath(new URL("web/ui.css", import.meta.url)),
-        routes: {
-          frame: async ({ projectId, query }) => {
-            const udid = query.get("udid") ?? undefined;
-            if (udid !== undefined && !/^[a-fA-F0-9-]{36}$/.test(udid)) throw new Error("Invalid simulator UDID");
-            return simulators.frame(projectId, udid);
-          },
+      sections: {
+        simulators: {
+          title: "iOS simulators",
+          place: "settings",
+          refreshMs: 3000,
+          read: async ({ projectId }) =>
+            projectId
+              ? simulatorView(projectId, await simulators.snapshot(projectId), ids(projectId))
+              : { rows: [], empty: "Select a project to manage its simulators." },
+        },
+        slimming: {
+          title: "Simulator slimming",
+          place: "settings",
+          refreshMs: 3000,
+          read: async ({ projectId }) =>
+            projectId
+              ? slimmingView(await simulators.snapshot(projectId), ids(projectId))
+              : { rows: [], empty: "Select a project to choose its slimming." },
         },
       },
     });

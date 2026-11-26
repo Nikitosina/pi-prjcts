@@ -134,7 +134,7 @@ export default {
         waiting: "read",
         counters: "read",
       },
-      web: { routes: { data: async ({ projectId }) => ({ mime: "text/plain", bytes: Buffer.from(`data:${projectId}`) }) } },
+      sections: { data: { title: "Gated", place: "settings", read: async ({ projectId }) => ({ rows: [{ text: `data:${projectId}` }] }) } },
       lifecycle: { pause: (projectId) => (paused.add(projectId), () => paused.delete(projectId)) },
       cleanup: async ({ projectId }) => (calls.push(projectId), ""),
     });

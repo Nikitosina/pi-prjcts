@@ -555,7 +555,7 @@ async function dispatchRequest(input: RequestData, literalMessage = false): Prom
       if (!web) throw new Error(inboxError);
       return { url: web.url };
     case "api-version":
-      return { version: 1 };
+      return { version: 2 };
     case "inbox-hosts":
       return inboxHosts();
     case "inbox-host-add":
@@ -1286,8 +1286,19 @@ async function dispatchRequest(input: RequestData, literalMessage = false): Prom
       return {
         plugins: input.id ? plugins.forProject(loadProject(input.id)) : plugins.status(),
         labels: plugins.labels(),
-        web: plugins.web(),
+        sections: plugins.sections(input.id),
       };
+    case "plugin-section": {
+      const section = plugins.section(input.plugin, input.section);
+      if (!section)
+        throw new Error(`Plugin section ${input.plugin}.${input.section} is unavailable: the plugin is not loaded or has no such section`);
+      if (section.place === "chat" && (!input.id || !input.chatId)) throw new Error("A chat section needs a project and a chat");
+      if (section.place === "settings" && input.chatId) throw new Error("A settings section has no chat");
+      const context = { projectId: input.id, chatId: input.chatId };
+      if (!input.id) return plugins.readSection(input.plugin, input.section, context);
+      loadProject(input.id);
+      return plugins.gate.run(input.id, input.plugin, () => plugins.readSection(input.plugin, input.section, context));
+    }
     case "project-plugin": {
       // Work in flight refuses the disable at once; it does not queue behind a project lock the work itself holds.
       if (!input.enabled) {

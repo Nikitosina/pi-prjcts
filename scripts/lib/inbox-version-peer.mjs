@@ -5,7 +5,7 @@ import { createRemote } from "../../src/remote.ts";
 
 if (!process.send || !process.env.PI_PROJECTS_HOME?.startsWith(process.env.INBOX_TEST_ROOT + "/"))
   throw Error("Private inbox fixture required");
-let version = 2;
+let version = 1; // an inbox of API version 2 refuses a version-1 host
 const requests = [];
 const server = createServer(async (req, res) => {
   const parts = [];

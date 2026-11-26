@@ -51,7 +51,10 @@ try {
   assert.deepEqual(Object.keys(tools).sort(), ["tasks_add", "tasks_attach_pr", "tasks_finish", "tasks_list", "tasks_update"]);
   assert.deepEqual(provided.rpcPolicy, { list: "read" });
   assert.deepEqual(Object.keys(provided.rpc), ["list"]);
-  assert.equal(provided.web.sidebar.title, "Tasks");
+  assert.deepEqual(
+    [provided.sections.tasks.title, provided.sections.tasks.place, provided.sections.tasks.refreshMs],
+    ["Tasks", "chat", 3000],
+  );
 
   // 8 17: a task without a Job, a PR or a link is a task
   const first = await call("tasks_add", { title: "Write the parser" });
@@ -139,6 +142,19 @@ try {
   assert.deepEqual(await call("tasks_finish", { id: first.id }), done, "finish is idempotent");
   await assert.rejects(call("tasks_update", { id: first.id, stage: "blocked" }), /finished/i);
   await assert.rejects(call("tasks_attach_pr", { id: first.id, ...GH, number: "9", replace: true }), /finished/i);
+
+  // The chat section shows the open tasks as rows, a PR without a link as a detail line, and counts the finished ones.
+  const view = await provided.sections.tasks.read({ projectId: projectA, chatId: "main" });
+  const openTasks = (await list()).tasks.filter((task) => task.stage !== "done");
+  assert.deepEqual(
+    view.rows.map((row) => row.text),
+    openTasks.map((task) => task.title),
+  );
+  assert.equal(view.footer, "1 finished");
+  const arcRow = view.rows.find((row) => row.text === second.title);
+  assert.ok(arcRow.detail.includes("arc arcadia#8") && !arcRow.links, JSON.stringify(arcRow));
+  assert.ok(["Planned", "In progress", "In review", "Blocked"].includes(arcRow.status.label));
+  await assert.rejects(provided.sections.tasks.read({ projectId: projectA, chatId: "../x" }), /project and a chat/);
 
   // RPC list: reads one chat, validates ids (3 4)
   const rpcList = (params, projectId = projectA) => provided.rpc.list({ projectId, params });
