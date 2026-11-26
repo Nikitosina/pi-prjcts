@@ -116,7 +116,7 @@ await kit.run(async () => {
     JSON.stringify(sections) ===
       JSON.stringify([
         { plugin: "simulator", id: "simulators", title: "iOS simulators", place: "settings", refreshMs: 3000 },
-        { plugin: "simulator", id: "slimming", title: "Simulator slimming", place: "settings", refreshMs: 3000 },
+        { plugin: "simulator", id: "slimming", title: "Simulator slimming", place: "settings", refreshMs: 30000 },
       ]),
     sections,
   );

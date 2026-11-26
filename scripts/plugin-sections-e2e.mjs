@@ -372,7 +372,7 @@ async function journey() {
   );
   // A lost answer: the host acts, then the page's request fails as if the connection broke.
   await page.evaluate(
-    `(() => { const real = window.fetch; window.fetch = async (url, init) => { const answer = await real(url, init); if (typeof init?.body === "string" && init.body.includes('"method":"lost"')) throw new TypeError("Failed to fetch"); return answer; }; })()`,
+    `(() => { const real = (window.__realFetch = window.fetch); window.fetch = async (url, init) => { const answer = await real(url, init); if (typeof init?.body === "string" && init.body.includes('"method":"lost"')) throw new TypeError("Failed to fetch"); return answer; }; })()`,
   );
   await pressButton("Lost");
   await page.waitFor(
@@ -385,6 +385,35 @@ async function journey() {
     (await callsOf("lost")).length === 1,
     await callsOf("lost"),
   );
+  // An answer that arrives but cannot be read is just as unknown as a lost one.
+  await page.evaluate(
+    `(() => { const real = window.__realFetch; window.fetch = async (url, init) => { const answer = await real(url, init); if (typeof init?.body === "string" && init.body.includes('"method":"lost"')) return new Response('{"ok":tr', { status: 200 }); return answer; }; })()`,
+  );
+  await page.evaluate(`document.querySelector('#settings .plugin-card[data-plugin="probe"] .plugin-error').textContent = ""`);
+  await pressButton("Lost");
+  await page.waitFor(
+    `/Lost(: result unknown| failed)/.test(document.querySelector('#settings .plugin-card[data-plugin="probe"] .plugin-error').textContent)`,
+    "unreadable answer shown",
+  );
+  const unreadable = await page.evaluate(`document.querySelector('#settings .plugin-card[data-plugin="probe"] .plugin-error').textContent`);
+  check(
+    "13 an unreadable answer says the result is unknown and is not sent again",
+    /Lost: result unknown, check after reconnecting/.test(unreadable) && (await callsOf("lost")).length === 2,
+    { unreadable, calls: await callsOf("lost") },
+  );
+  // 11: after a call that may have landed, the drawn buttons hold stale params until a fresh view replaces them.
+  await page.evaluate(
+    `(() => { const real = window.fetch; let release; window.__holdReads = new Promise((resolve) => (release = resolve)); window.__releaseReads = () => release(); window.fetch = async (url, init) => { if (window.__holdReads && typeof init?.body === "string" && init.body.includes('"action":"plugin-section"')) await window.__holdReads; return real(url, init); }; })()`,
+  );
+  const bumpsBefore = (await callsOf("bump")).length;
+  await pressButton("Bump");
+  await client.eventually(async () => (await callsOf("bump")).length === bumpsBefore + 1, "bump sent");
+  await delay(500);
+  const bumpButton = `[...document.querySelectorAll('#settings .plugin-card[data-plugin="probe"] button')].find((node) => node.textContent === "Bump")`;
+  const heldDisabled = await page.evaluate(`${bumpButton}?.disabled === true`);
+  await page.evaluate(`window.__releaseReads(); window.__holdReads = null;`);
+  await page.waitFor(`${bumpButton}?.disabled === false`, "buttons back after the fresh view");
+  check("11 buttons stay disabled after a call until a fresh view is drawn", heldDisabled);
   await shot("03-local-buttons");
 
   // ---- Views in the browser (5 6 7 10)

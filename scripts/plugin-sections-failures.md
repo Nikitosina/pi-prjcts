@@ -21,9 +21,9 @@ Views
 10. A `read` that throws leaves the section blank or loading forever. The section shows the error, and a later successful read replaces it. A failed refresh keeps the last rows and says it could not refresh.
 
 Buttons
-11. A `read` or `write` button sends nothing, sends twice, or reaches another plugin or project. One click sends exactly one `plugin` call with the section's plugin, the section's project and the button's params. The buttons are disabled while it runs, and the section is read again after it.
+11. A `read` or `write` button sends nothing, sends twice, or reaches another plugin or project. One click sends exactly one `plugin` call with the section's plugin, the section's project and the button's params. The buttons are disabled while it runs, and the section is read again after it. After a call that may have landed, the drawn buttons carry stale params (a full list computed before the call), so they stay disabled until the fresh view is drawn.
 12. A `dangerous` button runs without confirmation. This holds for a static policy and for a function policy that answers `dangerous` for these params. The row shows an inline confirmation with the plugin's text, Cancel sends nothing, and Confirm sends once. The host refuses a view with a dangerous button that has no `confirm` text.
-13. A failed call disappears, or a call whose answer was lost is retried. An answered refusal shows its error in the section. A lost answer says the result is unknown and asks to check after reconnecting, and the write is never sent again.
+13. A failed call disappears, or a call whose answer was lost is retried. An answered refusal shows its error in the section. A lost answer, or one that arrives but cannot be read, says the result is unknown and asks to check after reconnecting, and the write is never sent again.
 14. A periodic refresh while a confirmation is open closes it or swaps its button. The confirmation stays until it is confirmed or cancelled, and the newer view is drawn after that.
 
 Lifecycle

@@ -15,7 +15,7 @@ export function requestIds(seed: string): RequestIds {
 }
 
 const clip = (text: string) => (text.length > 500 ? `${text.slice(0, 499)}…` : text);
-const STATUS: Record<string, { label: string; tone: SectionTone }> = {
+const STATUS: Record<Snapshot["status"], { label: string; tone: SectionTone }> = {
   uncertain: { label: "Needs inspection", tone: "bad" },
   creating: { label: "Creating", tone: "work" },
   preparing: { label: "Preparing", tone: "work" },
@@ -38,7 +38,7 @@ export function simulatorView(projectId: string, s: Snapshot, id: RequestIds): S
     text: s.enabled
       ? `On. Agents create, boot, shut down, reset and delete up to ${s.maxOwned} clones for this project.`
       : "Off. Agents cannot create or manage simulators for this project.",
-    status: s.enabled ? STATUS[s.status]! : { label: "Off", tone: "neutral" },
+    status: s.enabled ? STATUS[s.status] : { label: "Off", tone: "neutral" },
   };
   if (!busy)
     management.buttons = [

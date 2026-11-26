@@ -499,7 +499,8 @@ export const plugins = {
     loaded.find((item) => item.plugin === plugin)?.capabilities.rpc?.[method],
   /** The declared agent policy of one call; undefined when the plugin does not classify the method (or its policy throws). */
   rpcKind: (plugin: string, method: string, params: unknown): PluginRpcKind | undefined => {
-    const policy = loaded.find((item) => item.plugin === plugin)?.capabilities.rpcPolicy?.[method];
+    const policies = loaded.find((item) => item.plugin === plugin)?.capabilities.rpcPolicy;
+    const policy = policies && Object.hasOwn(policies, method) ? policies[method] : undefined;
     try {
       const kind = typeof policy === "function" ? policy(params) : policy;
       return kind === "read" || kind === "write" || kind === "dangerous" ? kind : undefined;

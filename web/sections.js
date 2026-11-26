@@ -1,5 +1,6 @@
 // Declarative plugin sections (scripts/plugin-sections-failures.md). Core reads a section's view from the page's host and draws it as text;
 // a button sends one `plugin` call to the same host. Nothing a plugin or a remote host sends is run or inserted as HTML.
+import { HostError } from "./api.js";
 import { clip } from "./format.js";
 
 const TONES = new Set(["neutral", "good", "work", "needs", "bad"]);
@@ -46,6 +47,7 @@ export function mountSection(client, node, entry, { projectId, chatId }) {
     confirming = false,
     readError = "",
     callError = "",
+    stale = false,
     timer;
   const say = () => {
     errorLine.textContent = [callError, readError].filter(Boolean).join(" ");
@@ -85,8 +87,9 @@ export function mountSection(client, node, entry, { projectId, chatId }) {
   // A confirmation or a running call keeps the drawn rows; the newest view is drawn once it ends.
   function draw(view) {
     const key = JSON.stringify(view);
-    if (key === shown) return;
+    if (key === shown && !stale) return void (waiting = null);
     if (busy || confirming) return void (waiting = view);
+    stale = false;
     const focused = document.activeElement?.closest?.(".plugin-section") === node ? document.activeElement.dataset.key : undefined;
     shown = key;
     const parts = [];
@@ -181,23 +184,30 @@ export function mountSection(client, node, entry, { projectId, chatId }) {
   }
 
   // A write is never sent again: a lost answer only says the result is unknown.
+  // After a write that may have landed, the drawn buttons carry stale params, so they stay disabled until a fresh view is drawn.
   async function run(button) {
     busy = true;
     for (const node of body.querySelectorAll("button")) node.disabled = true;
     callError = "";
     say();
+    let landed = true;
     try {
       await client.call("plugin", { ...scope, method: button.method, ...(button.params === undefined ? {} : { params: button.params }) });
     } catch (error) {
       if (signal.aborted) return;
-      const unknown = error instanceof TypeError || /result unknown/i.test(String(error?.message));
-      callError = unknown ? `${button.label}: result unknown, check after reconnecting.` : `${button.label} failed: ${messageOf(error)}`;
+      landed = !(error instanceof HostError && error.answered);
+      callError = landed ? `${button.label}: result unknown, check after reconnecting.` : `${button.label} failed: ${messageOf(error)}`;
       say();
     } finally {
       busy = false;
       if (!signal.aborted) {
-        for (const node of body.querySelectorAll("button")) node.disabled = false;
-        flush();
+        if (landed) {
+          stale = true;
+          waiting = null;
+        } else {
+          for (const node of body.querySelectorAll("button")) node.disabled = false;
+          flush();
+        }
         void read();
       }
     }

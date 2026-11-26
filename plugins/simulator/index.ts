@@ -132,7 +132,8 @@ export default {
         slimming: {
           title: "Simulator slimming",
           place: "settings",
-          refreshMs: 3000,
+          // Only this section changes the categories, and it reads again after each press.
+          refreshMs: 30_000,
           read: async ({ projectId }) =>
             projectId
               ? slimmingView(await simulators.snapshot(projectId), ids(projectId))

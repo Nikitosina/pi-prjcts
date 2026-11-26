@@ -31,6 +31,12 @@ function fail(path: string, rule: string): never {
   throw new Error(`${path} ${rule}`);
 }
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+const oneOf =
+  <T extends string>(values: readonly T[]) =>
+  (value: unknown): value is T =>
+    (values as readonly unknown[]).includes(value);
+const isPlace = oneOf(PLACES),
+  isTone = oneOf(TONES);
 
 function text(value: unknown, path: string, max: number, required = false): string {
   if (typeof value !== "string") return fail(path, "must be a string");
@@ -43,7 +49,8 @@ const optionalText = (value: unknown, path: string, max: number): string | undef
 function list(value: unknown, path: string, max: number): unknown[] {
   if (!Array.isArray(value)) return fail(path, "must be an array");
   if (value.length > max) fail(path, `must have at most ${max} items`);
-  return value;
+  // A sparse array would skip holes in map but reach the page as null.
+  return Array.from(value);
 }
 
 /** Throws a message naming the field of the first declaration rule a plugin's `sections` breaks. */
@@ -58,7 +65,7 @@ export function checkSections(sections: unknown): void {
     if (!isRecord(section)) fail(path, "must be an object");
     const { title, place, refreshMs, read } = section as Record<string, unknown>;
     text(title, `${path}.title`, 60, true);
-    if (!PLACES.includes(place as SectionPlace)) fail(`${path}.place`, 'must be "settings" or "chat"');
+    if (!isPlace(place)) fail(`${path}.place`, 'must be "settings" or "chat"');
     if (
       refreshMs !== undefined &&
       (!Number.isInteger(refreshMs) || (refreshMs as number) < MIN_REFRESH_MS || (refreshMs as number) > MAX_REFRESH_MS)
@@ -102,7 +109,7 @@ function button(value: unknown, path: string, kindOf: (method: string, params: u
       /* refused below */
     }
     if (json === undefined) fail(`${path}.params`, "must be JSON");
-    if (json.length > MAX_PARAMS) fail(`${path}.params`, `must be at most ${MAX_PARAMS} bytes of JSON`);
+    if (Buffer.byteLength(json) > MAX_PARAMS) fail(`${path}.params`, `must be at most ${MAX_PARAMS} bytes of JSON`);
     params = JSON.parse(json);
   }
   const kind = kindOf(method, params);
@@ -121,8 +128,8 @@ function row(value: unknown, path: string, kindOf: (method: string, params: unkn
     if (!isRecord(value.status)) fail(`${path}.status`, "must be an object");
     const status = value.status as Record<string, unknown>;
     const tone = status.tone ?? "neutral";
-    if (!TONES.includes(tone as SectionTone)) fail(`${path}.status.tone`, `must be one of ${TONES.join(", ")}`);
-    out.status = { label: text(status.label, `${path}.status.label`, 40, true), tone: tone as SectionTone };
+    if (!isTone(tone)) return fail(`${path}.status.tone`, `must be one of ${TONES.join(", ")}`);
+    out.status = { label: text(status.label, `${path}.status.label`, 40, true), tone };
   }
   if (value.detail !== undefined)
     out.detail = list(value.detail, `${path}.detail`, MAX_PARTS).map((line, index) => text(line, `${path}.detail[${index}]`, 500));
