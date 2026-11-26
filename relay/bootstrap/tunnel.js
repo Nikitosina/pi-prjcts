@@ -122,6 +122,8 @@ class Tunnel {
       if (typeof event.data !== "string") void this.#session.receive(event.data);
     };
     this.#ws.onclose = (event) => this.#end(closeError(event));
+    // A close during the welcome verification fired before this handler existed.
+    if (this.#ws.readyState > 1) throw new TunnelError("Connection closed during the handshake");
   }
 
   close() {
