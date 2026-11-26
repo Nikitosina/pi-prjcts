@@ -173,6 +173,8 @@ async function journey() {
   const page = await client.openPage(await client.webUrl(alpha), { trustedSpki: relay.spki });
   await page.waitFor(`document.body.dataset.ready === "1"`, "inbox ready");
   const shot = (label) => page.shot(label, { force: true });
+  const scrollToCard = (name) =>
+    page.evaluate(`document.querySelector('#settings .plugin-card[data-plugin="${name}"]')?.scrollIntoView({ block: "start" })`);
   const click = async (selector) => {
     const point = await page.evaluate(
       `(() => { const node = document.querySelector(${js(selector)}); if (!node) return null; node.scrollIntoView({ block: "center" }); const box = node.getBoundingClientRect(); return { x: box.x + box.width / 2, y: box.y + box.height / 2 }; })()`,
@@ -294,6 +296,7 @@ async function journey() {
     js(await noPluginCode()) === js({ api: "undefined", plugins: [], foreign: [] }),
     await noPluginCode(),
   );
+  await scrollToCard("network-gate");
   await shot("02-local-settings-sections");
 
   // ---- Buttons (11 12 13 14)
@@ -627,6 +630,7 @@ async function journey() {
     remoteGate.rows[0].text === "CONNECTED" && remoteProbe.rows[0].text.startsWith("T<img") && remoteProbe.footer.startsWith("F<img"),
     { remoteGate, remoteProbe },
   );
+  await scrollToCard("network-gate");
   await shot("06-remote-settings-sections");
   await setMode({ mode: "normal" }, other, remote);
   await page.waitFor(
