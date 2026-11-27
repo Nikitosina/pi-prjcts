@@ -434,11 +434,18 @@ try {
   assert.equal(calls[0].input.name, "p · Main");
   assert.equal(calls[1].input.message_thread_id, nextThread);
   const progressThread = nextThread;
+  // j1's progress message was sent to the general thread before topics were on; the next update replaces it in the topic.
+  calls = [];
+  await bridge.progress(plan(["todo", "todo", "todo", "todo", "todo"]));
+  assert.deepEqual(
+    calls.map((c) => [c.method, c.input.message_thread_id]),
+    [["sendMessage", progressThread]],
+  );
   notices.push(notice(3, { jobId: "j2", mergeable: true }));
   await bridge.flush();
   const topicNotice = calls.at(-1);
   assert.equal(topicNotice.input.message_thread_id, progressThread, "the notice shares its chat's topic with the progress message");
-  assert.equal(calls.filter((c) => c.method === "createForumTopic").length, 1);
+  assert.equal(calls.filter((c) => c.method === "createForumTopic").length, 0, "the topic is reused");
   calls = [];
   // The aborted poll of setToken may still be answered by the fake server; let it drain so it does not swallow the update.
   await sleep(200);

@@ -905,6 +905,13 @@ try {
   assert.equal(sends[0].input.message_thread_id, String(topicId));
   assert.deepEqual(JSON.parse(readFileSync(statePath)).topics, [{ projectId: project, chatId: "main", thread: topicId }]);
   mapped();
+  reset("A thread kept from before topics were turned off is dropped. ".repeat(2));
+  const stale = JSON.parse(readFileSync(statePath));
+  writeFileSync(statePath, JSON.stringify({ ...stale, sentPart: { seq: 1, chatId: 1, parts: 0, thread: 500 } }));
+  start();
+  await bridge.flush();
+  assert.equal(sends.length, 1);
+  assert.equal(sends[0].input.message_thread_id, undefined);
   reset(`![Image](${ref("demo.png")})`);
   topicsOn();
   fault = { method: "createForumTopic", code: 500 };

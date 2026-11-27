@@ -951,11 +951,11 @@ try {
   assert.equal((await jobs(a, two.id)).filter((j) => j.text.includes("MARK-GENERAL")).length, 1, "64 the general thread keeps the route");
   assert.equal(general.message_thread_id, alphaThread, "62 its result is in Alpha Two's topic");
   text(OWNER, "/status", { message_thread_id: betaThread });
-  assert.equal(
-    (await lastTo(/Text goes to/, "status in the topic", mark)).message_thread_id,
-    betaThread,
-    "62 command replies stay in the topic",
-  );
+  const status = await lastTo(/Text goes to/, "status in the topic", mark);
+  assert.equal(status.message_thread_id, betaThread, "62 command replies stay in the topic");
+  assert.match(status.text, /Text goes to Beta · Main/, "64 a command in a topic acts on the topic's chat, not the picked route");
+  text(OWNER, "/models", { message_thread_id: betaThread });
+  assert.equal((await lastTo(/Models for Beta/, "models in the topic", mark)).message_thread_id, betaThread);
 
   // A question arrives in its chat's topic; a reply to it inside the topic answers it.
   mark = toOwner().length;
