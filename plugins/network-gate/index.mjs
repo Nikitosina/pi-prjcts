@@ -17,6 +17,17 @@ const system = {
   },
 };
 const PHASES = { ready: "good", repairing: "work", waiting: "needs" };
+/** Up to 500 characters of ids, then how many more; a row's text holds 500. */
+function listed(ids) {
+  let text = "";
+  for (const [index, id] of ids.entries()) {
+    const next = text ? `${text}, ${id}` : id;
+    const rest = ids.length - index - 1;
+    if (next.length + (rest ? ` and ${rest} more`.length : 0) > 500) return `${text} and ${ids.length - index} more`;
+    text = next;
+  }
+  return text || "none";
+}
 /** The VPN gate section in Settings → Plugins: the watcher's status as key/value rows. */
 export function gateView(s) {
   const clip = (text) => (text.length > 500 ? `${text.slice(0, 499)}…` : text);
@@ -25,7 +36,7 @@ export function gateView(s) {
     { label: "Failed samples", text: String(s.failures) },
     { label: "Repair attempts", text: `${s.attempts}/3` },
     { label: "Last repair", text: s.lastRepair ?? "none" },
-    { label: "Paused projects", text: clip(s.paused.join(", ")) || "none" },
+    { label: "Paused projects", text: listed(s.paused) },
   ];
   if (s.error) rows.push({ label: "Error", text: clip(String(s.error)), status: { label: "error", tone: "bad" } });
   return { rows };

@@ -16,7 +16,7 @@ function row(task: Task): SectionRow {
   return {
     text: task.title,
     status: STAGES[task.stage],
-    ...(pr && task.pr?.url ? { links: [{ label: pr, url: task.pr.url }] } : {}),
+    ...(pr && task.pr?.url ? { links: [{ label: pr.length > 300 ? `${pr.slice(0, 299)}…` : pr, url: task.pr.url }] } : {}),
     detail,
   };
 }

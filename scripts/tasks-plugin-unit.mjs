@@ -7,6 +7,7 @@ import * as durable from "@earendil-works/pi-durable";
 import * as typebox from "typebox";
 import * as value from "typebox/value";
 import plugin from "../plugins/tasks/index.ts";
+import { checkView } from "../src/plugin-sections.ts";
 
 const projectA = "00000000-0000-4000-8000-00000000000a";
 const projectB = "00000000-0000-4000-8000-00000000000b";
@@ -163,6 +164,18 @@ try {
     [other.id],
   );
   assert.equal((await rpcList({ chatId: "main" })).tasks.length, 2);
+  // 21: the longest PR the store accepts still gives a view the host accepts.
+  const longest = await call("tasks_add", { title: "longest PR" });
+  await call("tasks_attach_pr", {
+    id: longest.id,
+    provider: "p".repeat(40),
+    repository: "r".repeat(200),
+    number: "9".repeat(64),
+    url: "https://example.test/pr",
+  });
+  const longView = await provided.sections.tasks.read({ projectId: projectA, chatId: "main" });
+  assert.doesNotThrow(() => checkView(longView, () => undefined), "21 a view with the longest PR passes the host's check");
+  await call("tasks_finish", { id: longest.id });
   for (const params of [{ chatId: "../x" }, { chatId: "" }, {}, undefined, { chatId: "main", extra: 1 }])
     await assert.rejects(rpcList(params), /chat/i, `4 ${JSON.stringify(params)}`);
   await assert.rejects(rpcList({ chatId: "main" }, "../escape"), /project/i);
@@ -177,7 +190,7 @@ try {
     provide: (caps) => Object.assign(reloaded, caps),
     projects: { load: (id) => ({ id }) },
   });
-  assert.equal((await reloaded.rpc.list({ projectId: projectA, params: { chatId: "main" } })).tasks.length, 2);
+  assert.equal((await reloaded.rpc.list({ projectId: projectA, params: { chatId: "main" } })).tasks.length, 3);
   assert.deepEqual(readdirSync(stateDir).sort(), [`${projectA}.json`], "6 only the project file stays (project B never wrote)");
   const file = join(stateDir, `${projectA}.json`);
   const before = readFileSync(file, "utf8");

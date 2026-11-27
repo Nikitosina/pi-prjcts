@@ -50,7 +50,8 @@ async function requestAction(fetch, action, input = {}, signal) {
   } catch {
     throw new HostError(`Host answered HTTP ${response.status}`, response.status, false, false);
   }
-  if (!body.ok) throw new HostError(String(body.error ?? "Request failed"), response.status, body.refused === true);
+  if (!body.ok)
+    throw new HostError(String(body.error ?? "Request failed"), response.status, body.refused === true, typeof body.error === "string");
   return body.data;
 }
 

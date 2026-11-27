@@ -48,6 +48,7 @@ export function mountSection(client, node, entry, { projectId, chatId }) {
     readError = "",
     callError = "",
     stale = false,
+    writes = 0,
     timer;
   const say = () => {
     errorLine.textContent = [callError, readError].filter(Boolean).join(" ");
@@ -61,8 +62,10 @@ export function mountSection(client, node, entry, { projectId, chatId }) {
     reading = true;
     clearTimeout(timer);
     try {
+      const before = writes;
       const view = await client.call("plugin-section", { ...scope, section: entry.id, ...(chatId ? { chatId } : {}) }, signal);
-      if (signal.aborted) return;
+      // A read that started before a write ended may predate it; the read queued after the write draws instead.
+      if (signal.aborted || before !== writes) return;
       readError = "";
       say();
       draw(view);
@@ -195,13 +198,16 @@ export function mountSection(client, node, entry, { projectId, chatId }) {
       await client.call("plugin", { ...scope, method: button.method, ...(button.params === undefined ? {} : { params: button.params }) });
     } catch (error) {
       if (signal.aborted) return;
-      landed = !(error instanceof HostError && error.answered);
-      callError = landed ? `${button.label}: result unknown, check after reconnecting.` : `${button.label} failed: ${messageOf(error)}`;
+      const answered = error instanceof HostError && error.answered;
+      // Only the host's own refusal proves nothing changed; any other error may follow a write that landed.
+      landed = !(error instanceof HostError && error.refused);
+      callError = answered ? `${button.label} failed: ${messageOf(error)}` : `${button.label}: result unknown, check after reconnecting.`;
       say();
     } finally {
       busy = false;
       if (!signal.aborted) {
         if (landed) {
+          writes += 1;
           stale = true;
           waiting = null;
         } else {

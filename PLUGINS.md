@@ -15,6 +15,8 @@ Start with [`docs/plugins/README.md`](docs/plugins/README.md):
 - [Development and activation](docs/plugins/development.md): testing, private verification, activation through `plugins.json` and a restart, troubleshooting, compatibility and current limits.
 - [Example plugin](docs/plugins/examples/notes/): a checked-in plugin with RPC methods, tools, a settings section and a chat section, tested by its own `index.test.mjs` and `scripts/plugin-dev-unit.mjs`. Core's section contract is tested by `scripts/plugin-sections-e2e.mjs`.
 
+Sections in short: `sections: { <id>: { title, place: "settings" | "chat", refreshMs?, read(context) } }`, up to 4 per plugin. `read` gets `{ projectId, chatId? }` and returns a view `{ rows, empty?, footer? }`; a row has `text` and optional `label`, `status: { label, tone }`, up to 3 `detail` lines, `links: [{ label, url }]` (http or https) and `buttons: [{ label, method, params?, confirm? }]`. A button calls one of the plugin's own `rpc` methods that has an `rpcPolicy` entry, and a `dangerous` one needs `confirm`. The host checks every view and sends only these fields; the inbox draws them as text. Limits and examples are in [the reference](docs/plugins/reference.md#sections).
+
 The contract is `HostPluginApi` and `PluginCapabilities` in `src/plugin-types.ts`; the loader is `src/plugins.ts`. The rest of this file covers the provider capabilities for a new checkout kind or PR service.
 
 ## Provider capabilities
