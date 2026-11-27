@@ -368,7 +368,7 @@ export function startTelegram(options: {
     return (thread === undefined ? undefined : state.topics?.find((topic) => topic.thread === thread)) ?? state.route;
   };
   async function say(text: string, buttons: Button[][] = [], target?: Target) {
-    if (!state.owner) return;
+    if (!state.owner || (inbound.getStore() && inbound.getStore()!.owner !== state.owner.chatId)) return;
     const sent = await call<{ message_id: number }>("sendMessage", {
       chat_id: state.owner.chatId,
       ...inThread(inboundThread()),
@@ -384,7 +384,7 @@ export function startTelegram(options: {
   const topicKey = (ref: TopicRef) => `${ref.projectId}\n${ref.chatId}`;
   const creating = new Map<string, Promise<number | undefined>>(),
     cooldown = new Map<string, number>();
-  async function createTopic(ref: TopicRef, name: TopicName): Promise<number | undefined> {
+  async function createTopic(id: string, ref: TopicRef, name: TopicName): Promise<number | undefined> {
     const owner = state.owner!.chatId,
       bot = state.bot?.id;
     try {
@@ -397,7 +397,7 @@ export function startTelegram(options: {
       persist();
       return thread;
     } catch {
-      cooldown.set(topicKey(ref), Date.now() + backoffMs * 5);
+      cooldown.set(id, Date.now() + backoffMs * 5);
       return undefined;
     }
   }
@@ -406,11 +406,11 @@ export function startTelegram(options: {
     if (!topicsOn()) return undefined;
     const known = topicOf(ref);
     if (known) return known.thread;
-    const id = topicKey(ref);
+    const id = `${state.bot?.id}:${state.owner?.chatId}:${topicKey(ref)}`;
     if ((cooldown.get(id) ?? 0) > Date.now()) return undefined;
     let pending = creating.get(id);
     if (!pending) {
-      pending = createTopic(ref, name).finally(() => creating.delete(id));
+      pending = createTopic(id, ref, name).finally(() => creating.delete(id));
       creating.set(id, pending);
     }
     return pending;
@@ -1312,6 +1312,7 @@ export function startTelegram(options: {
    *  Best-effort: never rejects, because the host calls it fire-and-forget; `call` records the delivery error. */
   function progress(view: JobProgress): Promise<void> {
     const run = async () => {
+      await topicsRead;
       if (!state.owner || !view.steps.length) return;
       const text = renderProgress(view),
         chat_id = state.owner.chatId,
@@ -1331,6 +1332,7 @@ export function startTelegram(options: {
           return topicLabel(project, title ?? "Main");
         };
       const wanted = await topicFor(ref, name);
+      if (state.owner?.chatId !== chat_id) return;
       // A message sent to the general thread while the topic was unavailable is replaced once the topic exists.
       if (prior && (wanted === undefined || prior.thread === wanted)) {
         try {
