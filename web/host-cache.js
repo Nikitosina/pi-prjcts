@@ -91,7 +91,8 @@ export function hostCache(hostId) {
 export async function wipeHost(hostId) {
   wiped.add(hostId);
   try {
-    if (!db && !(await indexedDB.databases?.())?.some((item) => item.name === "pi-host-cache")) return;
+    const known = await indexedDB.databases?.(); // a browser without it opens the database, which is harmless
+    if (!db && known && !known.some((item) => item.name === "pi-host-cache")) return;
     await transact((metas, datas) => {
       const keys = metas.index("host").getAllKeys(hostId);
       keys.onsuccess = () => {
