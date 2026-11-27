@@ -64,6 +64,11 @@ try {
 
       // 51: no remote hosts, the cache database is never opened
       assert.equal(await q(`indexedDB.databases().then((l) => l.some((d) => d.name === 'pi-host-cache'))`), false);
+      assert.equal(
+        await q(`!!document.querySelector('#offline-banner')`),
+        false,
+        "68: nothing of the offline view exists without remote hosts",
+      );
       await pairHost(page, (await remote.rpc({ action: "remote-pair-start" })).link);
       await page.waitFor(group("online"), "Home Mac online");
       await page.waitFor(`document.querySelector('[data-host-group="${hostId}"]').innerText.includes('Garden plan')`, "remote projects");
