@@ -67,3 +67,31 @@ No remote hosts
 
 New project
 37. With remote hosts the top "New project" button creates on an unclear host, or the group menu creates on the selected project's host. Each group's menu says "New project on <host>" and creates through that host's client only; the top button is hidden only while remote hosts exist.
+
+# Stage 4: offline read cache
+
+Written before the code. Design: `REMOTE_SPEC.md`, Multi-host inbox, decision 13. E2E: `scripts/offline-cache-e2e.mjs` (the client host, one remote private host in a temporary home, a local relay from `relay/`, the fake provider, headless Chrome on the client host's inbox at 1440 px and 390 px). The cache is `web/host-cache.js` (IndexedDB `pi-host-cache` of the local origin) and is used only by remote host clients in `web/api.js`.
+
+Browsing
+38. An offline host's group collapses to one empty row, or its open chat goes blank, although its projects, chats and transcripts were loaded before. They stay browsable from the cache: the group lists its cached projects, a chat shows its cached transcript.
+39. Cached data looks live. Every offline view says "Offline copy" and "data from HH:MM" (the time the shown read was saved), in the group and above the chat.
+40. A view that was never loaded shows an empty chat, an endless spinner or only a toast. It says it was never loaded while the host was online.
+41. The cache answers for a host whose state is not "offline" (revoked, "not paired", "needs update", forgotten), or while it is online, so stale data hides live data.
+42. Cached projects count as live: the status pill, Decision inbox or palette show the offline host's questions, approvals or working state. They stay out of every count and the Decision inbox, as in stage 3.
+
+Writes
+43. A write works while the host is offline: send, answer, approve, archive, New chat, New project, plugin buttons, Stop, memory edits. Each control is disabled with a short reason; the client also refuses any write without sending a request.
+44. A refused write is queued and sent when the host returns, or the draft is lost. Nothing is queued; the host receives no request of it after the reconnect.
+45. A write's answer or an action that is not a read is cached, or a read of `approvals-list` shows pending approvals of an offline host.
+
+Reconnect
+46. The host comes back and the page keeps the old copy until a reload, or a late cache write overwrites newer live data. Live reads replace the cache on their own, the offline marker goes away and the writes are enabled again, without a reload.
+
+Isolation and limits
+47. Two hosts list a project with the same id and one shows the other's transcript. Every entry belongs to one host ID and is read back only with that ID.
+48. The cache grows without bound, or eviction removes the newest data or other hosts' data. Each host has a size limit; going over it removes that host's oldest saved reads first.
+49. Forget host or a revoked device leaves the host's cache behind, or an answer that arrives after the wipe fills it again. Forget (this tab or another) and revocation delete every entry of that host and nothing of the others; a closed cache stores nothing.
+50. IndexedDB is unavailable or fails: live use is unaffected, and offline views say they were never loaded.
+
+Local host and no remote hosts
+51. The local host's reads are cached, or the cache database is opened with no remote hosts. The local host is not cached (it serves the inbox itself). A page with no remote hosts never opens the database and looks and behaves exactly as before.
