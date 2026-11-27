@@ -420,6 +420,9 @@ a {
 }
 
 /* ------------------------------------------------------------------------------------------------ list */
+.list-head[hidden] {
+  display: none;
+}
 .list-head {
   padding: 10px 10px 6px;
 }
@@ -3782,6 +3785,7 @@ table.hotkeys tr.clash td {
 #signin {
   width: min(460px, calc(100vw - 24px));
 }
+#new-project,
 #archive-chat {
   width: min(420px, calc(100vw - 24px));
 }

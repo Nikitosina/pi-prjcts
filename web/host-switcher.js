@@ -1,6 +1,6 @@
 import { localHost, pairingEntry, remoteHost } from "./api.js";
 import { forgetGroup } from "./hosts.js";
-import { fail } from "./state.js";
+import { emit, fail } from "./state.js";
 
 const inbox = () => location.hostname === "127.0.0.1";
 export async function hostForPage() {
@@ -76,6 +76,10 @@ export function openHostMenu({ group, button }) {
     menu.append(node);
   };
   const host = group.entry ? { hostId: group.entry.hostId } : null;
+  item(`New project on ${group.name}`, () => {
+    closeHostMenu();
+    emit("new-project", { group });
+  });
   item("Settings", () => location.assign(adminUrl(host, "settings")));
   item("Host agent", () => location.assign(adminUrl(host, "agent")));
   if (group.entry)

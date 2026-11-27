@@ -64,3 +64,6 @@ Switchers and Forget
 
 No remote hosts
 36. With no remote hosts the sidebar shows group headers or a Decision inbox, the top bar changes, or a tunnel opens. It looks the same as before (the stored pre-stage screenshot) and opens no relay connection.
+
+New project
+37. With remote hosts the top "New project" button creates on an unclear host, or the group menu creates on the selected project's host. Each group's menu says "New project on <host>" and creates through that host's client only; the top button is hidden only while remote hosts exist.

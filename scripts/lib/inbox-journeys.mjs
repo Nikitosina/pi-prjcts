@@ -41,7 +41,9 @@ export async function switchPanels(page, id) {
       "switched host",
     );
   }
-  await click("#topbar [data-cmd=settings]");
+  await page.evaluate(`document.querySelector('[data-host-menu="${id}"]').click()`);
+  await page.evaluate(`[...document.querySelectorAll('.host-menu button')].find((b) => b.textContent === 'Settings').click()`);
+  await page.waitFor(`document.body.dataset.ready === '1' && ${field("#settings")}.open`, "remote Settings opened from the group menu");
   await click("nav [data-section=remote]");
   await page.waitFor(`${field("#remote-access")}?.innerText.includes(${JSON.stringify(id)})`, "remote settings");
   assert.equal(
@@ -84,18 +86,17 @@ export async function forgetAcrossViews(page, id) {
   assert.equal(await page.evaluate(`(async()=> (await ${getKey}).privateKey.extractable)()`), false);
   const sibling = await page.newTab(await page.evaluate("location.href"));
   try {
-    await sibling.waitFor(
-      `document.querySelector('#host-connection')?.innerText.endsWith('online') && !!document.querySelector('#inbox-host button')`,
-      "second active view",
-    );
-    await sibling.evaluate(`window.confirm=()=>true; document.querySelector('#inbox-host button').click()`);
-    const local = `!new URL(location).searchParams.has('host') && document.body.dataset.ready==='1'`;
+    await sibling.waitFor(`document.querySelector('[data-host-group="${id}"]')?.dataset.state === 'online'`, "second active view");
+    await sibling.evaluate(`window.confirm=()=>true; document.querySelector('[data-host-menu="${id}"]').click()`);
+    await sibling.evaluate(`[...document.querySelectorAll('.host-menu button')].find((b) => b.textContent.startsWith('Forget host')).click()`);
+    const local = `!new URL(location).searchParams.has('host') && document.body?.dataset.ready==='1'`;
     await sibling.waitFor(local, "Forget returned to local inbox");
-    await page.cdp("Page.bringToFront");
-    await page.waitFor(local, "Forget closed observing view");
   } finally {
     await sibling.close();
   }
+  // Chrome allows six HTTP/1.1 connections per origin and each view of a local project keeps three streams: the observer waits for the sibling to close.
+  await page.cdp("Page.bringToFront");
+  await page.waitFor(`!new URL(location).searchParams.has('host') && document.body?.dataset.ready==='1'`, "Forget closed observing view");
   assert.ok(!(await page.evaluate(`(async()=>!!await ${getKey})()`)));
-  assert.ok(!(await page.evaluate(`document.querySelector('#inbox-host select')`)));
+  assert.ok(!(await page.evaluate(`document.querySelector('[data-host-group="${id}"]')`)));
 }

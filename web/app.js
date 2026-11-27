@@ -36,6 +36,7 @@ import {
   startHosts,
 } from "./hosts.js";
 import { mountDecisions } from "./decisions.js";
+import { mountNewProject } from "./new-project.js";
 
 // `admin` is the host of Settings, the Host agent and the status line, chosen in their header; project views use `projectHost`,
 // which sends each request to the host that listed its project.
@@ -52,6 +53,7 @@ const diskDetail = mountDiskDetail(admin);
 const statusline = mountStatusline(admin, ui, limits, diskDetail);
 const tree = mountTree(client);
 const decisions = mountDecisions();
+mountNewProject();
 const media = mountMedia(client);
 const slash = mountSlash(client);
 const memory = mountMemory(client);
@@ -151,6 +153,7 @@ on("host-online", (group) => {
 });
 // A forgotten host leaves the page: its selected project gives way to the first project still listed.
 on("hosts", () => {
+  document.querySelector(".list-head").hidden = remoteGroups();
   if (state.projectId && !hostOf(state.projectId) && state.projects[0]) void select(state.projects[0].id, "main");
   paintCrumbs();
   paintPill();
@@ -544,6 +547,14 @@ async function start() {
   paintHints();
   paintStatusLine();
   if (!token) return signIn();
+  // Forgotten in another tab: this page's Settings host is gone, so the page returns to the local host.
+  admin.addEventListener?.("statechange", () => {
+    if (admin.state !== "forgotten") return;
+    const url = new URL(location.href);
+    url.searchParams.delete("host");
+    url.searchParams.delete("panel");
+    location.replace(url);
+  });
   void hostSwitcher(document.querySelector("#agent-host"), admin, "agent").catch(fail);
   try {
     await localHost.call("list");
