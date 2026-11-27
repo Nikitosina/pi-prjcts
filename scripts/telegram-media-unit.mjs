@@ -91,7 +91,10 @@ let fault = null,
   sends = [],
   attempts = [],
   id = 0,
-  topicId = 900;
+  topicId = 900,
+  chatList = [],
+  dispatchHook = null,
+  topicNames = new Map();
 const server = createServer(async (req, res) => {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
@@ -147,7 +150,14 @@ const server = createServer(async (req, res) => {
     gate = null;
     await run();
   }
-  if (method === "createForumTopic") return reply({ ok: true, result: { message_thread_id: ++topicId } });
+  if (method === "createForumTopic") {
+    topicNames.set(topicId + 1, input.name);
+    return reply({ ok: true, result: { message_thread_id: ++topicId } });
+  }
+  if (method === "editForumTopic") {
+    topicNames.set(input.message_thread_id, input.name);
+    return reply({ ok: true, result: true });
+  }
   const message_ids = Array.from({ length: method === "sendMediaGroup" ? input.media.length : 1 }, () => ++id);
   sends.push({ method, input, message_id: message_ids[0], message_ids });
   reply({
@@ -187,9 +197,10 @@ function start(receiveUpdates = false) {
     dispatch: async (input) => {
       assert.equal(input.id, project);
       if (input.threadId !== thread) throw Error("unauthorized");
+      await dispatchHook?.();
       return {};
     },
-    chats: async () => [],
+    chats: async () => chatList.map((chat) => ({ ...chat })),
     notifier: { seq: () => notices.length, feed: (after) => ({ items: notices.filter((n) => n.seq > after) }) },
     report: () => {},
   });
@@ -213,6 +224,9 @@ const reset = (text) => {
   fault = null;
   gate = null;
   updates = [];
+  chatList = [];
+  dispatchHook = null;
+  topicNames = new Map();
   notices = [notice(1, text)];
 };
 const mapped = (expected = { projectId: project, chatId: "main" }) => {
@@ -919,6 +933,59 @@ try {
   await bridge.flush();
   assert.equal(sends.length, 1, "a failing topic creation sends the upload to the general thread");
   assert.equal(sends[0].input.message_thread_id, undefined);
+
+  // 71: the owner is replaced while the artifact is being authorized; the first send of the part must not reach the former owner.
+  reset(`![Image](${ref("demo.png")})`);
+  dispatchHook = async () => bridge.unpair();
+  start();
+  await bridge.flush().catch(() => {});
+  assert(
+    !attempts.some((a) => a.method !== "getUpdates" && a.input.chat_id !== undefined) && sends.length === 0,
+    "71 nothing is sent after the owner changed during authorization",
+  );
+
+  // 74: the topic is created with the archived prefix when the chat is already archived, and when it is archived during the creation.
+  const mainChat = (archived) => ({ id: "main", title: "Main", archived });
+  reset("Archived before its first notice. ".repeat(2));
+  topicsOn();
+  chatList = [mainChat(true)];
+  start();
+  await bridge.flush();
+  assert.equal(attempts[0].input.name, "📦 Test · Main", "74 created with the prefix");
+  reset("Archived while its topic is created. ".repeat(2));
+  topicsOn();
+  chatList = [mainChat(false)];
+  let archivedDuring;
+  gate = {
+    method: "createForumTopic",
+    run: async () => {
+      chatList = [mainChat(true)];
+      archivedDuring = bridge.chatChanged(project, mainChat(true));
+    },
+  };
+  start();
+  await bridge.flush();
+  await archivedDuring;
+  assert.equal(topicNames.get(topicId), "📦 Test · Main", "74 the archive during creation is applied once the topic exists");
+  reset("A topic recreated for an archived chat. ".repeat(2));
+  topicsOn([{ projectId: project, chatId: "main", thread: 500 }]);
+  chatList = [mainChat(true)];
+  fault = { method: "sendMessage", code: 400, description: "Bad Request: message thread not found" };
+  start();
+  await bridge.flush();
+  assert.equal(attempts.find((a) => a.method === "createForumTopic").input.name, "📦 Test · Main", "74 the recreated topic has the prefix");
+
+  // 75: a quick archive then restore ends without the prefix even when the first edit is slow.
+  reset("unused");
+  topicsOn([{ projectId: project, chatId: "main", thread: 500 }]);
+  topicNames.set(500, "Test · Main");
+  chatList = [mainChat(true)];
+  gate = { method: "editForumTopic", run: () => new Promise((resolve) => setTimeout(resolve, 200)) };
+  start();
+  const archiving = bridge.chatChanged(project, mainChat(true));
+  chatList = [mainChat(false)];
+  await Promise.all([archiving, bridge.chatChanged(project, mainChat(false))]);
+  assert.equal(topicNames.get(500), "Test · Main", "75 the last edit wins");
 
   console.log(
     "PASS one-message native caption/envelope/actions/routing; albums/overflow; byte/MIME/security/fallback; retry/order/restart/uncertainty",

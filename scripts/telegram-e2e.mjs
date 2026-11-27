@@ -1039,9 +1039,42 @@ try {
     "T68 renaming a chat renames its topic; archiving prefixes it with 📦 (kept on rename), restoring removes it; no close or reopen",
   );
 
+  // T72: picking another project inside a topic changes the general-thread route only, and the reply says the topic stays bound.
+  mark = toOwner().length;
+  text(OWNER, "/project Alpha", { message_thread_id: betaThread });
+  const picked = await lastTo(/stays bound/, "pick inside a topic", mark);
+  assert.equal(picked.message_thread_id, betaThread, "72 the reply stays in the topic");
+  assert.doesNotMatch(picked.text, /Now talking to/, "72 it does not claim the topic now talks to the pick");
+  text(OWNER, "MARK-STILLBETA hello", { message_thread_id: betaThread });
+  await lastTo(/Done MARK-STILLBETA\./, "topic message after the pick", mark);
+  assert.equal((await jobs(b)).filter((j) => j.text.includes("MARK-STILLBETA")).length, 1, "72 the topic still reaches its own chat");
+  result.checks.push("T72 a pick inside a topic says the topic stays bound and changes only the general-thread route");
+
+  // T76: the architecture document describes the rename behaviour.
+  const architecture = readFileSync(new URL("../ARCHITECTURE.md", import.meta.url), "utf8");
+  assert.ok(!/closes its topic|reopens it/.test(architecture), "76 ARCHITECTURE.md does not claim close and reopen");
+  assert.match(architecture, /📦/, "76 ARCHITECTURE.md describes the prefix");
+
   // T67: topics turned off again, or another bot: no thread ids.
   tg.topics = false;
   await rpc({ action: "telegram-token", token: TOKEN });
+  mark = toOwner().length;
+  text(OWNER, "MARK-OFFTOPIC hello", { message_thread_id: betaThread });
+  await lastTo(/Done MARK-OFFTOPIC\./, "message in an old topic with topics off", mark);
+  assert.equal(
+    (await jobs(a)).filter((j) => j.text.includes("MARK-OFFTOPIC")).length,
+    1,
+    "73 with topics off the picked route wins over the thread",
+  );
+  assert.ok(!(await jobs(b)).some((j) => j.text.includes("MARK-OFFTOPIC")), "73 not the old topic's chat");
+  text(OWNER, "/status", { message_thread_id: betaThread });
+  assert.equal((await lastTo(/Text goes to/, "status with topics off", mark)).message_thread_id, undefined, "73 no thread id is echoed");
+  assert.ok(
+    toOwner()
+      .slice(mark)
+      .every((m) => m.message_thread_id === undefined),
+    "73 nothing after the switch carries a thread id",
+  );
   mark = toOwner().length;
   await k.ask(b, "main", "MARK-TOP7 topics off again");
   assert.equal(

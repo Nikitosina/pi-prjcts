@@ -360,13 +360,14 @@ export function startTelegram(options: {
   const inbound = new AsyncLocalStorage<{ owner: number; thread?: number }>();
   const inboundThread = () => {
     const origin = inbound.getStore();
-    return origin && origin.owner === state.owner?.chatId ? origin.thread : undefined;
+    return origin && origin.owner === state.owner?.chatId && topicsOn() ? origin.thread : undefined;
+  };
+  const topicHere = () => {
+    const thread = inboundThread();
+    return thread === undefined ? undefined : state.topics?.find((topic) => topic.thread === thread);
   };
   /** Where text from here goes: the topic's chat inside a topic, else the picked route. */
-  const routeHere = (): TopicRef | null => {
-    const thread = inboundThread();
-    return (thread === undefined ? undefined : state.topics?.find((topic) => topic.thread === thread)) ?? state.route;
-  };
+  const routeHere = (): TopicRef | null => topicHere() ?? state.route;
   async function say(text: string, buttons: Button[][] = [], target?: Target) {
     if (!state.owner || (inbound.getStore() && inbound.getStore()!.owner !== state.owner.chatId)) return;
     const sent = await call<{ message_id: number }>("sendMessage", {
@@ -383,7 +384,24 @@ export function startTelegram(options: {
   const topicOf = (ref: TopicRef) => state.topics?.find((topic) => sameTopic(topic, ref));
   const topicKey = (ref: TopicRef) => `${ref.projectId}\n${ref.chatId}`;
   const creating = new Map<string, Promise<number | undefined>>(),
-    cooldown = new Map<string, number>();
+    cooldown = new Map<string, number>(),
+    edits = new Map<string, Promise<void>>(),
+    named = new Map<number, string>();
+  const creationId = (ref: TopicRef) => `${state.bot?.id}:${state.owner?.chatId}:${topicKey(ref)}`;
+  /** The topic name for a chat's current title and archived state; the given title is used when the chat is not found. */
+  const topicNameOf =
+    (ref: TopicRef, fallbackProject: string, fallbackTitle: string): TopicName =>
+    async () => {
+      const chat = await options
+        .chats(ref.projectId)
+        .then((chats) => chats.find((item) => item.id === ref.chatId))
+        .catch(() => undefined);
+      let project = fallbackProject;
+      try {
+        project = loadProject(ref.projectId).name;
+      } catch {}
+      return `${chat?.archived ? ARCHIVED_PREFIX : ""}${topicLabel(project, chat?.title ?? fallbackTitle)}`;
+    };
   async function createTopic(id: string, ref: TopicRef, name: TopicName): Promise<number | undefined> {
     const owner = state.owner!.chatId,
       bot = state.bot?.id;
@@ -394,6 +412,7 @@ export function startTelegram(options: {
       if (typeof thread !== "number" || !Number.isSafeInteger(thread) || thread <= 0) throw new Error("invalid createForumTopic result");
       if (state.owner?.chatId !== owner || state.bot?.id !== bot) return undefined;
       state.topics = [...(state.topics ?? []).filter((topic) => !sameTopic(topic, ref)), { ...ref, thread }];
+      named.set(thread, label);
       persist();
       return thread;
     } catch {
@@ -406,7 +425,7 @@ export function startTelegram(options: {
     if (!topicsOn()) return undefined;
     const known = topicOf(ref);
     if (known) return known.thread;
-    const id = `${state.bot?.id}:${state.owner?.chatId}:${topicKey(ref)}`;
+    const id = creationId(ref);
     if ((cooldown.get(id) ?? 0) > Date.now()) return undefined;
     let pending = creating.get(id);
     if (!pending) {
@@ -465,6 +484,13 @@ export function startTelegram(options: {
     if (!chat || chat.archived) throw new Error("That chat is archived or gone");
     state.route = { projectId, chatId };
     persist();
+    const bound = topicHere();
+    if (bound && !sameTopic(bound, { projectId, chatId })) {
+      const here = (await routeName(bound)) ?? "its chat";
+      return say(
+        `Picked ${project.name} · ${chat.title} for the general thread. This topic stays bound to ${here}; write in the topic of ${chat.title} to reach it.`,
+      );
+    }
     await say(`Now talking to ${project.name} · ${chat.title}. Send text to it, or /chats to pick another chat.`);
   }
   const help =
@@ -697,7 +723,9 @@ export function startTelegram(options: {
     if (!text) return;
     const target = message.reply_to_message ? state.messages[String(message.reply_to_message.message_id)] : undefined;
     const topic =
-      message.message_thread_id === undefined ? undefined : state.topics?.find((item) => item.thread === message.message_thread_id);
+      message.message_thread_id === undefined || !topicsOn()
+        ? undefined
+        : state.topics?.find((item) => item.thread === message.message_thread_id);
     if (target?.entryId && !text.startsWith("/")) {
       const entry = inbox(projectDir(target.projectId)).find((item) => item.id === target.entryId);
       if (entry?.kind === "question" && !entry.result) return say(await answer(target.projectId, target.entryId, text, updateId));
@@ -995,7 +1023,7 @@ export function startTelegram(options: {
       throw new Error(UNCERTAIN_MEDIA);
     }
     const ref: TopicRef = { projectId: notice.projectId, chatId: notice.chatId || "main" },
-      name: TopicName = () => topicLabel(notice.project, notice.chat || "Main");
+      name = topicNameOf(ref, notice.project, notice.chat || "Main");
     if (state.sentPart?.seq !== notice.seq) {
       const thread = await topicFor(ref, name);
       state.sentPart = { seq: notice.seq, chatId: startOwner, parts: 0, plan, ...(thread === undefined ? {} : { thread }) };
@@ -1051,6 +1079,7 @@ export function startTelegram(options: {
         } catch {
           media = [];
         }
+        bound();
         if (!media.length && part.kind === "album") {
           // No request started: checkpoint individual fallbacks so one missing file cannot hide valid ones.
           parts.splice(
@@ -1320,17 +1349,7 @@ export function startTelegram(options: {
         prior = stored?.chatId === chat_id ? stored : undefined;
       if (prior?.text === text) return;
       const ref: TopicRef = { projectId: view.projectId, chatId: view.chatId },
-        name: TopicName = async () => {
-          const title = await options
-            .chats(view.projectId)
-            .then((chats) => chats.find((chat) => chat.id === view.chatId)?.title)
-            .catch(() => undefined);
-          let project = view.projectId;
-          try {
-            project = loadProject(view.projectId).name;
-          } catch {}
-          return topicLabel(project, title ?? "Main");
-        };
+        name = topicNameOf(ref, view.projectId, "Main");
       const wanted = await topicFor(ref, name);
       if (state.owner?.chatId !== chat_id) return;
       // A message sent to the general thread while the topic was unavailable is replaced once the topic exists.
@@ -1407,16 +1426,27 @@ export function startTelegram(options: {
     flush,
     resolveHeld,
     /** Keeps a chat's topic named after the chat's title, with a 📦 prefix while archived (private chats cannot close or reopen topics). Best-effort: `call` records a failure. */
-    async chatChanged(projectId: string, chat: DurableChat) {
-      const topic = topicOf({ projectId, chatId: chat.id });
-      if (!topic || !topicsOn()) return;
-      try {
-        await call("editForumTopic", {
-          chat_id: state.owner!.chatId,
-          message_thread_id: topic.thread,
-          name: clip(`${chat.archived ? ARCHIVED_PREFIX : ""}${topicLabel(loadProject(projectId).name, chat.title)}`, TOPIC_NAME_MAX),
-        });
-      } catch {}
+    chatChanged(projectId: string, chat: DurableChat): Promise<void> {
+      const ref: TopicRef = { projectId, chatId: chat.id },
+        id = topicKey(ref);
+      // Edits of one topic run in order and each sends the chat's latest name, so the last change wins.
+      const run = async () => {
+        try {
+          await creating.get(creationId(ref));
+          const topic = topicOf(ref);
+          if (!topic || !topicsOn()) return;
+          const owner = state.owner!.chatId,
+            label = clip((await topicNameOf(ref, projectId, chat.title)()).trim(), TOPIC_NAME_MAX);
+          if (named.get(topic.thread) === label || state.owner?.chatId !== owner) return;
+          await call("editForumTopic", { chat_id: owner, message_thread_id: topic.thread, name: label });
+          named.set(topic.thread, label);
+        } catch {}
+      };
+      const next = (edits.get(id) ?? Promise.resolve()).then(run);
+      edits.set(id, next);
+      return next.finally(() => {
+        if (edits.get(id) === next) edits.delete(id);
+      });
     },
     progress,
     async setToken(token: string) {
