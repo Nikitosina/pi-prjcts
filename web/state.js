@@ -115,5 +115,6 @@ export function inline(slot, text, { error = false } = {}) {
 
 export function fail(error) {
   console.warn(error);
+  if (error?.neverLoaded) return; // the view itself says it was never loaded
   toast(error?.message ?? String(error), { error: true, ms: 8000 });
 }

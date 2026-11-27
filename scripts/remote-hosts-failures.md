@@ -47,7 +47,7 @@ Selection and routing
 Sidebar groups
 24. Groups come in the wrong order, mix projects of two hosts, or one host's failing list hides another host's group. The local host comes first, remote hosts follow in their saved order, and each group loads and fails on its own.
 25. A slow or offline remote host delays the local group or the first selection. The local group draws at once; a remote group shows "connecting" until its first tunnel attempt ends.
-26. An offline, revoked, "not paired" or "needs update" host shows its last projects as usable, or blocks the page. It collapses to one row with its state; its projects and Decision inbox items leave the page until it is online again (stage 4 adds the read cache).
+26. An offline, revoked, "not paired" or "needs update" host shows its last projects as usable, or blocks the page. It collapses to one row with its state; its projects and Decision inbox items leave the page until it is online again (stage 4: an offline host shows its read cache).
 27. A host going offline or coming back shows only after a page reload. Its state change redraws its group; when it comes back, its projects, approvals and questions reload, its host stream reopens, and a selected project of that host reloads its view.
 28. Remote names, project names or chat titles render as markup in a group header, a row or a menu. They are escaped text.
 

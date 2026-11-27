@@ -251,7 +251,7 @@ The local inbox (`web/` served by the local host on `127.0.0.1`) shows and contr
 2. The client only connects to a host that is already installed and has run `remote enable`. Every host keeps deploying itself from its own branch.
 3. Transport is the existing relay and its end-to-end protocol (`relay/bootstrap/wire.js`), with no protocol change.
 4. The browser page owns the tunnels. The local host serves the page and never proxies a remote host's traffic. When the local host is down, the PWA on the relay is the fallback.
-5. One sidebar, grouped by host: the local host first, then each remote host with its online state; an offline host collapses to one row. The Decision inbox is shared across hosts.
+5. One sidebar, grouped by host: the local host first, then each remote host with its online state; a host that is revoked, not paired or needs an update collapses to one row, and an offline host shows its offline copy (decision 13). The Decision inbox is shared across hosts.
 6. Settings and the Host agent open for one selected host, chosen by a host switcher in their header.
 7. Every action goes to exactly one host. Moving or copying projects or chats between hosts is not a goal.
 8. Each host sends its own Telegram notices. The multi-host inbox shows no browser notifications for remote hosts.
@@ -288,6 +288,17 @@ Each stage is its own PR, with its failure modes written in `scripts/<name>-fail
 2. **Declarative plugin sections.** New contract in `src/plugin-types.ts`, `PLUGINS.md` and `docs/plugins/`; removal of `web.script` and `web.style`; Tasks and network-gate as declarative sections; the simulator panel deleted. As built: `web.sidebar`, `web.routes` and `window.piProjects` are removed too; sections are read with the `plugin-section` action and drawn by `web/sections.js`; the simulator keeps two small settings sections (management and clones, slimming) for the controls no agent tool covers; the API version is 2, because the `plugins` answer and plugin routes changed. Proof: `scripts/plugin-sections-e2e.mjs` (local host and a remote host through a local relay) and `scripts/simulator-section-e2e.mjs`.
 3. **Shared sidebar and Decision inbox.** Projects grouped by host, online state, shared Decision inbox.
 4. **Offline read cache.** IndexedDB cache, "data from HH:MM", disabled writes while offline, clearing on Forget host and revocation.
+
+### Offline read cache (stage 4)
+
+- **What is cached.** Answers of read actions of a remote host, as the page loads them: no prefetch, no cache of writes, of resources loaded by URL (images, media, downloads) or of `approvals-list`. A read is keyed by host ID, action and its exact input, so the transcript, the project list and every other view come back only as they were loaded. It lives in the IndexedDB database `pi-host-cache` of the local origin (`web/host-cache.js`), opened on the first remote read; a page with no remote hosts never opens it.
+- **The local host is not cached.** The local inbox is served by the local host: when that host is down there is no page to show a copy in, and a copy would only hide a live answer. The cache belongs to remote host clients in `web/api.js`. The PWA is not changed.
+- **Offline.** Only a host in the state "offline" answers from the cache. A revoked, not paired or "needs update" host shows its header only. The group lists its cached projects under "Offline copy · data from HH:MM"; the selected view has a banner with the time its data was read; a read that was never saved says "Never loaded" in the view, not in a toast. The offline projects stay out of the status pill, the Decision inbox and the palette.
+- **Writes.** Every call that is not a read is refused by the client with a short reason and no request. Controls that write are disabled with that reason (`web/offline.js`; the sidebar and the group menu do it themselves). Nothing is queued. A write that was in flight when the connection dropped still ends as "result unknown" (decision 14).
+- **Reconnect.** The first live read replaces the copy; the marker and the disabled controls go away without a reload.
+- **Limit and eviction.** 16 MiB of JSON per host. A saved read over the limit evicts that host's oldest saved reads first; a single answer over the limit is not saved.
+- **Wipe.** Forget host and a revoked device delete every entry of the host and nothing of other hosts, and the page saves nothing more for it. Entries carry their host ID and are read back only with it.
+
 
 ### Known limitations
 

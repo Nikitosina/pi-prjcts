@@ -146,6 +146,7 @@ export function mountChat(client, media, slash, memory) {
   const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/;
 
   /** Re-reads the selected chat. Coalesces: a call while one is in flight runs once more afterwards. */
+  let unloaded = ""; // the offline host never loaded this chat
   async function loadChat() {
     if (loading) {
       loading.again = true;
@@ -167,6 +168,7 @@ export function mountChat(client, media, slash, memory) {
             // Another chat or project was selected meanwhile: drop this read, but still run the one that selection queued.
             if (stale(gen)) continue;
             state.view = view;
+            unloaded = "";
             reconcilePending(view, read);
             if (held && (entries >= held.entries || committed(view, held))) held = state.liveHeld = null;
             emit("view", view);
@@ -174,7 +176,11 @@ export function mountChat(client, media, slash, memory) {
             renderQuestions();
             ensureLive();
           } catch (error) {
-            fail(error);
+            if (error.neverLoaded && !stale(gen)) {
+              state.view = null;
+              unloaded = error.message;
+              renderFeed();
+            } else fail(error);
           }
         } while (run.again);
       } finally {
@@ -202,6 +208,7 @@ export function mountChat(client, media, slash, memory) {
     }
   });
   on("select", () => {
+    unloaded = "";
     const now = draftKey(),
       left = composerKey;
     composerKey = now;
@@ -315,7 +322,13 @@ export function mountChat(client, media, slash, memory) {
     saveHandles();
     if (!state.view) {
       // A message sent before the first read of a chat still shows at once.
-      follow.render(() => morph(feed, pendingSends.filter(inCurrentChat).map(pendingHtml).join("")));
+      follow.render(() =>
+        morph(
+          feed,
+          (unloaded ? `<p class="never-loaded" data-key="never-loaded">${esc(unloaded)}</p>` : "") +
+            pendingSends.filter(inCurrentChat).map(pendingHtml).join(""),
+        ),
+      );
       return;
     }
     const all = turns(messages()),

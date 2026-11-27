@@ -1,4 +1,5 @@
 // The only module that talks to the host. Requests go through `call`.
+import { hostCache, wipeHost } from "./host-cache.js";
 
 const key = `pi-projects-token:${location.origin}`;
 const supplied = new URLSearchParams(location.hash.slice(1)).get("token");
@@ -35,6 +36,13 @@ export class HostError extends Error {
     this.status = status;
     this.refused = refused;
     this.answered = answered;
+  }
+}
+/** A read of a remote host that was never saved while it was online, asked while it is offline. */
+export class NeverLoadedError extends HostError {
+  constructor(hostName) {
+    super(`Never loaded: this was not opened while ${hostName} was online, so there is no offline copy of it.`, 0, true, false);
+    this.neverLoaded = true;
   }
 }
 async function requestAction(fetch, action, input = {}, signal) {
@@ -186,16 +194,36 @@ const reads = new Set(
     " ",
   ),
 );
+const isRead = (action, input) =>
+  reads.has(action) || (action === "pr-review-open" && !input?.seen) || (action === "host-agent-settings" && !input?.patch);
+// Pending approvals of an offline host are not shown: they cannot be decided there.
+const uncached = new Set(["approvals-list"]);
+// Offline, only the saved reads answer; a remote host in any other state (revoked, needs update, forgotten) answers nothing.
+const SAVING = new Set(["online", "offline"]);
 function hostClient(transport) {
   const run = transport.run ?? ((_read, _signal, work) => work(transport.authorizedFetch));
+  const cache = transport.local ? null : hostCache(transport.hostId);
+  /** action → when the data last shown for it was read: live, or saved earlier and served from the cache while offline. */
+  const copies = new Map();
   return Object.assign(transport, {
+    copies,
     storagePrefix: transport.local ? "" : `pi-host:${transport.hostId}:`,
-    call(action, input, signal) {
-      return run(
-        reads.has(action) || (action === "pr-review-open" && !input?.seen) || (action === "host-agent-settings" && !input?.patch),
-        signal,
-        (fetch) => requestAction(fetch, action, input, signal),
-      );
+    async call(action, input, signal) {
+      const read = isRead(action, input);
+      if (cache && transport.state === "offline") {
+        if (!read) throw new HostError(`${transport.name} is offline. Changes are disabled until it is back.`, 0, true, false);
+        const saved = uncached.has(action) ? null : await cache.get(action, input);
+        saved ? copies.set(action, saved.savedAt) : copies.delete(action);
+        transport.dispatchEvent?.(new Event("copy"));
+        if (!saved) throw new NeverLoadedError(transport.name);
+        return saved.data;
+      }
+      const data = await run(read, signal, (fetch) => requestAction(fetch, action, input, signal));
+      if (cache && read && !uncached.has(action)) {
+        copies.set(action, Date.now());
+        if (SAVING.has(transport.state)) void cache.put(action, input, data);
+      }
+      return data;
     },
     stream(path, onFrame, onState) {
       return (transport.local && path === "/changes?project=host" ? openSharedStream : openStream)(transport, path, onFrame, onState);
@@ -254,6 +282,7 @@ export async function forgetHost(id) {
   const { forgetDevice, stopViews } = await import("./remote-client.js");
   await navigator.locks.request(`pair:${id}`, async () => {
     await localHost.call("inbox-host-forget", { hostId: id });
+    await wipeHost(id);
     stopViews(id);
     await forgetDevice(id);
     clients.delete(id);

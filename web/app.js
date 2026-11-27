@@ -37,6 +37,7 @@ import {
 } from "./hosts.js";
 import { mountDecisions } from "./decisions.js";
 import { mountNewProject } from "./new-project.js";
+import { mountOffline } from "./offline.js";
 
 // `admin` is the host of Settings, the Host agent and the status line, chosen in their header; project views use `projectHost`,
 // which sends each request to the host that listed its project.
@@ -54,6 +55,7 @@ const statusline = mountStatusline(admin, ui, limits, diskDetail);
 const tree = mountTree(client);
 const decisions = mountDecisions();
 mountNewProject();
+mountOffline(admin);
 const media = mountMedia(client);
 const slash = mountSlash(client);
 const memory = mountMemory(client);

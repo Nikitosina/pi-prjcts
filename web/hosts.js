@@ -2,6 +2,7 @@
 // A host group owns that host's project list, pending approvals and one host change stream; the tree, the Decision inbox and the status
 // pill read the groups. `projectHost` is the client of project views: each request goes to the host that listed its project.
 import { forgetHost, localHost, remoteHost } from "./api.js";
+import { wipeHost } from "./host-cache.js";
 import { emit, fail, state } from "./state.js";
 
 export const HostState = Object.freeze({
@@ -14,7 +15,9 @@ export const HostState = Object.freeze({
   Forgotten: "forgotten",
 });
 
-/** `{ key, name, client, entry, state, projects, approvals }`; `client` is null while a remote host makes its first connection. */
+/** `{ key, name, client, entry, state, projects, approvals, copyAt, unloaded }`; `client` is null while a remote host makes its first connection.
+ * An offline host keeps its projects from the offline read cache (web/host-cache.js): `copyAt` is when that list was saved, and
+ * `unloaded` is true when the cache holds none. Both are cleared by the next live read. */
 export const groups = [
   { key: "local", name: "This machine", client: localHost, entry: null, state: HostState.Online, projects: [], approvals: [] },
 ];
@@ -25,6 +28,8 @@ const loads = new Map(); // group → its list read in flight
 export const remoteGroups = () => groups.length > 1;
 export const groupOf = (client) => groups.find((group) => group.client === client) ?? null;
 export const online = (group) => group.state === HostState.Online;
+/** A remote host that is offline and answers from its offline copy. */
+export const offlineCopy = (group) => !!group.entry && group.state === HostState.Offline;
 /** The host listing a project; with a copied home two hosts may list one id, so `preferred` wins when it lists it. */
 export function hostOf(projectId, preferred = null) {
   const lists = (group) => group.projects.some((item) => item.id === projectId);
@@ -58,6 +63,8 @@ export function loadProjects(group = groupOf(state.host) ?? groups[0]) {
         const projects = await group.client.call("list");
         if (!groups.includes(group)) return;
         group.projects = projects.filter((item) => !item.archived && !item.deleted);
+        group.copyAt = null;
+        group.unloaded = false;
         publish();
       } while (read.again && online(group));
     } catch (error) {
@@ -68,6 +75,23 @@ export function loadProjects(group = groupOf(state.host) ?? groups[0]) {
     }
   })();
   return read.done;
+}
+/** The project list of an offline remote host, from its cache; never-loaded leaves the group saying so. */
+async function loadCached(group) {
+  let projects = null;
+  try {
+    projects = await group.client.call("list");
+  } catch (error) {
+    if (!error.neverLoaded) return void console.warn(group.name, error);
+  }
+  if (!groups.includes(group) || !offlineCopy(group)) return;
+  if (projects) {
+    group.projects = projects.filter((item) => !item.archived && !item.deleted);
+    group.copyAt = group.client.copies.get("list") ?? null;
+  }
+  group.unloaded = !group.projects.length && !projects;
+  publish();
+  emit("hosts", group);
 }
 export const loadAllProjects = () => Promise.all(groups.map((group) => loadProjects(group)));
 
@@ -96,6 +120,7 @@ function drop(group) {
   if (!groups.includes(group)) return;
   streams.get(group)?.stop();
   streams.delete(group);
+  if (group.entry) void wipeHost(group.entry.hostId);
   groups.splice(groups.indexOf(group), 1);
   publish();
   emit("hosts", group);
@@ -112,7 +137,9 @@ function follow(group) {
   if (next === HostState.Forgotten) return drop(group);
   const was = group.state;
   group.state = next;
+  if (next === HostState.Revoked) void wipeHost(group.entry.hostId);
   if (next === HostState.Online && was !== HostState.Online) watch(group);
+  if (next === HostState.Offline) void loadCached(group);
   if (next !== HostState.Online) {
     streams.get(group)?.stop();
     streams.delete(group);

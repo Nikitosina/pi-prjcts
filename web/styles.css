@@ -4582,3 +4582,31 @@ table.hotkeys tr.clash td {
   text-align: right;
   overflow-wrap: anywhere;
 }
+.offline-banner {
+  flex: none;
+  padding: 8px 14px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--needs);
+  background: color-mix(in srgb, var(--needs) 12%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--needs) 35%, transparent);
+}
+.offline-banner b {
+  font-weight: 600;
+}
+.offline-copy {
+  margin: 0;
+  padding: 2px 8px 6px;
+  color: var(--needs);
+}
+.never-loaded {
+  margin: 16px 0;
+  padding: 12px 14px;
+  border: 1px dashed var(--line);
+  border-radius: var(--r-s);
+  color: var(--muted);
+}
+:is(button, input, textarea, select)[data-offline-off] {
+  cursor: not-allowed;
+  opacity: 0.55;
+}

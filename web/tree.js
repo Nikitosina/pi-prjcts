@@ -2,10 +2,11 @@
 // an unread mark when a chat finished after the owner last looked, and a question count badge. Chats other than Main archive from
 // their row's button or Mod+Shift+E after a confirmation, with Undo. With remote hosts the projects sit in one group per host
 // (web/hosts.js): the local host first; a host that is not online collapses to its header row.
-import { esc, clip } from "./format.js";
+import { esc, clip, clock } from "./format.js";
 import { binding, display, onBindingsChange } from "./hotkeys.js";
 import { emit, fail, on, stale, state, toast } from "./state.js";
-import { groupOf, groups, HostState, online, remoteGroups } from "./hosts.js";
+import { OFFLINE_WRITES } from "./offline.js";
+import { groupOf, groups, HostState, offlineCopy, online, remoteGroups } from "./hosts.js";
 
 export function mountTree(client) {
   const tree = document.querySelector("#tree");
@@ -61,6 +62,8 @@ export function mountTree(client) {
     return `<span class="dot idle" aria-hidden="true"></span>`;
   }
   function projectRows(projects, host = groups[0].client) {
+    const frozen = offlineCopy(groupOf(host) ?? {}),
+      off = frozen ? ` disabled title="${esc(OFFLINE_WRITES)}"` : "";
     return projects
       .map((project) => {
         const selected = project.id === state.projectId && host === state.host,
@@ -80,12 +83,12 @@ export function mountTree(client) {
                 // Main sits in a row too (without an archive button), so its unread dot keeps the same edge slot as every other chat.
                 if (chat.id === "main") return `<div class="tree-row" role="none">${row}</div>`;
                 const pending = archiving.has(`${project.id}:${chat.id}`);
-                return `<div class="tree-row" role="none">${row}<button type="button" class="tree-archive" data-project-id="${esc(project.id)}" data-archive-chat="${esc(chat.id)}" aria-label="Archive chat “${esc(clip(chat.title, 40))}”" title="${esc(archiveTitle())}"${pending ? " disabled" : ""}>${ARCHIVE_ICON}</button></div>`;
+                return `<div class="tree-row" role="none">${row}<button type="button" class="tree-archive" data-project-id="${esc(project.id)}" data-archive-chat="${esc(chat.id)}" aria-label="Archive chat “${esc(clip(chat.title, 40))}”" title="${esc(frozen ? OFFLINE_WRITES : archiveTitle())}"${pending || frozen ? " disabled" : ""}>${ARCHIVE_ICON}</button></div>`;
               })
               .join("") +
             `<button type="button" role="treeitem" class="tree-chat tree-memory${selected && state.focus.kind === "memory" ? " current" : ""}" data-project-id="${esc(project.id)}" data-memory-node><span class="node-icon" aria-hidden="true">◆</span><span class="name">Memory</span></button>` +
             (selected
-              ? `<button type="button" class="tree-chat tree-new" data-new-chat="${esc(project.id)}"><span class="node-icon" aria-hidden="true">＋</span><span class="name">New chat</span></button>`
+              ? `<button type="button" class="tree-chat tree-new" data-new-chat="${esc(project.id)}"${off}><span class="node-icon" aria-hidden="true">＋</span><span class="name">New chat</span></button>`
               : "")
           : "";
         return `<div class="tree-project${selected ? " selected" : ""}" role="group"><button type="button" role="treeitem" aria-expanded="${expanded}" class="tree-head" data-project="${esc(project.id)}"><span class="chev" aria-hidden="true">${expanded ? "▾" : "▸"}</span>${dot(project.activity)}<span class="name">${esc(project.name)}</span>${questions ? `<span class="count needs" aria-label="${esc(questions)} questions">${esc(questions)}</span>` : ""}</button>${rows ? `<div class="tree-children">${rows}</div>` : ""}</div>`;
@@ -103,21 +106,28 @@ export function mountTree(client) {
   /** One host: a header (fold, name, state, menu), then its projects while it is online and unfolded. */
   function groupHtml(group) {
     const up = online(group),
+      copy = offlineCopy(group),
       folded = closedHosts.has(group.key),
       label = STATE_LABEL[group.state] ?? group.state;
-    const toggle = up
-      ? `<button type="button" class="host-toggle" data-host-toggle="${esc(group.key)}" aria-expanded="${!folded}"><span class="chev" aria-hidden="true">${folded ? "▸" : "▾"}</span><span class="host-name">${esc(group.name)}</span></button>`
-      : `<span class="host-toggle static"><span class="chev" aria-hidden="true"></span><span class="host-name">${esc(group.name)}</span></span>`;
+    const toggle =
+      up || copy
+        ? `<button type="button" class="host-toggle" data-host-toggle="${esc(group.key)}" aria-expanded="${!folded}"><span class="chev" aria-hidden="true">${folded ? "▸" : "▾"}</span><span class="host-name">${esc(group.name)}</span></button>`
+        : `<span class="host-toggle static"><span class="chev" aria-hidden="true"></span><span class="host-name">${esc(group.name)}</span></span>`;
     const status = group.entry
       ? `<span class="host-state" data-tone="${up ? "online" : group.state === HostState.Connecting ? "wait" : "off"}">${esc(label)}</span>`
       : "";
+    const note = copy
+      ? `<p class="offline-copy small" data-offline-copy>${group.unloaded || !group.copyAt ? "Offline. Nothing from this host was loaded yet." : `Offline copy · data from ${esc(clock(group.copyAt))}`}</p>`
+      : "";
     const rows =
-      up && !folded
+      (up || copy) && !folded
         ? group.projects.length
           ? projectRows(group.projects, group.client)
-          : `<p class="muted small empty-line">No projects yet.</p>`
+          : up
+            ? `<p class="muted small empty-line">No projects yet.</p>`
+            : ""
         : "";
-    return `<div class="host-group" role="group" aria-label="${esc(group.name)}${group.entry ? ` · ${esc(label)}` : ""}" data-host-group="${esc(group.key)}" data-state="${esc(group.state)}"><div class="host-head">${toggle}${status}<button type="button" class="host-menu-btn" data-host-menu="${esc(group.key)}" aria-label="${esc(group.name)} actions" aria-haspopup="menu" title="Host actions">⋯</button></div>${rows}</div>`;
+    return `<div class="host-group" role="group" aria-label="${esc(group.name)}${group.entry ? ` · ${esc(label)}` : ""}" data-host-group="${esc(group.key)}" data-state="${esc(group.state)}"><div class="host-head">${toggle}${status}<button type="button" class="host-menu-btn" data-host-menu="${esc(group.key)}" aria-label="${esc(group.name)} actions" aria-haspopup="menu" title="Host actions">⋯</button></div>${note}${rows}</div>`;
   }
   function renderTree() {
     open.add(state.projectId);

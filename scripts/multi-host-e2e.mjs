@@ -194,7 +194,10 @@ try {
         await page.waitFor(`document.querySelectorAll('#decisions .decision').length === 3`, "Home question back");
         await home.stopHost();
         await page.waitFor(group(ids.home, "offline"), "Home Mac offline");
-        assert.ok(!(await q(`${groupText(ids.home)}.includes('Garden plan')`)));
+        assert.ok(
+          await q(`${groupText(ids.home)}.includes('Garden plan') && ${groupText(ids.home)}.includes('Offline copy')`),
+          "26: the cached list stays browsable, marked as an offline copy",
+        );
         assert.ok(!(await decisions()).some((t) => t.includes("Home Mac")));
         assert.match(await q(`document.querySelector('#status-pill').innerText`), /2 needs you/);
         await page.shot("host-offline", { force: true });

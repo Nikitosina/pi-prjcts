@@ -1,5 +1,6 @@
 import { localHost, pairingEntry, remoteHost } from "./api.js";
-import { forgetGroup } from "./hosts.js";
+import { forgetGroup, online } from "./hosts.js";
+import { OFFLINE_WRITES } from "./offline.js";
 import { emit, fail } from "./state.js";
 
 const inbox = () => location.hostname === "127.0.0.1";
@@ -66,8 +67,10 @@ export function openHostMenu({ group, button }) {
   menu.setAttribute("role", "menu");
   menu.setAttribute("aria-label", `${group.name} actions`);
   menu.dataset.for = group.key;
-  const item = (label, run, danger = false) => {
+  const item = (label, run, danger = false, off = false) => {
     const node = document.createElement("button");
+    node.disabled = off;
+    if (off) node.title = OFFLINE_WRITES;
     node.type = "button";
     node.setAttribute("role", "menuitem");
     node.textContent = label;
@@ -76,10 +79,15 @@ export function openHostMenu({ group, button }) {
     menu.append(node);
   };
   const host = group.entry ? { hostId: group.entry.hostId } : null;
-  item(`New project on ${group.name}`, () => {
-    closeHostMenu();
-    emit("new-project", { group });
-  });
+  item(
+    `New project on ${group.name}`,
+    () => {
+      closeHostMenu();
+      emit("new-project", { group });
+    },
+    false,
+    !online(group),
+  );
   item("Settings", () => location.assign(adminUrl(host, "settings")));
   item("Host agent", () => location.assign(adminUrl(host, "agent")));
   if (group.entry)
@@ -102,7 +110,7 @@ export function openHostMenu({ group, button }) {
   menu.style.top = `${Math.min(innerHeight - menu.offsetHeight - 8, rect.bottom + 4)}px`;
   menu.style.left = `${Math.max(8, Math.min(innerWidth - menu.offsetWidth - 8, rect.right - menu.offsetWidth))}px`;
   addEventListener("pointerdown", outside, true);
-  menu.querySelector("button").focus();
+  menu.querySelector("button:not(:disabled)")?.focus();
 }
 export function addHostControl(container) {
   if (!inbox()) return;
