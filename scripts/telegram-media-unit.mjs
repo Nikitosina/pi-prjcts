@@ -1082,16 +1082,16 @@ try {
         update_id: ++replacedUpdate,
         message: { message_id: 1, chat: { id: 2, type: "private", first_name: "Other" }, from: { id: 2 }, text: `/start ${code}` },
       };
-      // pair() aborts the poll in flight, which can swallow an update pushed meanwhile, so it is offered again until it lands.
+      // An update pushed while a poll is in flight can be lost, so the pairing is offered again until it lands.
       for (let i = 0; i < 100 && (await bridge.snapshot()).owner !== "Other"; i++) {
         if (!updates.length) updates.push(pairing);
         await new Promise((resolve) => setTimeout(resolve, 30));
       }
+      assert.equal((await bridge.snapshot()).owner, "Other", "6 the owner was replaced before the rejection is released");
     },
   };
   start(true);
   await bridge.flush().catch(() => {});
-  assert.equal((await bridge.snapshot()).owner, "Other", "6 the owner was replaced");
   assert(!attempts.some((a) => a.method === "createForumTopic"), "6 no topic is created for a notice of the former owner");
   assert(!attempts.some((a) => a.method === "sendPhoto" && a.input.chat_id === "2"), "6 the notice never reaches the new owner");
 
