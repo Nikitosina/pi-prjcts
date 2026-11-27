@@ -31,8 +31,7 @@ type Action =
   | ({ t: "model-set"; projectId: string; revision: string } & ModelSelection);
 type Target = { projectId: string; chatId: string; entryId?: string };
 type TopicRef = { projectId: string; chatId: string };
-/** `closed`: the chat is archived and its topic was closed, so restoring the chat reopens it. */
-type Topic = TopicRef & { thread: number; closed?: true };
+type Topic = TopicRef & { thread: number };
 type TopicName = () => string | Promise<string>;
 type DeliveryError = { at: number; method: string; description: string } & (
   { kind: "api"; httpStatus: number; code: number; descriptionProvided: boolean } | { kind: "network" | "not-sent" | "incomplete-response" }
@@ -183,6 +182,7 @@ const BOT_COMMANDS = [
 ];
 const COMMANDS_RETRY_MS = [1000, 5000, 30_000, 120_000];
 const TOPIC_NAME_MAX = 128;
+const ARCHIVED_PREFIX = "📦 ";
 const TOPIC_GONE = /message thread not found|TOPIC_ID_INVALID|TOPIC_DELETED|TOPIC_CLOSED|topic (?:is )?(?:closed|deleted)/i;
 const sameTopic = (a: TopicRef, b: TopicRef) => a.projectId === b.projectId && a.chatId === b.chatId;
 const inThread = (thread?: number) => (thread === undefined ? {} : { message_thread_id: thread });
@@ -1406,28 +1406,16 @@ export function startTelegram(options: {
     snapshot,
     flush,
     resolveHeld,
-    /** Keeps a chat's topic in step with the chat: closed while archived, named after the chat's title. Best-effort. */
+    /** Keeps a chat's topic named after the chat's title, with a 📦 prefix while archived (private chats cannot close or reopen topics). Best-effort: `call` records a failure. */
     async chatChanged(projectId: string, chat: DurableChat) {
       const topic = topicOf({ projectId, chatId: chat.id });
       if (!topic || !topicsOn()) return;
-      const chat_id = state.owner!.chatId,
-        message_thread_id = topic.thread;
       try {
-        if (chat.archived) {
-          await call("closeForumTopic", { chat_id, message_thread_id });
-          topic.closed = true;
-        } else {
-          if (topic.closed) {
-            await call("reopenForumTopic", { chat_id, message_thread_id });
-            delete topic.closed;
-          }
-          await call("editForumTopic", {
-            chat_id,
-            message_thread_id,
-            name: clip(topicLabel(loadProject(projectId).name, chat.title), TOPIC_NAME_MAX),
-          });
-        }
-        persist();
+        await call("editForumTopic", {
+          chat_id: state.owner!.chatId,
+          message_thread_id: topic.thread,
+          name: clip(`${chat.archived ? ARCHIVED_PREFIX : ""}${topicLabel(loadProject(projectId).name, chat.title)}`, TOPIC_NAME_MAX),
+        });
       } catch {}
     },
     progress,

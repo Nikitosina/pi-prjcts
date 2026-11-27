@@ -158,8 +158,9 @@ const api = createServer((req, res) => {
       }
       const topic = tg.topicList.get(input.message_thread_id);
       if (!topic) return reply(400, { ok: false, error_code: 400, description: "Bad Request: message thread not found" });
-      if (method === "closeForumTopic") topic.closed = true;
-      if (method === "reopenForumTopic") topic.closed = false;
+      // Private chats refuse these, as the real Bot API does (checked live on 2026-11-27).
+      if (method === "closeForumTopic" || method === "reopenForumTopic")
+        return reply(400, { ok: false, error_code: 400, description: "Bad Request: the chat is not a supergroup forum" });
       if (method === "editForumTopic") topic.name = input.name;
       return reply(200, { ok: true, result: true });
     }
@@ -1016,14 +1017,25 @@ try {
     "T66 a failing createForumTopic sends the notice to the general thread once, does not hold the notices behind it, and the topic is created on a later notice",
   );
 
-  // T68: archive closes the topic, restore reopens it, a rename renames it.
+  // T68: a rename renames the topic; archiving prefixes its name, restoring removes the prefix; close and reopen are never called.
+  const callsBefore = tg.topicCalls.length,
+    errorsBefore = (await rpc({ action: "telegram-snapshot" })).deliveryErrors.length;
   await rpc({ action: "chat-update", id: a, chatId: three.id, title: "Three renamed" });
   await eventually(async () => tg.topicList.get(threeThread)?.name === "Alpha · Three renamed", "topic not renamed", 100);
   await rpc({ action: "chat-update", id: a, chatId: three.id, archived: true });
-  await eventually(async () => tg.topicList.get(threeThread)?.closed === true, "topic not closed", 100);
+  await eventually(async () => tg.topicList.get(threeThread)?.name === "📦 Alpha · Three renamed", "topic not marked archived", 100);
+  await rpc({ action: "chat-update", id: a, chatId: three.id, title: "Three again" });
+  await eventually(async () => tg.topicList.get(threeThread)?.name === "📦 Alpha · Three again", "archived rename lost the prefix", 100);
   await rpc({ action: "chat-update", id: a, chatId: three.id, archived: false });
-  await eventually(async () => tg.topicList.get(threeThread)?.closed === false, "topic not reopened", 100);
-  result.checks.push("T68 renaming a chat renames its topic; archiving closes it and restoring reopens it");
+  await eventually(async () => tg.topicList.get(threeThread)?.name === "Alpha · Three again", "prefix not removed on restore", 100);
+  assert.deepEqual(
+    tg.topicCalls.slice(callsBefore).filter((c) => /^(close|reopen)ForumTopic$/.test(c.method)),
+    [],
+    "68 close and reopen are never called in a private chat",
+  );
+  assert.equal(threadOf("Alpha · Three again"), threeThread, "68 the topic is reused after restore");
+  assert.equal((await rpc({ action: "telegram-snapshot" })).deliveryErrors.length, errorsBefore, "68 no archive call fails");
+  result.checks.push("T68 renaming a chat renames its topic; archiving prefixes it with 📦 (kept on rename), restoring removes it; no close or reopen");
 
   // T67: topics turned off again, or another bot: no thread ids.
   tg.topics = false;
