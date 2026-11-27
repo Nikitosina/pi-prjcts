@@ -153,7 +153,8 @@ function watch(projectId, host) {
 on("host-online", (group) => {
   if (group.client !== state.host || !state.projectId) return;
   watch(state.projectId, state.host);
-  if (state.focus.kind !== "chat") renderFocus();
+  // A view with unsaved input (a Memory edit, a review comment, a message to a worker) keeps its draft: it is not replaced by a fresh read.
+  if (state.focus.kind !== "chat" && !focusView.querySelector("textarea:not(:placeholder-shown), .mem-edit")) renderFocus();
 });
 // A forgotten host leaves the page: its selected project gives way to the first project still listed.
 on("hosts", () => {
@@ -558,13 +559,14 @@ function adminFrame(group, change) {
     onTiersChanged();
   } else if (change.topic !== "projects") onHostTopic(change);
 }
+const GONE = new Set(["forgotten", "revoked", "not paired", "needs update"]);
 async function start() {
   paintHints();
   paintStatusLine();
   if (!token) return signIn();
-  // Forgotten in another tab: this page's Settings host is gone, so the page returns to the local host.
+  // Forgotten in another tab, revoked, or no longer paired or compatible: this page's Settings host is not usable, so the page returns to the local host.
   admin.addEventListener?.("statechange", () => {
-    if (admin.state !== "forgotten") return;
+    if (!GONE.has(admin.state)) return;
     const url = new URL(location.href);
     url.searchParams.delete("host");
     url.searchParams.delete("panel");

@@ -194,7 +194,7 @@ export function mountTree(client) {
       index = before.findIndex((item) => item.id === chat.id);
     try {
       // Archiving aborts a running turn in the runtime; refuse instead of stopping it behind the owner's back.
-      const view = await (host ?? client).call("show", { id: projectId, chatId: chat.id });
+      const view = await (host ?? client).live("show", { id: projectId, chatId: chat.id });
       if (view.chats?.find((item) => item.id === chat.id)?.busy)
         throw new Error(
           `“${clip(chat.title, 40)}” is answering. Open it and stop the turn (${display(binding("stop"))}) before archiving.`,

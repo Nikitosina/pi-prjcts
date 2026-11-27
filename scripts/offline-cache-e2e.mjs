@@ -28,6 +28,10 @@ try {
       remote.initRepo();
       const garden = await remote.createProject("Garden plan");
       const unopened = await remote.createProject("Never opened");
+      const hung = await remote.createProject("Hung chat");
+      const side = await remote.rpc({ action: "chat-create", id: garden, title: "Side chat" });
+      const sideId = side.id ?? side.chat?.id ?? side.chatId;
+      assert.ok(sideId, `chat-create answered ${JSON.stringify(side)}`);
       const hostId = status.hostId;
 
       const page = await local.openPage(url.href, { trustedSpki: relay.spki });
@@ -178,7 +182,7 @@ try {
         const read = host.call('show', { id: ${JSON.stringify(garden)} });
         host.state = 'online';
         const data = await read;
-        return { live: host.copies.get('show')?.live, messages: data.messages.length > 0 };
+        return { live: host.provenance(data)?.live, messages: data.messages.length > 0 };
       })()`);
       assert.deepEqual(raced, { live: true, messages: true }, "54: the copy was not returned as live data");
       // 56: reads in flight when the host drops fall back to the cache instead of waiting for the host
@@ -197,14 +201,10 @@ try {
       await q(`clearInterval(window.loop)`);
       await page.waitFor(`window.calls.size === 0`, "56: no read waits for the host");
       // 59: the banner shows the time of the displayed read, not of the memory list
-      await q(`(async () => {
-        const host = await ${remoteClient};
-        host.copies.set('memory-index', { at: host.copies.get('knowledge-read').at - 5 * 3600 * 1000, live: false });
-        host.dispatchEvent(new Event('copy'));
-      })()`);
       const expected = await q(
-        `(async () => { const host = await ${remoteClient}; return (await import('/format.js')).clock(host.copies.get('knowledge-read').at); })()`,
+        `(async () => { const host = await ${remoteClient}; const { state } = await import('/state.js'); return (await import('/format.js')).clock(host.provenance(state.focus.data).at); })()`,
       );
+      // the document on screen was read live before the drop: it stays what it was, and the banner dates it by that read
       await page.waitFor(
         `document.querySelector('#offline-banner').innerText.includes('data from ${expected}')`,
         "59: banner time of the displayed read",
@@ -240,6 +240,99 @@ try {
       await page.waitFor(
         `(() => { const back = document.querySelector('#focus-view:not([hidden]) .back'); back?.click(); return document.querySelector('#focus-view').hidden; })()`,
         "back to chat",
+      );
+
+      // 1 (re-review): a Memory edit typed before a disconnect is still there, and editable, when the host is back
+      await q(`document.querySelector('[data-project-id="${garden}"][data-memory-node]').click()`);
+      await page.waitFor(`!!document.querySelector('#focus-view [data-memory="preferences.md"]')`, "memory list again");
+      await q(`document.querySelector('#focus-view [data-memory="preferences.md"]').click()`);
+      await page.waitFor(`!!document.querySelector('[data-edit-memory]')`, "document again");
+      await q(`document.querySelector('[data-edit-memory]').click()`);
+      await page.waitFor(`!!document.querySelector('.mem-edit textarea')`, "editor open");
+      await q(
+        `(() => { const t = document.querySelector('.mem-edit textarea'); t.value = 'Unsaved draft text'; t.dispatchEvent(new Event('input', { bubbles: true })); })()`,
+      );
+      await remote.stopHost();
+      await page.waitFor(group("offline"), "offline with a draft");
+      remote.startHost();
+      await remote.waitHost();
+      await page.waitFor(group("online"), "online with a draft");
+      await page.waitFor(`!document.querySelector('.mem-edit textarea').disabled`, "editor usable again");
+      assert.equal(await q(`document.querySelector('.mem-edit textarea').value`), "Unsaved draft text", "the draft survived the reconnect");
+      await q(`document.querySelector('[data-cancel]').click()`);
+      await page.waitFor(
+        `(() => { const back = document.querySelector('#focus-view:not([hidden]) .back'); back?.click(); return document.querySelector('#focus-view').hidden; })()`,
+        "back to chat again",
+      );
+
+      // 56 (re-review): an uncached chat read stuck in flight does not hold up the cached chat opened after the drop
+      await q(`document.querySelector('[data-host-group="${hostId}"] [data-project="${garden}"]').click()`);
+      await page.waitFor(`document.querySelector('#feed').innerText.includes('Garden reply')`, "garden chat");
+      await page.waitFor(`document.querySelector('[data-host-group="${hostId}"]').innerText.includes('Hung chat')`, "hung project listed");
+      await q(
+        `(() => { const send = WebSocket.prototype.send; WebSocket.prototype.send = function (...args) { return window.dropFrames ? undefined : send.apply(this, args); }; window.dropFrames = true; })()`,
+      );
+      await q(`document.querySelector('[data-host-group="${hostId}"] [data-project="${hung}"]').click()`);
+      await page.waitFor(`document.querySelector('#crumbs').innerText.includes('Hung chat')`, "hung chat selected");
+      await remote.stopHost();
+      await page.waitFor(group("offline"), "offline with a stuck read");
+      await q(`window.dropFrames = false`);
+      await q(`document.querySelector('[data-host-group="${hostId}"] [data-project="${garden}"]').click()`);
+      await page.waitFor(
+        `document.querySelector('#crumbs').innerText.includes('Garden plan') && document.querySelector('#feed').innerText.includes('Garden reply')`,
+        "5: the cached chat opens while the other read is stuck",
+      );
+      assert.equal(await q(`!!document.querySelector('#feed .never-loaded')`), false);
+      // 4 (re-review): the displayed copy turns live only by its own read
+      assert.equal(await q(`document.querySelector('#offline-banner').hidden`), false);
+      remote.startHost();
+      await remote.waitHost();
+      await page.waitFor(group("online"), "back online after the stuck read");
+      await page.waitFor(
+        `document.querySelector('#offline-banner').hidden && !document.querySelector('#composer-input').disabled`,
+        "own read made it live",
+      );
+      assert.equal(
+        await q(
+          `(async () => { const host = await ${remoteClient}; const { state } = await import('/state.js'); return host.provenance(state.view)?.live; })()`,
+        ),
+        true,
+      );
+
+      // 6 (re-review): an archive that was waiting for its preflight read never runs after a reconnect
+      await q(`document.querySelector('[data-archive-chat="${sideId}"]').click()`);
+      await page.waitFor(`!!document.querySelector('[data-archive-confirm]')`, "archive confirmation");
+      await q(`window.dropFrames = true`);
+      await q(`document.querySelector('[data-archive-confirm]').click()`);
+      await remote.stopHost();
+      await page.waitFor(group("offline"), "offline during the archive preflight");
+      await q(`window.dropFrames = false`);
+      await page.waitFor(`document.querySelectorAll('#toasts .toast').length > 0`, "the archive failed visibly");
+      remote.startHost();
+      await remote.waitHost();
+      await page.waitFor(group("online"), "online after the archive");
+      await new Promise((done) => setTimeout(done, 1500));
+      const sideChat = (await remote.rpc({ action: "show", id: garden })).chats.find((chat) => chat.id === sideId);
+      assert.ok(sideChat && !sideChat.archived, "6: the chat was not archived behind the owner's back");
+
+      // 7 (re-review): pending sends and drafts belong to one host
+      const pendingId = crypto.randomUUID();
+      await q(
+        `localStorage.setItem('pi-pending-send:${pendingId}', JSON.stringify({ id: '${pendingId}', hostId: 'local', projectId: '${garden}', chatId: 'main', text: 'Message of another host' }))`,
+      );
+      await page.reload();
+      await page.waitFor(`document.body.dataset.ready === '1'`, "ready after reload");
+      await q(`document.querySelector('[data-host-group="${hostId}"] [data-project="${garden}"]').click()`);
+      await page.waitFor(`document.querySelector('#feed').innerText.includes('Garden reply')`, "garden after reload");
+      assert.equal(
+        await q(`document.querySelector('#feed').innerText.includes('Message of another host')`),
+        false,
+        "7: another host's pending send is not shown",
+      );
+      await q(`localStorage.removeItem('pi-pending-send:${pendingId}')`);
+      await page.waitFor(
+        `!document.querySelector('[data-host-group="${hostId}"]')?.innerText.includes('Offline')`,
+        "list live after reload",
       );
 
       // 47, 48: a host's entries are its own and its oldest reads leave first
@@ -304,6 +397,23 @@ try {
       assert.equal(await cached("evict-B"), 1, "another host's entries stay");
       await q(`import('/host-cache.js').then(({ wipeHost }) => wipeHost('evict-B'))`);
 
+      // 3 (re-review): a wipe records its tombstone even when the database did not exist yet
+      const firstSave = await q(`(async () => {
+        const { hostCache, wipeHost } = await import('/host-cache.js');
+        await new Promise((ok, fail) => { const r = indexedDB.deleteDatabase('pi-host-cache'); r.onsuccess = ok; r.onerror = fail; r.onblocked = fail; });
+        const before = Date.now() - 5;
+        await wipeHost('first-E');
+        await hostCache('first-E').put('read', {}, 'late first save of another tab', before);
+        const saved = await hostCache('first-E').get('read', {});
+        await new Promise((ok) => setTimeout(ok, 5));
+        const t = Date.now();
+        await hostCache('first-E').put('read', {}, 'newer', t + 10);
+        await hostCache('first-E').put('read', {}, 'older read arriving late', t + 5);
+        return { dropped: saved === null, newestKept: (await hostCache('first-E').get('read', {}))?.data === 'newer' };
+      })()`);
+      assert.deepEqual(firstSave, { dropped: true, newestKept: true });
+      await q(`import('/host-cache.js').then(({ wipeHost }) => wipeHost('first-E'))`);
+
       // 49: a revoked device wipes the cache too, and a revoked host shows no copy
       await pairHost(page, (await remote.rpc({ action: "remote-pair-start" })).link);
       await page.waitFor(group("online"), "paired again");
@@ -311,9 +421,15 @@ try {
       await q(`document.querySelector('[data-host-group="${hostId}"] [data-project="${garden}"]').click()`);
       await page.waitFor(`document.querySelector('#feed').innerText.includes('Garden reply')`, "chat again");
       assert.ok((await cached()) > 0);
+      await q(`location.replace(location.pathname + location.search + (location.search ? '&' : '?') + 'host=${hostId}')`);
+      await page.waitFor(
+        `document.body.dataset.ready === '1' && new URLSearchParams(location.search).get('host') === '${hostId}'`,
+        "the page is on the remote host",
+      );
       const deviceId = await q(`(async () => (await (await import('/inbox-wire/store.js')).get('inbox-device:${hostId}')).id)()`);
       await remote.rpc({ action: "remote-revoke", deviceId, confirm: deviceId });
       await page.waitFor(group("revoked"), "revoked");
+      await page.waitFor(`!new URLSearchParams(location.search).has('host')`, "2: Settings and the Host agent leave the revoked host");
       await local.waitFor(async () => (await cached()) === 0, "revocation wiped the cache");
       assert.doesNotMatch(await groupText(), /Garden plan|Offline copy/);
       await page.waitFor(`!document.querySelector('#feed').innerText.includes('Garden reply')`, "52: no view of the revoked host stays");

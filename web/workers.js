@@ -582,6 +582,7 @@ export function mountWorkers(client, chat, media) {
           return null;
         });
       if (!page || !alive()) return;
+      state.focus.data = page; // what the view shows, for its offline copy marker
       items = page.items;
       groups = page.toolGroups ?? null;
       root.querySelector(".focus-head").outerHTML = head().replace(/<p class="w-prompt"[\s\S]*$|<div class="report-card"[\s\S]*$/, "");

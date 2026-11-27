@@ -88,12 +88,15 @@ async function loadCached(group) {
   if (!groups.includes(group) || !offlineCopy(group)) return;
   if (projects) {
     group.projects = projects.filter((item) => !item.archived && !item.deleted);
-    group.copyAt = group.client.copies.get("list")?.at ?? null;
+    group.copyAt = group.client.provenance(projects)?.at ?? null;
   }
   group.unloaded = !group.projects.length && !projects;
   publish();
   emit("hosts", group);
 }
+/** The client of one host by its ID: "local" is this machine. Null when that host is gone from the page. */
+export const clientOf = (hostId) =>
+  hostId === "local" ? localHost : (groups.find((group) => group.entry?.hostId === hostId)?.client ?? null);
 export const loadAllProjects = () => Promise.all(groups.map((group) => loadProjects(group)));
 
 async function loadApprovals(group) {
@@ -187,6 +190,7 @@ const pathProject = (path) =>
 /** The client of project views. A project id in the input or path picks its host; anything else goes to the selected project's host. */
 export const projectHost = {
   call: (action, input, signal) => routed(input?.projectId ?? input?.id).call(action, input, signal),
+  live: (action, input, signal) => routed(input?.projectId ?? input?.id).live(action, input, signal),
   stream: (path, onFrame, onState) => routed(pathProject(path)).stream(path, onFrame, onState),
   url: (path, options) => routed(pathProject(path)).url(path, options),
   authorizedFetch: (path, init) => routed(pathProject(path)).authorizedFetch(path, init),

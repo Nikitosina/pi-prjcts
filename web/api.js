@@ -203,42 +203,68 @@ const SAVING = new Set(["online", "offline"]);
 function hostClient(transport) {
   const run = transport.run ?? ((_read, _signal, work) => work(transport.authorizedFetch));
   const cache = transport.local ? null : hostCache(transport.hostId);
-  /** action → `{ at, live }`: when the data last shown for it was read, and whether that read was live or a copy served from the cache. */
-  const copies = new Map();
+  /** Where each answer handed out came from: `{ at, live }`, the time it was read and whether that read was live or a copy from the cache.
+   * Keyed by the answer object itself, so a view knows about exactly the data it rendered and no other read can change that. */
+  const provenance = new WeakMap();
+  const note = (data, at, live) => {
+    if (data && typeof data === "object") provenance.set(data, { at, live });
+    return data;
+  };
+  let served = false; // a copy was shown at some point, so a live answer may have to take its place on screen
+  const offlineError = () => new HostError(`${transport.name} is offline. Changes are disabled until it is back.`, 0, true, false);
+  const plain = (read, action, input, signal) => run(read, signal, (fetch) => requestAction(fetch, action, input, signal));
   return Object.assign(transport, {
-    copies,
+    provenance: (data) => (data && typeof data === "object" ? (provenance.get(data) ?? null) : null),
     storagePrefix: transport.local ? "" : `pi-host:${transport.hostId}:`,
+    /** A read that gates a write: never a copy, and it fails at once when the host goes offline instead of waiting to be replayed. */
+    async live(action, input, signal) {
+      if (!cache) return plain(true, action, input, signal);
+      if (transport.state === "offline") throw offlineError();
+      const attempt = new AbortController(),
+        forward = () => attempt.abort(signal.reason),
+        watch = () => transport.state === "offline" && attempt.abort(offlineError());
+      signal?.addEventListener("abort", forward, { once: true });
+      transport.addEventListener("statechange", watch);
+      try {
+        return await plain(true, action, input, attempt.signal);
+      } catch (error) {
+        throw attempt.signal.aborted && !signal?.aborted ? attempt.signal.reason : error;
+      } finally {
+        signal?.removeEventListener("abort", forward);
+        transport.removeEventListener("statechange", watch);
+      }
+    },
     async call(action, input, signal) {
       const read = isRead(action, input);
       const serve = async () => {
         const saved = uncached.has(action) ? null : await cache.get(action, input);
         // The host may have come back or been revoked while the cache answered: that answer is then not for this moment.
         if (transport.state !== "offline") return undefined;
-        if (saved) copies.set(action, { at: saved.savedAt, live: false });
-        else copies.delete(action);
+        served = true;
+        if (saved) note(saved.data, saved.savedAt, false);
         transport.dispatchEvent?.(new Event("copy"));
         return saved;
       };
       for (;;) {
         if (cache && transport.state === "offline") {
-          if (!read) throw new HostError(`${transport.name} is offline. Changes are disabled until it is back.`, 0, true, false);
+          if (!read) throw offlineError();
           const saved = await serve();
           if (saved === undefined) continue;
           if (!saved) throw new NeverLoadedError(transport.name);
           return saved.data;
         }
-        if (!cache || !read) return run(read, signal, (fetch) => requestAction(fetch, action, input, signal));
+        if (!cache || !read) return plain(read, action, input, signal);
         const started = Date.now();
-        const live = run(read, signal, (fetch) => requestAction(fetch, action, input, signal)).then((data) => {
+        const live = plain(read, action, input, signal).then((data) => {
           if (!uncached.has(action)) {
-            const wasCopy = copies.get(action)?.live === false;
-            copies.set(action, { at: Date.now(), live: true });
-            if (wasCopy) transport.dispatchEvent(new Event("copy"));
+            note(data, Date.now(), true);
             if (SAVING.has(transport.state)) void cache.put(action, input, data, started);
           }
+          if (served) transport.dispatchEvent?.(new Event("copy"));
           return data;
         });
         // A read that loses its connection waits for the host to return (and is replayed), unless a saved copy can answer at once.
+        // The losing read is not cancelled: its answer is saved, but nothing renders it, so it never makes a copy on screen live.
         let stopWatching = () => {};
         const dropped = new Promise((resolve) => {
           const watch = () =>

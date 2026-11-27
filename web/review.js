@@ -55,6 +55,7 @@ export function mountReview(client) {
     room.innerHTML = `<div class="rv-head">${back}<h1>Reading PR #${esc(focus.id)}…</h1></div>`;
     try {
       const s = await rpc("open", { seen: !afterWrite });
+      state.focus.data = s;
       let currentFiles;
       tour = reviewTour(
         s,

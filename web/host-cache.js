@@ -20,7 +20,14 @@ function open() {
       if (!base.objectStoreNames.contains("data")) base.createObjectStore("data");
       if (!base.objectStoreNames.contains("wiped")) base.createObjectStore("wiped");
     };
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      // Another tab or a deletion of the database must not be blocked by this connection; the next use opens it again.
+      request.result.onversionchange = () => {
+        request.result.close();
+        db = null;
+      };
+      resolve(request.result);
+    };
     request.onerror = () => reject(request.error);
   });
   db.catch(() => (db = null));
@@ -80,17 +87,21 @@ export function hostCache(hostId) {
         await transact("readwrite", (metas, datas, tombs) => {
           wait(tombs.get(hostId), (wipedAt) => {
             if ((wipedAt ?? 0) >= startedAt) return;
-            metas.put({ id: key, hostId, savedAt: Date.now(), bytes });
-            datas.put(data, key);
-            wait(metas.index("host").getAll(hostId), (all) => {
-              let total = all.reduce((sum, item) => sum + item.bytes, 0);
-              for (const old of all.sort((a, b) => a.savedAt - b.savedAt)) {
-                if (total <= limits.hostBytes) break;
-                if (old.id === key) continue;
-                total -= old.bytes;
-                metas.delete(old.id);
-                datas.delete(old.id);
-              }
+            wait(metas.get(key), (existing) => {
+              // The newest read wins: a slower, older answer of the same read never replaces one that began after it.
+              if (existing && existing.readAt > startedAt) return;
+              metas.put({ id: key, hostId, savedAt: Date.now(), readAt: startedAt, bytes });
+              datas.put(data, key);
+              wait(metas.index("host").getAll(hostId), (all) => {
+                let total = all.reduce((sum, item) => sum + item.bytes, 0);
+                for (const old of all.sort((a, b) => a.savedAt - b.savedAt)) {
+                  if (total <= limits.hostBytes) break;
+                  if (old.id === key) continue;
+                  total -= old.bytes;
+                  metas.delete(old.id);
+                  datas.delete(old.id);
+                }
+              });
             });
           });
         });
@@ -101,11 +112,10 @@ export function hostCache(hostId) {
   };
 }
 
-/** Deletes every entry of one host (Forget host, revocation). The tombstone is written first and on its own, so a failed deletion still
- * leaves the entries unreadable; the error is thrown so the caller can report it. Only opens the database when it exists. */
+/** Deletes every entry of one host (Forget host, revocation). The tombstone is written first and on its own, even when the database did
+ * not exist yet, so another tab's first save cannot escape it; a failed deletion still leaves the entries unreadable and is thrown to the caller.
+ * Only called for a remote host, so a page with no remote hosts never opens the database. */
 export async function wipeHost(hostId) {
-  const known = await indexedDB.databases?.(); // a browser without it opens the database, which is harmless
-  if (!db && known && !known.some((item) => item.name === "pi-host-cache")) return;
   await transact("readwrite", (_metas, _datas, tombs) => tombs.put(Date.now(), hostId));
   await transact("readwrite", (metas, datas) => {
     wait(metas.index("host").getAllKeys(hostId), (keys) => {

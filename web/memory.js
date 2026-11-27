@@ -38,7 +38,7 @@ export function mountMemory(client) {
       projectId = state.projectId;
     const index = await client.call("memory-index", { projectId, ...(archive ? { includeArchive: true } : {}) });
     if (stale(gen)) return null;
-    cache = { projectId, entries: index.entries, brokenLinks: index.brokenLinks ?? [] };
+    cache = { projectId, entries: index.entries, brokenLinks: index.brokenLinks ?? [], index };
     return cache;
   }
   const memoryEntry = (path) => (cache.projectId === state.projectId ? cache.entries.find((item) => item.path === path) : null);
@@ -175,6 +175,7 @@ export function mountMemory(client) {
       return;
     }
     if (stale(gen) || !memory || !root.isConnected) return;
+    state.focus.data = memory.index; // what the view shows, for its offline copy marker
     paintList(root, memory);
   }
   function paintList(root, memory) {
@@ -227,6 +228,7 @@ export function mountMemory(client) {
       return;
     }
     if (stale(gen) || !root.isConnected) return;
+    state.focus.data = doc;
     const entry = cache.entries.find((item) => item.path === path);
     const kind = KINDS.find((item) => item.id === (entry?.kind ?? memoryKind(path)));
     const paint = (editing) => {

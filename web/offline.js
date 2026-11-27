@@ -2,7 +2,7 @@
 // offline copy and its time, and every control that writes to that host disabled with its reason. The client refuses the writes too
 // (web/api.js); this only makes that visible. A page with no remote hosts never shows or changes anything here.
 import { clock, esc } from "./format.js";
-import { groupOf, offlineCopy } from "./hosts.js";
+import { groupOf, offlineCopy, remoteGroups } from "./hosts.js";
 import { on, state } from "./state.js";
 
 export const OFFLINE_WRITES = "Host offline: changes are disabled until it is back.";
@@ -37,12 +37,8 @@ const READ = [
 ].join(",");
 const CONTROLS = "button, input, textarea, select";
 
-/** The read the open center view displays, whose time the banner shows. */
-function displayedRead() {
-  const { kind, path } = state.focus;
-  if (kind === "memory") return path ? "knowledge-read" : "memory-index";
-  return { chat: "show", worker: "thread-history", pr: "pr-review-open" }[kind];
-}
+/** The data the open center view rendered: the one answer whose origin (live or a copy, and when) the banner reports. */
+const displayed = () => (state.focus.kind === "chat" ? state.view : state.focus.data);
 
 function freeze(root, reason) {
   for (const control of root.querySelectorAll(CONTROLS)) {
@@ -66,57 +62,66 @@ function thaw(root) {
   }
 }
 
-/** `admin` is the host of Settings and the Host agent; project views follow `state.host`. */
+/** `admin` is the host of Settings and the Host agent; project views follow `state.host`. Nothing is installed until a remote host exists. */
 export function mountOffline(admin) {
-  const banner = document.createElement("div");
-  banner.id = "offline-banner";
-  banner.className = "offline-banner";
-  banner.setAttribute("role", "status");
-  banner.hidden = true;
-  document.querySelector("#center").prepend(banner);
-  const project = ["#feed", "#dock", "#context", "#focus-view"].map((selector) => document.querySelector(selector)),
-    adminViews = ["#settings", "#host-agent"].map((selector) => document.querySelector(selector));
+  let banner = null,
+    project = null,
+    adminViews = null,
+    watching = null,
+    queued = false,
+    observer = null;
   const adminOffline = () => !admin.local && admin.state === "offline";
-  let watching = null;
 
+  function install() {
+    if (banner) return;
+    banner = document.createElement("div");
+    banner.id = "offline-banner";
+    banner.className = "offline-banner";
+    banner.setAttribute("role", "status");
+    banner.hidden = true;
+    document.querySelector("#center").prepend(banner);
+    project = ["#feed", "#dock", "#context", "#focus-view"].map((selector) => document.querySelector(selector));
+    adminViews = ["#settings", "#host-agent"].map((selector) => document.querySelector(selector));
+    observer = new MutationObserver(later);
+    for (const root of [...project, ...adminViews]) observer.observe(root, { childList: true, subtree: true });
+  }
   function paintBanner(group) {
     banner.hidden = !group;
     if (!group) return;
-    const read = group.client.copies.get(displayedRead());
-    banner.innerHTML = read
-      ? offlineCopy(group)
+    const read = group.client.provenance(displayed());
+    banner.innerHTML = !read
+      ? `<b>Offline</b>: ${esc(group.name)} has no copy of this view. ${esc(OFFLINE_WRITES)}`
+      : offlineCopy(group)
         ? `<b>Offline copy</b> of ${esc(group.name)} · data from ${esc(clock(read.at))}. ${esc(OFFLINE_WRITES)}`
-        : `<b>Back online</b>: ${esc(group.name)} is refreshing this view. Until then it is the offline copy from ${esc(clock(read.at))}.`
-      : `<b>Offline</b>: ${esc(group.name)} has no copy of this view. ${esc(OFFLINE_WRITES)}`;
+        : `<b>Back online</b>: ${esc(group.name)} is refreshing this view. Until then it is the offline copy from ${esc(clock(read.at))}.`;
     banner.dataset.copy = read ? "1" : "0";
   }
   function paint() {
+    install();
     const group = groupOf(state.host);
-    // A host that is back stays frozen until the displayed read has live data: the text on screen may still be the copy.
-    const stale = group && !offlineCopy(group) && group.client?.copies.get(displayedRead())?.live === false;
+    // A host that is back stays frozen until the displayed data came from a live read: the text on screen may still be the copy.
+    const stale = group && !offlineCopy(group) && group.client?.provenance(displayed())?.live === false;
     const frozen = group && (offlineCopy(group) || stale) ? group : null;
     document.body.dataset.hostOffline = frozen ? "1" : "0";
     paintBanner(frozen);
     for (const root of project) frozen ? freeze(root, OFFLINE_WRITES) : thaw(root);
     for (const root of adminViews) adminOffline() ? freeze(root, OFFLINE_WRITES) : thaw(root);
   }
-  let queued = false;
-  const later = () => {
+  function later() {
     if (queued) return;
     queued = true;
     queueMicrotask(() => ((queued = false), paint()));
-  };
+  }
   function follow() {
     if (watching?.host === state.host) return;
-    watching?.host.removeEventListener?.("copy", later);
+    watching?.host?.removeEventListener?.("copy", later);
     watching = { host: state.host };
     state.host?.addEventListener?.("copy", later);
   }
-  const observer = new MutationObserver(later);
-  for (const root of [...project, ...adminViews]) observer.observe(root, { childList: true, subtree: true });
-  admin.addEventListener?.("statechange", later);
+  admin.addEventListener?.("statechange", () => (remoteGroups() || !admin.local) && later());
   for (const event of ["select", "hosts", "view", "open", "projects"])
     on(event, () => {
+      if (!banner && !remoteGroups() && admin.local) return;
       follow();
       later();
     });

@@ -1,6 +1,7 @@
 // Center: the Coordinator chat. Transcript from `show`, older pages from `chat-history`, live frames from `/live`.
 // Tool calls are compact rows; a finished turn folds runs of two or more rows into one group; reports link to the worker.
 import { HostError, uuid } from "./api.js";
+import { clientOf } from "./hosts.js";
 import { clip, clock, dur, esc, imagesHtml, markdown, oneLine } from "./format.js";
 import { FILE_ONLY_NOTE, PathSource, insertText, pathsFromTransfer } from "./path-drop.js";
 import { chatArgs, emit, fail, on, stale, state, toast } from "./state.js";
@@ -23,6 +24,7 @@ export function mountChat(client, media, slash, memory) {
     loading = null,
     reads = 0, // transcript reads started so far; a pending send's refusal is only proven by a read that starts after it
     held = null; // live text and thinking of a step the host just committed, shown until a transcript read that includes it renders
+  const hostKey = (host = state.host) => host?.hostId ?? "local";
   const pendingSends = []; // owner messages sent from this page that the transcript does not show yet, oldest first
   // The recovery handle of an unsettled send survives a reload: its id, project, chat and exact text, so Retry sends the same message under the same id.
   // One storage key per attempt, so tabs never overwrite each other's handles.
@@ -58,6 +60,7 @@ export function mountChat(client, media, slash, memory) {
           savedHandles.set(item.id, localStorage.getItem(key));
           found.push({
             id: item.id,
+            hostId: typeof item.hostId === "string" ? item.hostId : "local",
             projectId: item.projectId,
             chatId: item.chatId,
             text: item.text,
@@ -75,9 +78,10 @@ export function mountChat(client, media, slash, memory) {
     return found;
   }
   /** Stores the handle before anything is sent; false when the browser cannot keep it, and then nothing may be sent: a reload would lose the message without a trace. */
-  function rememberSend({ id, projectId, chatId, text, attachments, retryOf }) {
+  function rememberSend({ id, hostId, projectId, chatId, text, attachments, retryOf }) {
     const stored = JSON.stringify({
       id,
+      hostId,
       projectId,
       chatId,
       text,
@@ -133,10 +137,15 @@ export function mountChat(client, media, slash, memory) {
     }
   }
   /** The request id of a failed turn's Retry comes from the turn, so another tab's click, or this one after a reload, names the same delivery. */
-  async function retryId(projectId, chatId, failedId) {
+  async function retryId(projectId, chatId, failedId, hostId) {
     if (!crypto.subtle) return uuid();
     const hex = [
-      ...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`retry:${projectId}:${chatId}:${failedId}`))),
+      ...new Uint8Array(
+        await crypto.subtle.digest(
+          "SHA-256",
+          new TextEncoder().encode(`retry:${hostId === "local" ? "" : `${hostId}:`}${projectId}:${chatId}:${failedId}`),
+        ),
+      ),
     ]
       .map((byte) => byte.toString(16).padStart(2, "0"))
       .join("");
@@ -148,11 +157,13 @@ export function mountChat(client, media, slash, memory) {
   let unloaded = ""; // the offline host never loaded this chat
   /** Re-reads the selected chat. Coalesces: a call while one is in flight runs once more afterwards. */
   async function loadChat() {
-    if (loading) {
+    const where = `${hostKey()}/${state.projectId}/${state.chatId}`;
+    // A read of another chat or host is never waited for: it is dropped when it returns, and this selection reads on its own.
+    if (loading?.where === where) {
       loading.again = true;
       return loading.promise;
     }
-    const run = { again: false };
+    const run = { again: false, where };
     loading = run;
     run.promise = (async () => {
       try {
@@ -184,7 +195,7 @@ export function mountChat(client, media, slash, memory) {
           }
         } while (run.again);
       } finally {
-        loading = null;
+        if (loading === run) loading = null;
       }
     })();
     return run.promise;
@@ -192,7 +203,7 @@ export function mountChat(client, media, slash, memory) {
   // A draft restored after a refusal, and whatever the owner makes of it, belongs to the chat it was sent from: the composer gives it up when another
   // chat opens and takes it back when its chat returns. An edit makes it a different message than the failed bubble's, so that bubble gets its own Retry.
   const drafts = new Map(); // "project/chat" → { text, original, sendId }: restored drafts, and what the owner made of them
-  const draftKey = (projectId = state.projectId, chatId = state.chatId) => `${projectId}/${chatId}`;
+  const draftKey = (projectId = state.projectId, chatId = state.chatId, hostId = hostKey()) => `${hostId}/${projectId}/${chatId}`;
   let composerKey = null; // the chat whose draft the composer shows
   const forgetRestored = (sendId) => {
     const send = pendingSends.find((item) => item.id === sendId);
@@ -350,7 +361,7 @@ export function mountChat(client, media, slash, memory) {
       renderLive();
     });
   }
-  const inCurrentChat = (send) => send.projectId === state.projectId && send.chatId === state.chatId;
+  const inCurrentChat = (send) => send.hostId === hostKey() && send.projectId === state.projectId && send.chatId === state.chatId;
   /** Settles the pending sends of the open chat against transcript read number `read`. Only the host's own records count: a job it admitted is
    * delivered, and the transcript entry the runtime linked to that job is the message. A record the host never admitted, or a text that merely
    * looks alike, proves nothing, and only a read after a refusal without any record proves the refusal. */
@@ -375,7 +386,7 @@ export function mountChat(client, media, slash, memory) {
     if (inCurrentChat(send) && !input.value) {
       input.value = send.text;
       send.restored = true;
-      composerKey = draftKey(send.projectId, send.chatId);
+      composerKey = draftKey(send.projectId, send.chatId, send.hostId);
       drafts.set(composerKey, { text: send.text, original: send.text, sendId: send.id });
       grow();
     }
@@ -420,7 +431,9 @@ export function mountChat(client, media, slash, memory) {
     renderFeed();
     let job;
     try {
-      job = await client.call("message", {
+      const owner = clientOf(send.hostId);
+      if (!owner) throw new HostError("This message belongs to a host that is no longer on this page.", 0, true, false);
+      job = await owner.call("message", {
         id: send.projectId,
         text: send.text,
         requestId: send.id,
@@ -929,6 +942,7 @@ export function mountChat(client, media, slash, memory) {
     }
     const send = {
       id: uuid(),
+      hostId: hostKey(),
       projectId: state.projectId,
       chatId: state.chatId,
       text,
@@ -1091,14 +1105,14 @@ export function mountChat(client, media, slash, memory) {
       if (!send) return;
       if (pendingDismiss) {
         pendingSends.splice(pendingSends.indexOf(send), 1);
-        const held = drafts.get(draftKey(send.projectId, send.chatId));
+        const held = drafts.get(draftKey(send.projectId, send.chatId, send.hostId));
         // Only a draft the owner has not touched goes with its bubble; an edited one is a new, unsent message.
         if (held?.sendId === send.id && held.text === held.original) {
           if (input.value === held.text) {
             input.value = "";
             grow();
           }
-          drafts.delete(draftKey(send.projectId, send.chatId));
+          drafts.delete(draftKey(send.projectId, send.chatId, send.hostId));
         }
       }
       follow.follow();
@@ -1112,13 +1126,17 @@ export function mountChat(client, media, slash, memory) {
       const failed = (state.view?.jobs ?? []).find((item) => item.id === retry.dataset.retryJob);
       if (!failed || retry.disabled) return;
       retry.disabled = true; // a second click must not resend
-      const { projectId, chatId } = state; // the recipient is the chat the failed turn is in, whatever the owner opens meanwhile
+      const { projectId, chatId } = state,
+        hostId = hostKey(); // the recipient is the chat the failed turn is in, whatever the owner opens meanwhile
       // One failed turn is one delivery: a click after a lost ack reuses the pending send, and its request id, instead of starting another.
-      let send = pendingSends.find((item) => item.retryOf === failed.id && item.projectId === projectId && item.chatId === chatId);
+      let send = pendingSends.find(
+        (item) => item.retryOf === failed.id && item.hostId === hostId && item.projectId === projectId && item.chatId === chatId,
+      );
       if (!send) {
         send = {
-          id: await retryId(projectId, chatId, failed.id),
+          id: await retryId(projectId, chatId, failed.id, hostId),
           retryOf: failed.id,
+          hostId,
           projectId,
           chatId,
           text: failed.text,
