@@ -327,3 +327,10 @@ Actions across hosts; browser or Web Push notifications in the multi-host inbox;
 ## Out of scope
 
 Native iOS app; Telegram changes; pairing approval from an existing device; running the relay on a VPS; protecting against an actively malicious relay serving a modified bootstrap (detected, not prevented).
+
+### Multi-host inbox, stage 4: input is never lost (fourth review)
+
+- A tab writes or deletes a stored draft only after it changed that draft itself; an idle tab only shows it. A draft is deleted only for an authoritative reason: the send succeeded in this tab, the owner cleared the field in this tab, a confirmed archive or delete, Forget host or revocation. A chat list from the offline copy never deletes a draft.
+- A form with unsaved input is never redrawn by a reconnect or a late read: every Settings section and every focus view marks its root dirty on `input` (search fields and switches excluded) until it is saved or left, and the live read only renews the data behind it. Every focus switch invalidates the earlier renders.
+- A read interrupted by a drop settles at once with its copy or an offline error and is never sent again. A PR review opened online is saved under its read-only key, so the offline open finds it. A chat counts as fresh only when it was read live in the current connection period.
+- The order of reads, saves and wipes is one counter per host in IndexedDB, advanced in the transaction that starts a read, saves or wipes, so tabs agree on it.

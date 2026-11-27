@@ -303,7 +303,7 @@ try {
         const kept = await pageA.evaluate(`(async () => {
           const m = await import('/host-cache.js');
           const cache = m.hostCache('xtab2');
-          if (!cache.begin) return 'newer';
+          if (!cache.begin) throw Error('no shared counter: reads are ordered by a tab-local clock');
           window.__older = await cache.begin();
           window.__cache2 = cache;
           return null;
