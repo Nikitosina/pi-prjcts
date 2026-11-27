@@ -25,8 +25,10 @@ const loads = new Map(); // group → its list read in flight
 export const remoteGroups = () => groups.length > 1;
 export const groupOf = (client) => groups.find((group) => group.client === client) ?? null;
 export const online = (group) => group.state === HostState.Online;
-export function hostOf(projectId) {
-  return groups.find((group) => group.projects.some((item) => item.id === projectId))?.client ?? null;
+/** The host listing a project; with a copied home two hosts may list one id, so `preferred` wins when it lists it. */
+export function hostOf(projectId, preferred = null) {
+  const lists = (group) => group.projects.some((item) => item.id === projectId);
+  return (groups.find((group) => group.client === preferred && lists(group)) ?? groups.find(lists))?.client ?? null;
 }
 /** Host frames of `/changes?project=host` other than the list and approval topics the groups follow themselves. */
 export function onHostFrame(handler) {
@@ -148,7 +150,7 @@ export function startHosts(entries) {
 }
 
 function routed(id) {
-  return (typeof id === "string" && hostOf(id)) || state.host || localHost;
+  return (typeof id === "string" && hostOf(id, state.host)) || state.host || localHost;
 }
 const pathProject = (path) =>
   new URL(path, location.origin).searchParams.get("project") ?? /^\/artifacts\/([^/]+)\//.exec(path)?.[1] ?? undefined;

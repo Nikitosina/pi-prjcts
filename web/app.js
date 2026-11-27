@@ -62,7 +62,7 @@ const plugins = mountPlugins(client);
 mountSidebar(client);
 const review = mountReview(client);
 const workers = mountWorkers(client, chat, media);
-const prompts = mountPrompts(client);
+const prompts = mountPrompts(client, admin);
 const settings = mountSettings(admin, client, ui, statusline, prompts, limits, plugins);
 const hostagent = mountHostagent(admin, chat, media);
 const palette = mountPalette(client);
@@ -100,8 +100,8 @@ let changes = null;
 
 // ---------------------------------------------------------------------------------------------------------------- selection
 
-async function select(projectId, chatId = "main", { keepFocus = false } = {}) {
-  const host = hostOf(projectId);
+async function select(projectId, chatId = "main", { keepFocus = false, host: preferred = null } = {}) {
+  const host = hostOf(projectId, preferred ?? state.host);
   if (!projectId || !host) return;
   const sameProject = projectId === state.projectId && host === state.host;
   if (sameProject && chatId === state.chatId && state.view) {
@@ -154,7 +154,15 @@ on("host-online", (group) => {
 // A forgotten host leaves the page: its selected project gives way to the first project still listed.
 on("hosts", () => {
   document.querySelector(".list-head").hidden = remoteGroups();
-  if (state.projectId && !hostOf(state.projectId) && state.projects[0]) void select(state.projects[0].id, "main");
+  if (state.projectId && !hostOf(state.projectId, state.host)) {
+    if (state.projects[0]) void select(state.projects[0].id, "main");
+    else {
+      const url = new URL(location.href);
+      url.searchParams.delete("project");
+      url.searchParams.delete("chat");
+      location.replace(url);
+    }
+  }
   paintCrumbs();
   paintPill();
 });
@@ -561,7 +569,7 @@ async function start() {
   } catch (error) {
     return signIn(error.status === 401 ? "This link's token is no longer valid. Copy the current inbox link." : error.message);
   }
-  await loadUi();
+  void loadUi(); // a remote Settings host may be slow; the local sidebar must not wait for it
   onHostFrame(adminFrame);
   const remotes = startHosts(await savedHosts());
   await loadProjects(groups[0]);
@@ -584,13 +592,13 @@ async function start() {
   setInterval(() => void loadAllProjects(), 15000);
 }
 // A Decision inbox question opens in its own chat on its own host, with its answer field focused.
-on("open-question", async ({ projectId, entry }) => {
+on("open-question", async ({ projectId, host, entry }) => {
   app.dataset.sheet = "";
-  await select(projectId, state.projectId === projectId ? state.chatId : "main");
-  if (state.projectId !== projectId) return;
+  await select(projectId, state.projectId === projectId && state.host === host ? state.chatId : "main", { host });
+  if (state.projectId !== projectId || state.host !== host) return;
   const item = entry ? state.view?.inbox?.find((candidate) => candidate.id === entry) : null;
   const chatId = item ? (questionChat(item)?.id ?? "main") : state.chatId;
-  if (chatId !== state.chatId) await select(projectId, chatId);
+  if (chatId !== state.chatId) await select(projectId, chatId, { host });
   document.querySelector(entry ? `#questions [data-entry="${CSS.escape(entry)}"] textarea` : "#questions textarea")?.focus();
 });
 on("host-menu", openHostMenu);

@@ -88,7 +88,7 @@ export function mountDecisions() {
     const button = event.target.closest("[data-decide]");
     if (button) return void decide(group, row.dataset.approval, button.dataset.decide);
     if (row.dataset.decisionProject)
-      emit("open-question", { projectId: row.dataset.decisionProject, entry: row.dataset.decisionEntry ?? null });
+      emit("open-question", { projectId: row.dataset.decisionProject, host: group.client, entry: row.dataset.decisionEntry ?? null });
   });
   on("projects", render);
   on("hosts", render);
