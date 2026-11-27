@@ -17,7 +17,6 @@
           <span aria-hidden="true">☰</span><kbd data-hint="toggle-list"></kbd>
         </button>
         <a id="remote-hosts" class="ghost-btn small" href="/" hidden></a>
-        <span id="inbox-host" hidden></span><span id="host-connection" role="status" hidden></span>
         <div class="crumbs" id="crumbs" aria-live="polite"></div>
         <button type="button" id="status-pill" class="pill" data-cmd="status-jump" aria-label="Status">
           <span class="dot" aria-hidden="true"></span><span class="pill-text">idle</span>
@@ -41,6 +40,7 @@
         <div class="list-head">
           <button type="button" class="new-btn" data-cmd="new-project"><span aria-hidden="true">＋</span> New project</button>
         </div>
+        <section id="decisions" aria-labelledby="decisions-h" hidden></section>
         <div id="tree" role="tree" aria-label="Projects"></div>
       </nav>
       <main id="center" data-focus="chat" aria-label="Focus">

@@ -1,9 +1,11 @@
 // Left list: projects with their chats and a Memory node nested in one tree. Status dot per row (idle, working, needs you),
 // an unread mark when a chat finished after the owner last looked, and a question count badge. Chats other than Main archive from
-// their row's button or Mod+Shift+E after a confirmation, with Undo.
+// their row's button or Mod+Shift+E after a confirmation, with Undo. With remote hosts the projects sit in one group per host
+// (web/hosts.js): the local host first; a host that is not online collapses to its header row.
 import { esc, clip } from "./format.js";
 import { binding, display, onBindingsChange } from "./hotkeys.js";
-import { emit, fail, stale, state, toast } from "./state.js";
+import { emit, fail, on, stale, state, toast } from "./state.js";
+import { groups, HostState, online, remoteGroups } from "./hosts.js";
 
 export function mountTree(client) {
   const tree = document.querySelector("#tree");
@@ -13,24 +15,16 @@ export function mountTree(client) {
   const archiveTitle = () => `Archive chat${binding("archive-chat") ? ` (${display(binding("archive-chat"))})` : ""}`;
   const chatsByProject = new Map(); // project id -> [{ id, title }] from the last `show` of that project
   const open = new Set();
-  const SEEN = client.storagePrefix + "pi-ui2-seen";
+  const closedHosts = new Set(); // group keys the owner folded
+  const SEEN = "pi-ui2-seen";
   let seen = {};
   try {
     seen = JSON.parse(localStorage.getItem(SEEN) || "{}") || {};
-    for (const [id, chats] of Object.entries(JSON.parse(localStorage.getItem(client.storagePrefix + "pi-ui2-chats") || "{}") || {}))
-      chatsByProject.set(id, chats);
+    for (const [id, chats] of Object.entries(JSON.parse(localStorage.getItem("pi-ui2-chats") || "{}") || {})) chatsByProject.set(id, chats);
   } catch {}
+  on("projects", () => renderTree());
+  on("hosts", () => renderTree());
 
-  async function loadProjects() {
-    try {
-      const projects = await client.call("list");
-      state.projects = projects.filter((item) => !item.archived && !item.deleted);
-      renderTree();
-      emit("projects", state.projects);
-    } catch (error) {
-      fail(error);
-    }
-  }
   function rememberChats(projectId, chats) {
     storeChats(
       projectId,
@@ -40,7 +34,7 @@ export function mountTree(client) {
   function storeChats(projectId, chats) {
     chatsByProject.set(projectId, chats);
     try {
-      localStorage.setItem(client.storagePrefix + "pi-ui2-chats", JSON.stringify(Object.fromEntries(chatsByProject)));
+      localStorage.setItem("pi-ui2-chats", JSON.stringify(Object.fromEntries(chatsByProject)));
     } catch {}
   }
   function markSeen(projectId, chatId) {
@@ -59,18 +53,8 @@ export function mountTree(client) {
     if (activity?.paused) return `<span class="dot paused" aria-label="paused"></span>`;
     return `<span class="dot idle" aria-hidden="true"></span>`;
   }
-  function renderTree() {
-    open.add(state.projectId);
-    // Redraws replace every row: keep keyboard focus on the same row, found by its data attributes.
-    const active = document.activeElement,
-      focused =
-        active instanceof HTMLElement && tree.contains(active)
-          ? [...active.attributes]
-              .filter((item) => item.name.startsWith("data-"))
-              .map((item) => `[${item.name}="${CSS.escape(item.value)}"]`)
-              .join("")
-          : "";
-    tree.innerHTML = state.projects
+  function projectRows(projects) {
+    return projects
       .map((project) => {
         const selected = project.id === state.projectId,
           expanded = open.has(project.id);
@@ -100,7 +84,45 @@ export function mountTree(client) {
         return `<div class="tree-project${selected ? " selected" : ""}" role="group"><button type="button" role="treeitem" aria-expanded="${expanded}" class="tree-head" data-project="${esc(project.id)}"><span class="chev" aria-hidden="true">${expanded ? "▾" : "▸"}</span>${dot(project.activity)}<span class="name">${esc(project.name)}</span>${questions ? `<span class="count needs" aria-label="${esc(questions)} questions">${esc(questions)}</span>` : ""}</button>${rows ? `<div class="tree-children">${rows}</div>` : ""}</div>`;
       })
       .join("");
-    if (!state.projects.length) tree.innerHTML = `<p class="muted small empty-line">No projects yet.</p>`;
+  }
+  const STATE_LABEL = {
+    [HostState.Connecting]: "connecting…",
+    [HostState.Online]: "online",
+    [HostState.Offline]: "offline",
+    [HostState.NeedsUpdate]: "needs update",
+    [HostState.Revoked]: "revoked",
+    [HostState.NotPaired]: "not paired",
+  };
+  /** One host: a header (fold, name, state, menu), then its projects while it is online and unfolded. */
+  function groupHtml(group) {
+    const up = online(group),
+      folded = closedHosts.has(group.key),
+      label = STATE_LABEL[group.state] ?? group.state;
+    const toggle = up
+      ? `<button type="button" class="host-toggle" data-host-toggle="${esc(group.key)}" aria-expanded="${!folded}"><span class="chev" aria-hidden="true">${folded ? "▸" : "▾"}</span><span class="host-name">${esc(group.name)}</span></button>`
+      : `<span class="host-toggle static"><span class="chev" aria-hidden="true"></span><span class="host-name">${esc(group.name)}</span></span>`;
+    const status = group.entry
+      ? `<span class="host-state" data-tone="${up ? "online" : group.state === HostState.Connecting ? "wait" : "off"}">${esc(label)}</span>`
+      : "";
+    const rows =
+      up && !folded ? (group.projects.length ? projectRows(group.projects) : `<p class="muted small empty-line">No projects yet.</p>`) : "";
+    return `<div class="host-group" role="group" aria-label="${esc(group.name)}${group.entry ? ` · ${esc(label)}` : ""}" data-host-group="${esc(group.key)}" data-state="${esc(group.state)}"><div class="host-head">${toggle}${status}<button type="button" class="host-menu-btn" data-host-menu="${esc(group.key)}" aria-label="${esc(group.name)} actions" aria-haspopup="menu" title="Host actions">⋯</button></div>${rows}</div>`;
+  }
+  function renderTree() {
+    open.add(state.projectId);
+    // Redraws replace every row: keep keyboard focus on the same row, found by its data attributes.
+    const active = document.activeElement,
+      focused =
+        active instanceof HTMLElement && tree.contains(active)
+          ? [...active.attributes]
+              .filter((item) => item.name.startsWith("data-"))
+              .map((item) => `[${item.name}="${CSS.escape(item.value)}"]`)
+              .join("")
+          : "";
+    if (!remoteGroups()) {
+      const projects = groups[0].projects;
+      tree.innerHTML = projects.length ? projectRows(projects) : `<p class="muted small empty-line">No projects yet.</p>`;
+    } else tree.innerHTML = groups.map(groupHtml).join("");
     if (focused) tree.querySelector(focused)?.focus({ preventScroll: true });
   }
   onBindingsChange(() => {
@@ -188,6 +210,18 @@ export function mountTree(client) {
   tree.addEventListener("click", async (event) => {
     const archiveButton = event.target.closest("[data-archive-chat]");
     if (archiveButton) return requestArchive(archiveButton.dataset.projectId, archiveButton.dataset.archiveChat);
+    const fold = event.target.closest("[data-host-toggle]");
+    if (fold) {
+      const key = fold.dataset.hostToggle;
+      closedHosts.has(key) ? closedHosts.delete(key) : closedHosts.add(key);
+      return renderTree();
+    }
+    const menu = event.target.closest("[data-host-menu]");
+    if (menu) {
+      const group = groups.find((item) => item.key === menu.dataset.hostMenu);
+      if (group) emit("host-menu", { group, button: menu });
+      return;
+    }
     const head = event.target.closest("[data-project]");
     if (head) {
       const id = head.dataset.project;
@@ -221,7 +255,7 @@ export function mountTree(client) {
   // Arrow keys move through the tree like a list.
   tree.addEventListener("keydown", (event) => {
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-    const items = [...tree.querySelectorAll("button:not(.tree-archive)")],
+    const items = [...tree.querySelectorAll("button:not(.tree-archive, .host-menu-btn)")],
       from = document.activeElement?.classList.contains("tree-archive")
         ? document.activeElement.previousElementSibling
         : document.activeElement,
@@ -231,5 +265,5 @@ export function mountTree(client) {
     items[Math.max(0, Math.min(items.length - 1, index + (event.key === "ArrowDown" ? 1 : -1)))].focus();
   });
 
-  return { loadProjects, rememberChats, markSeen, visibleChats, renderTree, archiveDialogOpen, closeArchiveDialog, requestArchive };
+  return { rememberChats, markSeen, visibleChats, renderTree, archiveDialogOpen, closeArchiveDialog, requestArchive };
 }

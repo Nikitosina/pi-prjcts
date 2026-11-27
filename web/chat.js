@@ -26,8 +26,8 @@ export function mountChat(client, media, slash, memory) {
   const pendingSends = []; // owner messages sent from this page that the transcript does not show yet, oldest first
   // The recovery handle of an unsettled send survives a reload: its id, project, chat and exact text, so Retry sends the same message under the same id.
   // One storage key per attempt, so tabs never overwrite each other's handles.
-  const HANDLE_PREFIX = client.storagePrefix + "pi-pending-send:",
-    LEGACY_HANDLES = client.storagePrefix + "pi-pending-sends";
+  const HANDLE_PREFIX = "pi-pending-send:",
+    LEGACY_HANDLES = "pi-pending-sends";
   const savedHandles = new Map(); // attempt id → the stored text of its handle
   function loadHandles() {
     const found = [];
@@ -838,7 +838,9 @@ export function mountChat(client, media, slash, memory) {
   async function answer(entry, text) {
     const gen = state.generation;
     try {
-      await client.call("answer", { id: state.projectId, entry, text });
+      const projectId = state.projectId;
+      await client.call("answer", { id: projectId, entry, text });
+      emit("answered", { projectId });
       if (stale(gen)) return;
       toast("Answer sent.");
       void loadChat();
@@ -1179,6 +1181,7 @@ export function mountChat(client, media, slash, memory) {
     thinkingHtml,
     toolRowHtml,
     currentChat,
+    questionChat,
     stopTurn,
     toggleSteer,
     transcriptFocus,

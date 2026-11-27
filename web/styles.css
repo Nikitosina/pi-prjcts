@@ -603,6 +603,188 @@ a {
   padding: 6px 4px;
   margin: 0;
 }
+.host-group + .host-group {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+.host-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding-right: 2px;
+}
+.host-toggle {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 0 8px;
+  border-radius: var(--r-s);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  text-align: left;
+}
+button.host-toggle:hover {
+  background: var(--raised);
+  color: var(--text);
+}
+.host-toggle .chev {
+  width: 10px;
+  color: var(--faint);
+  font-size: 10px;
+}
+.host-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.host-state {
+  flex: none;
+  font: 11px/1 var(--mono);
+  padding: 3px 6px;
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--raised);
+}
+.host-state[data-tone="online"] {
+  color: var(--ready);
+  background: color-mix(in srgb, var(--ready) 15%, transparent);
+}
+.host-state[data-tone="off"] {
+  color: var(--needs);
+  background: color-mix(in srgb, var(--needs) 15%, transparent);
+}
+.host-menu-btn {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--r-s);
+  color: var(--muted);
+}
+.host-menu-btn:hover {
+  background: var(--raised);
+  color: var(--text);
+}
+.host-menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 160px;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-s);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.3);
+}
+.host-menu button {
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: var(--r-s);
+  text-align: left;
+  color: var(--text);
+  font-size: 13px;
+}
+.host-menu button:hover,
+.host-menu button:focus-visible {
+  background: var(--raised);
+}
+.host-menu button.danger {
+  background: none;
+  border: 0;
+  color: var(--needs);
+}
+.host-menu button.danger:hover,
+.host-menu button.danger:focus-visible {
+  background: var(--raised);
+}
+#decisions {
+  max-height: 40%;
+  overflow: auto;
+  padding: 4px 6px 8px;
+  border-bottom: 1px solid var(--line);
+}
+#decisions .list-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 8px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.decision {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  margin-bottom: 4px;
+  border-radius: var(--r-s);
+  border: 1px solid var(--line);
+  text-align: left;
+  color: var(--text);
+  font-size: 13px;
+}
+button.decision:hover {
+  background: var(--raised);
+}
+.d-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.d-title {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.d-where {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.d-where .one-line {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.host-tag {
+  flex: none;
+  font: 11px/1 var(--mono);
+  padding: 2px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+}
+.d-actions {
+  display: flex;
+  gap: 6px;
+}
+.crumb-host {
+  color: var(--muted);
+}
+.crumb-host:not([data-state="online"]) {
+  color: var(--needs);
+}
+.host-picker {
+  max-width: 180px;
+  margin-left: 8px;
+  font-size: 12px;
+}
 
 /* ------------------------------------------------------------------------------------------------ chat */
 .view {

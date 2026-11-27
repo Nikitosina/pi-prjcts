@@ -5,7 +5,8 @@ import { ago, clip, esc, oneLine, shortModel, size, tokens, usd } from "./format
 import { bindings, captureNext, conflicts, display, paintHints, DEFAULTS } from "./hotkeys.js";
 import { emit, inline, on, stale, state, toast } from "./state.js";
 
-export function mountSettings(client, ui, statusline, promptView, limits, pluginView) {
+// `client` is the host chosen in the header (host sections); `project` sends project sections to the host of the selected project.
+export function mountSettings(client, project, ui, statusline, promptView, limits, pluginView) {
   const { setUi } = ui;
   const { STATUS_ITEMS } = statusline;
   const { promptSection } = promptView;
@@ -149,14 +150,14 @@ export function mountSettings(client, ui, statusline, promptView, limits, plugin
   const line = (text, more) => `<p class="desc">${esc(text)}${more ? ` ${info(more)}` : ""}</p>`;
 
   async function projectSettings() {
-    return client.call("settings-snapshot", { id: state.projectId });
+    return project.call("settings-snapshot", { id: state.projectId });
   }
   async function update(changes, message) {
     const gen = state.generation,
       id = state.projectId;
     const snap = await projectSettings();
     if (stale(gen)) return null;
-    const result = await client.call("settings-update", { id, confirm: id, expectedRevision: snap.revision, changes });
+    const result = await project.call("settings-update", { id, confirm: id, expectedRevision: snap.revision, changes });
     if (message) say(message);
     emit("settings-changed");
     return result;
@@ -192,7 +193,7 @@ export function mountSettings(client, ui, statusline, promptView, limits, plugin
         return;
       }
       try {
-        await client.call(action, {
+        await project.call(action, {
           id: state.projectId,
           ...(action === "delete" || action === "resume" ? { confirm: state.projectId } : {}),
         });
@@ -239,7 +240,7 @@ ${live.compactionFailure && !live.compacting ? `<details class="compaction-failu
         .querySelector("#auto-compact")
         .addEventListener("change", (event) => save(`Auto-compact ${event.target.checked ? "on" : "off"} · saved`));
       body.querySelector("#compact-now").addEventListener("click", async () => {
-        await client
+        await project
           .call("compact", { id: state.projectId, ...(state.chatId !== "main" ? { chatId: state.chatId } : {}) })
           .then(() => say("Compacting this chat…"), sayFail);
       });
@@ -307,7 +308,7 @@ ${live.compactionFailure && !live.compacting ? `<details class="compaction-failu
   /** profiles-set with the revision it read; a refusal (stale revision, unknown tier, locked tool) is shown and the section re-reads. */
   async function setProfile(revision, patch, label) {
     try {
-      await client.call("profiles-set", { projectId: state.projectId, revision, profile, patch });
+      await project.call("profiles-set", { projectId: state.projectId, revision, profile, patch });
       say(label);
       emit("profiles");
     } catch (error) {
@@ -321,7 +322,7 @@ ${live.compactionFailure && !live.compacting ? `<details class="compaction-failu
     Number.isFinite(item?.inputCost) ? `${perM(item.inputCost)} in ${perM(item.outputCost)} out` : "price unknown";
 
   async function model(body, alive) {
-    const [profiles, tiers] = await Promise.all([client.call("profiles-get", { projectId: state.projectId }), client.call("tiers-get")]);
+    const [profiles, tiers] = await Promise.all([project.call("profiles-get", { projectId: state.projectId }), project.call("tiers-get")]);
     if (!alive()) return;
     const current = profiles.profiles[profile];
     const thinking = current.thinking ?? "medium";
@@ -366,7 +367,7 @@ ${live.compactionFailure && !live.compacting ? `<details class="compaction-failu
       // profiles-set merges its patch, so leaving a tier writes the whole profile without one through settings-update.
       const { effectiveModel: _, tier: __, ...rest } = current;
       try {
-        await client.call("settings-update", {
+        await project.call("settings-update", {
           id: state.projectId,
           confirm: state.projectId,
           expectedRevision: profiles.revision,
@@ -393,7 +394,7 @@ ${live.compactionFailure && !live.compacting ? `<details class="compaction-failu
   // ---------------------------------------------------------------------------------------------------------------- Tools
 
   async function tools(body, alive) {
-    const result = await client.call("profile-tools", { projectId: state.projectId, profile });
+    const result = await project.call("profile-tools", { projectId: state.projectId, profile });
     if (!alive()) return;
     const { groups } = result;
     let q = "",
@@ -434,7 +435,7 @@ ${live.compactionFailure && !live.compacting ? `<details class="compaction-failu
     body.addEventListener("change", async (event) => {
       const box = event.target.closest("[data-tool-name]");
       if (!box) return;
-      const profiles = await client.call("profiles-get", { projectId: state.projectId }).catch(sayFail);
+      const profiles = await project.call("profiles-get", { projectId: state.projectId }).catch(sayFail);
       if (!profiles || !alive()) return;
       const disabled = new Set(profiles.profiles[profile].tools?.disabled ?? []);
       box.checked ? disabled.delete(box.dataset.toolName) : disabled.add(box.dataset.toolName);
@@ -509,7 +510,7 @@ ${live.compactionFailure && !live.compacting ? `<details class="compaction-failu
       try {
         while (alive()) {
           const statusRequest = () =>
-            client.call("storage-status", refresh ? { id: state.projectId, refresh: true } : { id: state.projectId });
+            project.call("storage-status", refresh ? { id: state.projectId, refresh: true } : { id: state.projectId });
           try {
             status = await statusRequest();
             if (!cleaning && status.cleanup) {
@@ -517,8 +518,9 @@ ${live.compactionFailure && !live.compacting ? `<details class="compaction-failu
               outcome = null;
             }
             if (cleaning) {
-              const [run] = (await client.call("schedule-history", { id: state.projectId, kind: "intents", requestId: cleaning, limit: 1 }))
-                .items;
+              const [run] = (
+                await project.call("schedule-history", { id: state.projectId, kind: "intents", requestId: cleaning, limit: 1 })
+              ).items;
               if (run?.outcome != null) {
                 outcome = { ok: run.outcome === "completed", text: run.summary || run.outcome };
                 cleaning = null;
@@ -563,7 +565,7 @@ ${live.compactionFailure && !live.compacting ? `<details class="compaction-failu
       cleaning = "starting";
       draw();
       try {
-        cleaning = (await client.call("schedule-run", { id: state.projectId, scheduleId: CLEANUP_ID })).requestId;
+        cleaning = (await project.call("schedule-run", { id: state.projectId, scheduleId: CLEANUP_ID })).requestId;
       } catch (error) {
         cleaning = null;
         outcome = { ok: false, text: error.message };
@@ -596,11 +598,11 @@ ${live.compactionFailure && !live.compacting ? `<details class="compaction-failu
       if (force) shown = null; // A newer feed read must also restore a refused switch.
       const ask = ++readId;
       const projectId = state.projectId;
-      const status = await client.call("plugins", projectId ? { id: projectId } : {});
+      const status = await project.call("plugins", projectId ? { id: projectId } : {});
       if (!alive() || ask !== readId) return;
       const signature = pluginsSignature(status, projectId);
       if (signature === shown) return;
-      const catalog = hostCatalog ?? (await client.call("plugin-catalog"));
+      const catalog = hostCatalog ?? (await project.call("plugin-catalog"));
       if (!alive() || ask !== readId) return;
       hostCatalog = catalog;
       shown = signature;
@@ -614,7 +616,7 @@ ${live.compactionFailure && !live.compacting ? `<details class="compaction-failu
       if (!toggle) return;
       const projectId = state.projectId;
       try {
-        await client.call("project-plugin", { id: projectId, plugin: toggle.dataset.pluginToggle, enabled: toggle.checked });
+        await project.call("project-plugin", { id: projectId, plugin: toggle.dataset.pluginToggle, enabled: toggle.checked });
         if (state.projectId === projectId) toast(`${toggle.dataset.pluginToggle} ${toggle.checked ? "on" : "off"} in this project.`);
       } catch (error) {
         if (state.projectId === projectId) sayFail(error);
@@ -671,8 +673,8 @@ ${live.compactionFailure && !live.compacting ? `<details class="compaction-failu
   }
   async function automations(body, alive) {
     const [schedules, auto] = await Promise.all([
-      client.call("schedule-snapshot", { id: state.projectId }),
-      client.call("automation-snapshot", { id: state.projectId }),
+      project.call("schedule-snapshot", { id: state.projectId }),
+      project.call("automation-snapshot", { id: state.projectId }),
     ]);
     if (!alive()) return;
     let editing = null;
@@ -735,9 +737,9 @@ ${live.compactionFailure && !live.compacting ? `<details class="compaction-failu
     };
     draw();
     const apply = async (kind, id, enabled) => {
-      if (kind === "schedule") return client.call("schedule-enable", { id: state.projectId, scheduleId: id, enabled });
+      if (kind === "schedule") return project.call("schedule-enable", { id: state.projectId, scheduleId: id, enabled });
       else
-        return client.call("automation-update", {
+        return project.call("automation-update", {
           id: state.projectId,
           change: kind === "follow" ? { follow: { enabled } } : { webhook: { enabled } },
         });
@@ -785,7 +787,7 @@ ${live.compactionFailure && !live.compacting ? `<details class="compaction-failu
           ...(cadence ? { everyMs: cadence } : {}),
         };
       try {
-        const saved = await client.call("schedule-update", patch);
+        const saved = await project.call("schedule-update", patch);
         Object.assign(record, saved);
         editing = null;
         say("Schedule saved.");
@@ -811,7 +813,7 @@ ${live.compactionFailure && !live.compacting ? `<details class="compaction-failu
       if (run && record) {
         run.disabled = true;
         try {
-          await client.call("schedule-run", { id: state.projectId, scheduleId: record.id });
+          await project.call("schedule-run", { id: state.projectId, scheduleId: record.id });
           record.lastRunAt = new Date().toISOString();
           say("Schedule ran. History updated.");
           if (alive()) draw();
@@ -830,7 +832,7 @@ ${live.compactionFailure && !live.compacting ? `<details class="compaction-failu
         }
         remove.disabled = true;
         try {
-          await client.call("schedule-delete", { id: state.projectId, scheduleId: record.id, revision: record.revision });
+          await project.call("schedule-delete", { id: state.projectId, scheduleId: record.id, revision: record.revision });
           schedules.schedules = schedules.schedules.filter((item) => item.id !== record.id);
           editing = null;
           draw();
@@ -839,7 +841,7 @@ ${live.compactionFailure && !live.compacting ? `<details class="compaction-failu
             ms: 10000,
             onAction: async () => {
               try {
-                const restored = await client.call("schedule-restore", { id: state.projectId, scheduleId: record.id });
+                const restored = await project.call("schedule-restore", { id: state.projectId, scheduleId: record.id });
                 schedules.schedules.push(restored);
                 if (alive()) {
                   say("Schedule restored.");
@@ -857,7 +859,7 @@ ${live.compactionFailure && !live.compacting ? `<details class="compaction-failu
         return;
       }
       if (!event.target.closest("[data-history]")) return;
-      const history = await client.call("schedule-history", { id: state.projectId, kind: "intents", limit: 10 }).catch(sayFail);
+      const history = await project.call("schedule-history", { id: state.projectId, kind: "intents", limit: 10 }).catch(sayFail);
       if (!history || !alive()) return;
       say(`${history.items?.length ?? history.total ?? 0} recent runs. Full history in the CLI for now.`);
     });

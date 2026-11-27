@@ -1,4 +1,6 @@
-import { localHost, pairingEntry, remoteHost, forgetHost } from "./api.js";
+import { localHost, pairingEntry, remoteHost } from "./api.js";
+import { forgetGroup } from "./hosts.js";
+import { fail } from "./state.js";
 
 const inbox = () => location.hostname === "127.0.0.1";
 export async function hostForPage() {
@@ -11,41 +13,92 @@ export async function hostForPage() {
   }
   return remoteHost(entry);
 }
-function inboxUrl(host, view = "projects") {
-  const url = new URL("/", location.origin);
-  url.searchParams.set("host", host.hostId);
-  url.searchParams.set("panel", view);
+/** Remote hosts saved in the local home; none outside the local inbox (the relay PWA serves one host). */
+export async function savedHosts() {
+  if (!inbox()) return [];
+  return localHost.call("inbox-hosts").catch((error) => (console.warn(error), []));
+}
+/** The page with Settings or the Host agent (`view`) opened for `host`; the selected project and chat stay. */
+function adminUrl(host, view) {
+  const url = new URL(location.href);
+  host?.hostId ? url.searchParams.set("host", host.hostId) : url.searchParams.delete("host");
+  view ? url.searchParams.set("panel", view) : url.searchParams.delete("panel");
   return url;
 }
-export async function hostSwitcher(container, selected = localHost, view = "projects") {
+/** The host chosen for Settings and the Host agent, in their own header. Switching reloads the page for that host. */
+export async function hostSwitcher(container, selected = localHost, view = "settings") {
   if (!inbox()) return;
   const entries = await localHost.call("inbox-hosts");
   if (!entries.length || !container.isConnected) return;
   const picker = document.createElement("select");
+  picker.className = "host-picker";
   picker.setAttribute("aria-label", "Host");
   picker.append(new Option("This machine", ""));
   for (const entry of entries) picker.append(new Option(entry.name, entry.hostId, false, entry.hostId === selected.hostId));
-  picker.onchange = () => {
-    const host = entries.find((e) => e.hostId === picker.value);
-    location.assign(host ? inboxUrl(host, view) : `/?panel=${view}`);
-  };
+  picker.onchange = () =>
+    location.assign(
+      adminUrl(
+        entries.find((e) => e.hostId === picker.value),
+        view,
+      ),
+    );
   container.hidden = false;
   container.replaceChildren(picker);
-  if (!selected.local) {
-    const forget = document.createElement("button");
-    forget.type = "button";
-    forget.textContent = "Forget host";
-    forget.onclick = async () => {
-      if (!confirm(`Forget ${selected.name} on this machine?`)) return;
-      try {
-        await forgetHost(selected.hostId);
-        location.assign("/");
-      } catch (error) {
-        forget.textContent = error.message;
-      }
-    };
-    container.append(forget);
-  }
+}
+
+let menu = null;
+export const hostMenuOpen = () => !!menu;
+export function closeHostMenu() {
+  menu?.remove();
+  menu = null;
+  removeEventListener("pointerdown", outside, true);
+}
+function outside(event) {
+  if (!menu?.contains(event.target) && !event.target.closest?.("[data-host-menu]")) closeHostMenu();
+}
+/** A host group's menu in the sidebar: its Settings and Host agent, and Forget host for a remote host. */
+export function openHostMenu({ group, button }) {
+  const again = menu?.dataset.for === group.key;
+  closeHostMenu();
+  if (again) return;
+  menu = document.createElement("div");
+  menu.className = "host-menu";
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", `${group.name} actions`);
+  menu.dataset.for = group.key;
+  const item = (label, run, danger = false) => {
+    const node = document.createElement("button");
+    node.type = "button";
+    node.setAttribute("role", "menuitem");
+    node.textContent = label;
+    if (danger) node.className = "danger";
+    node.onclick = run;
+    menu.append(node);
+  };
+  const host = group.entry ? { hostId: group.entry.hostId } : null;
+  item("Settings", () => location.assign(adminUrl(host, "settings")));
+  item("Host agent", () => location.assign(adminUrl(host, "agent")));
+  if (group.entry)
+    item(
+      "Forget host…",
+      async () => {
+        closeHostMenu();
+        if (!confirm(`Forget ${group.name} on this machine?`)) return;
+        try {
+          await forgetGroup(group);
+          if (new URL(location.href).searchParams.get("host") === group.entry.hostId) location.assign(adminUrl(null));
+        } catch (error) {
+          fail(error);
+        }
+      },
+      true,
+    );
+  document.body.append(menu);
+  const rect = button.getBoundingClientRect();
+  menu.style.top = `${Math.min(innerHeight - menu.offsetHeight - 8, rect.bottom + 4)}px`;
+  menu.style.left = `${Math.max(8, Math.min(innerWidth - menu.offsetWidth - 8, rect.right - menu.offsetWidth))}px`;
+  addEventListener("pointerdown", outside, true);
+  menu.querySelector("button").focus();
 }
 export function addHostControl(container) {
   if (!inbox()) return;
@@ -113,7 +166,7 @@ export function addHostControl(container) {
           }
         }
       });
-      location.assign(inboxUrl(entry));
+      location.assign(adminUrl(null));
     } catch (problem) {
       error.textContent = problem.message;
     } finally {
