@@ -105,3 +105,14 @@ Review repairs of stage 4
 57. The size limit counts string length, not bytes, and leaves out the keys. It counts the UTF-8 bytes of the stored text and of the keys in both stores.
 58. A control rendered in the transcript feed (a failed turn's Retry, starters, undo) stays enabled while the host is offline and starts the send flow. Every control of the feed that writes is disabled with the reason.
 59. The banner's time is the time of another read than the one on screen (a Memory document shows the time of the memory list). The banner shows the time of the read that is displayed.
+
+Second review of stage 4
+60. A reconnect replaces a view that has unsaved input: the Memory editor shows "Loading…" and the typed text is lost. A view with a draft (a Memory edit, a review comment, a worker message) is not replaced by the refresh when the host is back; its draft stays and it is usable again.
+61. Revoking, un-pairing or "needs update" of the host of Settings and the Host agent leaves the panel on screen with the old data and enabled controls. Like Forget, those states return the page to the local host.
+62. A wipe on a page whose database does not exist yet writes no tombstone, so another tab's first in-flight save lands after it. A wipe always writes the tombstone, and the database never blocks its own deletion (`versionchange` closes it).
+63. The offline marker and "data from" time belong to an action, not to the answer on screen: a losing live read of another chat can turn a cached chat live, or give it another chat's time. Origin (live or a copy) and time belong to the answer object itself (`provenance`); a view is live only when the data it rendered came from a live read.
+64. A chat read that never gets an answer (an uncached chat in flight when the host dropped) holds up every later selection, even of a cached chat or a local one. A selection of another chat or host never waits for another read.
+65. A write flow that first awaits a read (Archive's check that the chat is idle) runs its write after a reconnect, replayed from a read that was stuck. A read that gates a write (`live`) never answers from a copy, and fails at once when the host goes offline, so the write never runs.
+66. Pending sends, their saved recovery handles and restored drafts are keyed by project and chat only: a failed send of one host shows under another host's chat with the same ids, and Retry goes through the selected host. They carry the host ID, are shown only in that host's chat, and Retry goes to the host that owns the message.
+67. A slower, older answer of one read replaces a newer saved answer of the same read. A save keeps the newest read.
+68. A page with no remote hosts installs the offline banner and a mutation observer. Neither exists until a remote host or a remote Settings host does.
