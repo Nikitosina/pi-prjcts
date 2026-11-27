@@ -201,7 +201,7 @@ const isRead = (action, input) =>
 const uncached = new Set(["approvals-list"]);
 // Offline, only the saved reads answer; a remote host in any other state (revoked, needs update, forgotten) answers nothing.
 const SAVING = new Set(["online", "offline"]);
-function hostClient(transport) {
+export function hostClient(transport) {
   const run = transport.run ?? ((_read, _signal, work) => work(transport.authorizedFetch));
   const cache = transport.local ? null : hostCache(transport.hostId);
   /** Where each answer handed out came from: `{ at, live }`, the time it was read and whether that read was live or a copy from the cache.
