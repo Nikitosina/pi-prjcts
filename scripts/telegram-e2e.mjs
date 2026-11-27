@@ -1035,7 +1035,9 @@ try {
   );
   assert.equal(threadOf("Alpha · Three again"), threeThread, "68 the topic is reused after restore");
   assert.equal((await rpc({ action: "telegram-snapshot" })).deliveryErrors.length, errorsBefore, "68 no archive call fails");
-  result.checks.push("T68 renaming a chat renames its topic; archiving prefixes it with 📦 (kept on rename), restoring removes it; no close or reopen");
+  result.checks.push(
+    "T68 renaming a chat renames its topic; archiving prefixes it with 📦 (kept on rename), restoring removes it; no close or reopen",
+  );
 
   // T67: topics turned off again, or another bot: no thread ids.
   tg.topics = false;
