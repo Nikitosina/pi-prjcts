@@ -322,6 +322,9 @@ export function startTelegram(options: {
     const chatId = body instanceof FormData ? body.get("chat_id") : body.chat_id;
     let response: Response;
     try {
+      // The recipient is checked at the request itself, so no await before it can leave a former owner as the target.
+      if (chatId != null && String(chatId) !== String(state.owner?.chatId))
+        throw new TelegramRequestNotSentError("Telegram recipient changed");
       response = await fetch(`${base}/bot${token}/${method}`, {
         method: "POST",
         ...(body instanceof FormData ? { body } : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
@@ -390,7 +393,7 @@ export function startTelegram(options: {
   const creationId = (ref: TopicRef) => `${state.bot?.id}:${state.owner?.chatId}:${topicKey(ref)}`;
   /** The topic name for a chat's current title and archived state; the given title is used when the chat is not found. */
   const topicNameOf =
-    (ref: TopicRef, fallbackProject: string, fallbackTitle: string): TopicName =>
+    (ref: TopicRef, fallbackProject: string, fallbackTitle: string, fallbackArchived = false): TopicName =>
     async () => {
       const chat = await options
         .chats(ref.projectId)
@@ -400,14 +403,15 @@ export function startTelegram(options: {
       try {
         project = loadProject(ref.projectId).name;
       } catch {}
-      return `${chat?.archived ? ARCHIVED_PREFIX : ""}${topicLabel(project, chat?.title ?? fallbackTitle)}`;
+      return `${(chat?.archived ?? fallbackArchived) ? ARCHIVED_PREFIX : ""}${topicLabel(project, chat?.title ?? fallbackTitle)}`;
     };
   async function createTopic(id: string, ref: TopicRef, name: TopicName): Promise<number | undefined> {
     const owner = state.owner!.chatId,
       bot = state.bot?.id;
     try {
-      const label = clip((await name()).trim() || "Main", TOPIC_NAME_MAX),
-        created = await call<{ message_thread_id?: number }>("createForumTopic", { chat_id: owner, name: label }),
+      const label = clip((await name()).trim() || "Main", TOPIC_NAME_MAX);
+      if (state.owner?.chatId !== owner || state.bot?.id !== bot) return undefined;
+      const created = await call<{ message_thread_id?: number }>("createForumTopic", { chat_id: owner, name: label }),
         thread = created?.message_thread_id;
       if (typeof thread !== "number" || !Number.isSafeInteger(thread) || thread <= 0) throw new Error("invalid createForumTopic result");
       if (state.owner?.chatId !== owner || state.bot?.id !== bot) return undefined;
@@ -867,6 +871,7 @@ export function startTelegram(options: {
           token,
         );
         if (controller.signal.aborted || token !== state.token) continue;
+        await topicsRead;
         failures = 0;
         state.lastPollAt = Date.now();
         if (state.lastError) {
@@ -1436,10 +1441,15 @@ export function startTelegram(options: {
           const topic = topicOf(ref);
           if (!topic || !topicsOn()) return;
           const owner = state.owner!.chatId,
-            label = clip((await topicNameOf(ref, projectId, chat.title)()).trim(), TOPIC_NAME_MAX);
+            label = clip((await topicNameOf(ref, projectId, chat.title, chat.archived === true)()).trim(), TOPIC_NAME_MAX);
           if (named.get(topic.thread) === label || state.owner?.chatId !== owner) return;
-          await call("editForumTopic", { chat_id: owner, message_thread_id: topic.thread, name: label });
-          named.set(topic.thread, label);
+          try {
+            await call("editForumTopic", { chat_id: owner, message_thread_id: topic.thread, name: label });
+            named.set(topic.thread, label);
+          } catch (error) {
+            named.delete(topic.thread);
+            throw error;
+          }
         } catch {}
       };
       const next = (edits.get(id) ?? Promise.resolve()).then(run);

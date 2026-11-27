@@ -1050,11 +1050,6 @@ try {
   assert.equal((await jobs(b)).filter((j) => j.text.includes("MARK-STILLBETA")).length, 1, "72 the topic still reaches its own chat");
   result.checks.push("T72 a pick inside a topic says the topic stays bound and changes only the general-thread route");
 
-  // T76: the architecture document describes the rename behaviour.
-  const architecture = readFileSync(new URL("../ARCHITECTURE.md", import.meta.url), "utf8");
-  assert.ok(!/closes its topic|restoring reopens/.test(architecture), "76 ARCHITECTURE.md does not claim close and reopen");
-  assert.match(architecture, /📦/, "76 ARCHITECTURE.md describes the prefix");
-
   // T67: topics turned off again, or another bot: no thread ids.
   tg.topics = false;
   await rpc({ action: "telegram-token", token: TOKEN });

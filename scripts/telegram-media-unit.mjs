@@ -94,6 +94,8 @@ let fault = null,
   topicId = 900,
   chatList = [],
   dispatchHook = null,
+  chatsHook = null,
+  meTopics = null,
   topicNames = new Map();
 const server = createServer(async (req, res) => {
   const chunks = [];
@@ -130,6 +132,10 @@ const server = createServer(async (req, res) => {
     await new Promise((resolve) => setTimeout(resolve, 30));
     return reply({ ok: true, result: updates.splice(0) });
   }
+  if (method === "getMe" && meTopics !== null) {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    return reply({ ok: true, result: { id: 1, has_topics_enabled: meTopics } });
+  }
   attempts.push({ method, input });
   // TDLib check_message_group_message_contents requires uniform placement even on items without captions.
   if (method === "sendMediaGroup" && new Set(input.media.map((item) => item.show_caption_above_media ?? false)).size > 1)
@@ -139,8 +145,9 @@ const server = createServer(async (req, res) => {
       description: "Bad Request: parameter show_caption_above_media must be the same for all messages",
     });
   if (fault?.method === method) {
-    const { code, description = "test rejection", next = null } = fault;
+    const { code, description = "test rejection", next = null, run } = fault;
     fault = next;
+    await run?.();
     if (code === 0) return req.socket.destroy();
     if (code === 200) return reply({ ok: true, result: [] });
     return reply({ ok: false, error_code: code, description });
@@ -200,7 +207,10 @@ function start(receiveUpdates = false) {
       await dispatchHook?.();
       return {};
     },
-    chats: async () => chatList.map((chat) => ({ ...chat })),
+    chats: async () => {
+      await chatsHook?.();
+      return chatList.map((chat) => ({ ...chat }));
+    },
     notifier: { seq: () => notices.length, feed: (after) => ({ items: notices.filter((n) => n.seq > after) }) },
     report: () => {},
   });
@@ -226,6 +236,8 @@ const reset = (text) => {
   updates = [];
   chatList = [];
   dispatchHook = null;
+  chatsHook = null;
+  meTopics = null;
   topicNames = new Map();
   notices = [notice(1, text)];
 };
@@ -975,17 +987,85 @@ try {
   await bridge.flush();
   assert.equal(attempts.find((a) => a.method === "createForumTopic").input.name, "📦 Test · Main", "74 the recreated topic has the prefix");
 
-  // 75: a quick archive then restore ends without the prefix even when the first edit is slow.
+  // 75: a restore queued behind an archive edit that is still in flight is sent after it, so the last state wins.
   reset("unused");
   topicsOn([{ projectId: project, chatId: "main", thread: 500 }]);
   topicNames.set(500, "Test · Main");
   chatList = [mainChat(true)];
-  gate = { method: "editForumTopic", run: () => new Promise((resolve) => setTimeout(resolve, 200)) };
+  let held, reachedEdit;
+  const reached = new Promise((resolve) => (reachedEdit = resolve));
+  gate = { method: "editForumTopic", run: () => (reachedEdit(), new Promise((resolve) => (held = resolve))) };
   start();
   const archiving = bridge.chatChanged(project, mainChat(true));
+  await reached;
   chatList = [mainChat(false)];
-  await Promise.all([archiving, bridge.chatChanged(project, mainChat(false))]);
+  const restoring = bridge.chatChanged(project, mainChat(false));
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const edits = () => attempts.filter((a) => a.method === "editForumTopic").map((a) => a.input.name);
+  assert.deepEqual(edits(), ["📦 Test · Main"], "75 the restore waits while the archive edit is in flight");
+  held();
+  await Promise.all([archiving, restoring]);
+  assert.deepEqual(edits(), ["📦 Test · Main", "Test · Main"], "75 both names arrive in order");
   assert.equal(topicNames.get(500), "Test · Main", "75 the last edit wins");
+
+  // 1: the owner is replaced during the chat-name lookup of a topic creation; the project and chat title never go to the former owner.
+  reset("Owner replaced during the topic name lookup. ".repeat(2));
+  topicsOn();
+  chatsHook = async () => bridge.unpair();
+  start();
+  await bridge.flush().catch(() => {});
+  assert(!attempts.some((a) => a.method === "createForumTopic"), "1 no topic is created for the former owner");
+  assert.equal(sends.length, 0, "1 nothing is sent");
+
+  // 2: the owner is replaced while the photo is rejected; the document fallback never reaches the former owner.
+  reset(`![Image](${ref("demo.png")})`);
+  fault = { method: "sendPhoto", code: 400, description: "Bad Request: wrong file", run: async () => bridge.unpair() };
+  start();
+  await bridge.flush().catch(() => {});
+  assert(!attempts.some((a) => a.method === "sendDocument"), "2 no document fallback after the owner changed");
+  assert.equal(sends.length, 0, "2 nothing is sent");
+
+  // 3: a queued update waits for the startup topics refresh; a topics flag turned off in BotFather is not stale for it.
+  reset("unused");
+  topicsOn([{ projectId: project, chatId: "other", thread: 500 }]);
+  meTopics = false;
+  updates.push({
+    update_id: 1,
+    message: { message_id: 1, chat: { id: 1, type: "private" }, from: { id: 1 }, text: "hello", message_thread_id: 500 },
+  });
+  const reply = () => sends.find((s) => s.method === "sendMessage");
+  start(true);
+  for (let i = 0; i < 100 && !reply(); i++) await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.match(reply()?.input.text ?? "", /Pick a project/, "3 the update is routed with topics off");
+  assert.equal(reply().input.message_thread_id, undefined, "3 the reply carries no thread");
+
+  // 4: the chat lookup fails during an archive edit; the archived state of the edit is kept.
+  reset("unused");
+  topicsOn([{ projectId: project, chatId: "main", thread: 500 }]);
+  topicNames.set(500, "Test · Main");
+  chatsHook = async () => {
+    throw new Error("lookup failed");
+  };
+  start();
+  await bridge.chatChanged(project, mainChat(true));
+  assert.equal(topicNames.get(500), "📦 Test · Main", "4 the archive prefix survives a failed lookup");
+  await bridge.chatChanged(project, mainChat(false));
+  assert.equal(topicNames.get(500), "Test · Main", "4 the restore removes it on a failed lookup");
+
+  // 5: an edit whose result is unknown does not leave a cached name that hides the next needed edit.
+  reset("unused");
+  topicsOn([{ projectId: project, chatId: "main", thread: 500 }]);
+  topicNames.set(500, "Test · Main");
+  chatList = [mainChat(true)];
+  start();
+  await bridge.chatChanged(project, mainChat(true));
+  assert.equal(topicNames.get(500), "📦 Test · Main");
+  chatList = [mainChat(false)];
+  fault = { method: "editForumTopic", code: 0, run: () => topicNames.set(500, "Test · Main") };
+  await bridge.chatChanged(project, mainChat(false));
+  chatList = [mainChat(true)];
+  await bridge.chatChanged(project, mainChat(true));
+  assert.equal(topicNames.get(500), "📦 Test · Main", "5 the archive after an uncertain restore is not skipped");
 
   console.log(
     "PASS one-message native caption/envelope/actions/routing; albums/overflow; byte/MIME/security/fallback; retry/order/restart/uncertainty",
