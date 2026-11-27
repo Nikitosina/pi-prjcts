@@ -210,44 +210,51 @@ function hostClient(transport) {
     storagePrefix: transport.local ? "" : `pi-host:${transport.hostId}:`,
     async call(action, input, signal) {
       const read = isRead(action, input);
+      const serve = async () => {
+        const saved = uncached.has(action) ? null : await cache.get(action, input);
+        // The host may have come back or been revoked while the cache answered: that answer is then not for this moment.
+        if (transport.state !== "offline") return undefined;
+        if (saved) copies.set(action, { at: saved.savedAt, live: false });
+        else copies.delete(action);
+        transport.dispatchEvent?.(new Event("copy"));
+        return saved;
+      };
       for (;;) {
         if (cache && transport.state === "offline") {
           if (!read) throw new HostError(`${transport.name} is offline. Changes are disabled until it is back.`, 0, true, false);
-          const saved = uncached.has(action) ? null : await cache.get(action, input);
-          // The host may have come back or been revoked while the cache answered: that answer is then not for this moment.
-          if (transport.state !== "offline") continue;
-          if (saved) copies.set(action, { at: saved.savedAt, live: false });
-          else copies.delete(action);
-          transport.dispatchEvent?.(new Event("copy"));
+          const saved = await serve();
+          if (saved === undefined) continue;
           if (!saved) throw new NeverLoadedError(transport.name);
           return saved.data;
         }
         if (!cache || !read) return run(read, signal, (fetch) => requestAction(fetch, action, input, signal));
-        // A read that loses its connection falls back to the cache instead of waiting for the host to return.
-        const started = Date.now(),
-          attempt = new AbortController(),
-          forward = () => attempt.abort(signal.reason);
-        let dropped = false;
-        const watch = () => {
-          if (transport.state !== "offline") return;
-          dropped = true;
-          attempt.abort();
-        };
-        signal?.addEventListener("abort", forward, { once: true });
-        transport.addEventListener("statechange", watch);
-        try {
-          const data = await run(read, attempt.signal, (fetch) => requestAction(fetch, action, input, attempt.signal));
+        const started = Date.now();
+        const live = run(read, signal, (fetch) => requestAction(fetch, action, input, signal)).then((data) => {
           if (!uncached.has(action)) {
-            if (copies.get(action)?.live === false) queueMicrotask(() => transport.dispatchEvent(new Event("copy")));
+            const wasCopy = copies.get(action)?.live === false;
             copies.set(action, { at: Date.now(), live: true });
+            if (wasCopy) transport.dispatchEvent(new Event("copy"));
             if (SAVING.has(transport.state)) void cache.put(action, input, data, started);
           }
           return data;
-        } catch (error) {
-          if (signal?.aborted || (!dropped && transport.state !== "offline")) throw error;
+        });
+        // A read that loses its connection waits for the host to return (and is replayed), unless a saved copy can answer at once.
+        let stopWatching = () => {};
+        const dropped = new Promise((resolve) => {
+          const watch = () =>
+            transport.state === "offline" &&
+            void serve().then(
+              (saved) => saved && resolve(saved.data),
+              () => {},
+            );
+          transport.addEventListener("statechange", watch);
+          stopWatching = () => transport.removeEventListener("statechange", watch);
+        });
+        live.catch(() => {});
+        try {
+          return await Promise.race([live, dropped]);
         } finally {
-          signal?.removeEventListener("abort", forward);
-          transport.removeEventListener("statechange", watch);
+          stopWatching();
         }
       }
     },
