@@ -25,7 +25,7 @@ export function mountTree(client) {
   let seen = {};
   try {
     seen = JSON.parse(localStorage.getItem(SEEN) || "{}") || {};
-    for (const [id, chats] of Object.entries(JSON.parse(localStorage.getItem("pi-ui2-chats") || "{}") || {})) chatsByProject.set(id, chats);
+    for (const [id, chats] of Object.entries(JSON.parse(localStorage.getItem("pi-ui2-chats-by-host") || "{}") || {})) chatsByProject.set(id, chats);
   } catch {}
   on("projects", () => renderTree());
   on("hosts", () => renderTree());
@@ -40,7 +40,7 @@ export function mountTree(client) {
   function storeChats(projectId, host, chats) {
     chatsByProject.set(chatKey(projectId, host), chats);
     try {
-      localStorage.setItem("pi-ui2-chats", JSON.stringify(Object.fromEntries(chatsByProject)));
+      localStorage.setItem("pi-ui2-chats-by-host", JSON.stringify(Object.fromEntries(chatsByProject)));
     } catch {}
   }
   function markSeen(projectId, chatId) {
