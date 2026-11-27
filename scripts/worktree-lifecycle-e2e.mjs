@@ -215,7 +215,6 @@ const model = createServer((req, res) => {
         return res.end(say("W2-AGAIN-DONE"));
       }
       if (/W2-TASK/.test(firstUser)) {
-        if (userText.startsWith("[Child work")) return res.end(say("W2-DONE after child review"));
         const b = brain.b1;
         const steps = [
           `git fetch -q origin && git checkout -q -B cont origin/${b} && git merge --no-edit origin/main; echo MERGE-EXIT=$?`,
@@ -223,12 +222,14 @@ const model = createServer((req, res) => {
           `git push origin HEAD:main 2>&1`,
           `git push --force origin HEAD:${b} 2>&1 && echo FORCED-OWN; git push -f origin +HEAD:main 2>&1`,
           `git log --oneline -1 >/dev/null && git checkout -q -B rb origin/${b} && git rebase -X theirs origin/main >/dev/null 2>&1; git log --format=%s -3 && git push -q --force-with-lease origin HEAD:${b} 2>&1 && echo PUSHED-REBASE && git rev-parse HEAD`,
-          `printf 'wip\\n' > wip-note.txt && echo WIP-WRITTEN`,
+          `printf 'wip\\n' > wip-reviewed.txt && git add wip-reviewed.txt && git commit -qm 'Reviewed note' && echo NOTE-COMMITTED`,
         ];
         if (n < steps.length) return res.end(call("bash", { command: steps[n] }));
         if (n === steps.length)
-          return res.end(call("projects_delegate_child", { role: "reviewer", task: "CHILD-REVIEW read wip-note.txt in my worktree" }));
-        return res.end(say("W2-WAITING for the child reviewer"));
+          return res.end(call("subagent", { role: "reviewer", kind: "full", task: "CHILD-REVIEW read wip-reviewed.txt in my worktree" }));
+        // A subagent reviewer needs a clean checkout, so the uncommitted file the later cleanup checks rely on is written after it answered.
+        if (n === steps.length + 1) return res.end(call("bash", { command: `printf 'wip\\n' > wip-note.txt && echo WIP-WRITTEN` }));
+        return res.end(say("W2-DONE after child review"));
       }
       if (/W3-TASK/.test(firstUser)) {
         if (n === 0)
@@ -247,7 +248,7 @@ const model = createServer((req, res) => {
       await brain.driftGate;
     }
     if (role === "reviewer" || role === "scout") {
-      const file = /CHILD-REVIEW/.test(firstUser) ? "wip-note.txt" : /REVIEW-HEAD/.test(firstUser) ? "feature.txt" : "README.md";
+      const file = /CHILD-REVIEW/.test(firstUser) ? "wip-reviewed.txt" : /REVIEW-HEAD/.test(firstUser) ? "feature.txt" : "README.md";
       if (results.length === 0) return res.end(call("code_read", { path: file }));
       return res.end(say(`SAW[${file}]: ${results[0].replace(/\s+/g, " ").slice(0, 200)}`));
     }
@@ -520,7 +521,7 @@ try {
   const seen = (marker, role) => result.calls.filter((c) => c.role === role && c.first.includes(marker)).at(-1)?.results[0] ?? "";
   await eventually(async () => seen("CHILD-REVIEW", "reviewer"), "child reviewer did not read", 300);
   check(
-    "R4 a worker's child reviewer reads the parent's worktree (uncommitted wip-note.txt)",
+    "R4 a worker's subagent reviewer reads the worker's worktree at its committed head (wip-reviewed.txt)",
     /wip/.test(seen("CHILD-REVIEW", "reviewer")),
     seen("CHILD-REVIEW", "reviewer"),
   );
