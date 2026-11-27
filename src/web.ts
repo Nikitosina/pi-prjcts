@@ -1,3 +1,4 @@
+import { inboxHosts, relayOrigin } from "./inbox-hosts.ts";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type ServerResponse } from "node:http";
 import { inboxAssetNames, readBrowserAsset } from "./host-assets.ts";
@@ -10,7 +11,6 @@ import { openArtifact } from "./artifacts.ts";
 import { closeSync, createReadStream } from "node:fs";
 import { errorText, home, loadProject, parse, projectDir, Refused, Request, saveJson, type Request as RequestData } from "./state.ts";
 import { join } from "node:path";
-import { plugins } from "./plugins.ts";
 import { webFile, type WebFile } from "./web-file.ts";
 import { feed, HOST_FEED, type FeedEvent } from "./change-feed.ts";
 import type { RemoteAccess } from "./remote.ts";
@@ -20,7 +20,17 @@ type LiveWatch = (projectId: string, onFrame: (frame: unknown) => void, onEnd: (
 
 const liveStreams = new Set<() => void>();
 /** Actions a paired device may not call through the tunnel (REMOTE_SPEC.md: pairing approval from a paired device comes later). */
-const LOCAL_ONLY = new Set(["remote-reload", "remote-pair-start", "remote-pair-cancel", "remote-revoke", "remote-rename"]);
+const LOCAL_ONLY = new Set([
+  "web",
+  "inbox-hosts",
+  "inbox-host-add",
+  "inbox-host-forget",
+  "remote-reload",
+  "remote-pair-start",
+  "remote-pair-cancel",
+  "remote-revoke",
+  "remote-rename",
+]);
 
 /** Server-sent events: one `data:` frame per live change, comment heartbeats so idle proxies keep the stream. */
 async function serveLive(
@@ -135,20 +145,24 @@ export async function startWeb(
             : "text/javascript; charset=utf-8";
       assets.set(file === "index.html" ? "/" : `/${file}`, webFile(readBrowserAsset(join(webDir, file)), mime));
     }
+  for (const name of ["wire.js", "tunnel.js", "store.js"]) {
+    const file = join(webDir, "../relay/bootstrap", name);
+    assets.set(`/inbox-wire/${name}`, webFile(readBrowserAsset(file), "text/javascript; charset=utf-8"));
+  }
   /** Where an old `/ui2/` link or cached asset lives now (the inbox moved to `/` on 2026-11-04); only known targets, never the request path. */
   const movedFromUi2 = (path: string) => {
     if (path === "/ui2" || path === "/ui2/") return "/";
     const target = path === "/ui2/boot.js" ? "/theme.js" : path.slice("/ui2".length);
     return path.startsWith("/ui2/") && target !== "/" && assets.has(target) ? target : undefined;
   };
+  const pairingPages = new Map<string, { host: string; expires: number }>();
   const server = createServer(async (request, response) => {
     const headers = {
       "cache-control": "no-store",
       "x-content-type-options": "nosniff",
       "referrer-policy": "no-referrer",
       // style-src 'unsafe-inline': bars and markers set their width or position in a style="" attribute, which style-src 'self' blocks. Scripts stay 'self' only.
-      "content-security-policy":
-        "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'; img-src 'self' blob:; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+      "content-security-policy": `default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'${[...new Set(inboxHosts().map((host) => ` wss://${new URL(host.relayOrigin).host}`))].join("")}; img-src 'self' blob:; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`,
     };
     let status = 400;
     try {
@@ -169,6 +183,17 @@ export async function startWeb(
         if (matches) response.writeHead(304, assetHeaders).end();
         else response.writeHead(200, assetHeaders).end(content);
       };
+      if (request.method === "GET" && url.pathname === "/pair-inbox.html") {
+        const ticket = url.searchParams.get("ticket") ?? "";
+        const page = pairingPages.get(ticket);
+        pairingPages.delete(ticket);
+        if (!page || page.expires <= Date.now()) throw Error("Pairing window expired");
+        headers["content-security-policy"] =
+          `default-src 'none'; script-src 'self'; connect-src wss://${page.host}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
+        const asset = assets.get(url.pathname)!;
+        response.writeHead(200, { ...headers, "content-type": asset.mime }).end(asset.content);
+        return;
+      }
       const asset = assets.get(url.pathname);
       if (request.method === "GET" && asset) {
         sendAsset(asset);
@@ -182,13 +207,6 @@ export async function startWeb(
       }
       if (request.method === "GET" && (url.pathname === "/ui2" || url.pathname.startsWith("/ui2/"))) {
         response.writeHead(404, { ...headers, "content-type": "text/plain; charset=utf-8" }).end("Not found");
-        return;
-      }
-      // Only the files a plugin declared (web.script, web.style); never another path below the plugin.
-      const pluginFile = request.method === "GET" ? /^\/plugins\/([a-z][a-z0-9-]{0,39})\/(ui\.js|ui\.css)$/.exec(url.pathname) : null;
-      const pluginAsset = pluginFile ? plugins.webAsset(pluginFile[1]!, pluginFile[2]!) : undefined;
-      if (pluginAsset) {
-        sendAsset(pluginAsset);
         return;
       }
       if (url.pathname === "/favicon.ico") {
@@ -209,6 +227,15 @@ export async function startWeb(
       if (request.headers["sec-fetch-site"] === "cross-site") {
         status = 403;
         throw new Error("Cross-site request denied");
+      }
+      if (url.pathname === "/inbox/pair-window" && request.method === "POST" && local) {
+        const host = relayOrigin(await body(request)).host;
+        for (const [key, page] of pairingPages) if (page.expires <= Date.now()) pairingPages.delete(key);
+        if (pairingPages.size >= 8) throw Error("Too many pairing windows");
+        const ticket = randomBytes(24).toString("hex");
+        pairingPages.set(ticket, { host, expires: Date.now() + 30000 });
+        response.writeHead(200, { ...headers, "content-type": "text/plain" }).end(`/pair-inbox.html?ticket=${ticket}`);
+        return;
       }
       if (url.pathname === "/remote/summary" && request.method === "GET" && remote?.status().enabled) {
         response
@@ -235,19 +262,6 @@ export async function startWeb(
         }
         const data = await dispatch(input);
         response.writeHead(200, { ...headers, "content-type": "application/json" }).end(JSON.stringify({ ok: true, data }));
-        return;
-      }
-      const pluginRoute =
-        request.method === "GET" ? /^\/plugins\/([a-z][a-z0-9-]{0,39})\/([a-z][a-z0-9-]{0,63})$/.exec(url.pathname) : null;
-      const route = pluginRoute ? plugins.route(pluginRoute[1]!, pluginRoute[2]!) : undefined;
-      if (route) {
-        const id = url.searchParams.get("project") ?? "";
-        if (!/^[a-f0-9-]{36}$/.test(id)) throw new Error("Invalid project ID");
-        loadProject(id);
-        status = 409;
-        const result = await plugins.gate.run(id, pluginRoute![1]!, () => route({ projectId: id, query: url.searchParams }));
-        if (!/^[a-z]+\/[a-z0-9.+-]+$/.test(result.mime)) throw new Error("Plugin returned an invalid content type");
-        response.writeHead(200, { ...headers, "content-type": result.mime, "content-length": result.bytes.length }).end(result.bytes);
         return;
       }
       if (request.method === "GET" && (url.pathname === "/live" || url.pathname === "/changes")) {
@@ -363,12 +377,7 @@ export async function startWeb(
         resolve();
       });
     });
-  try {
-    await listen(port);
-  } catch (error) {
-    if (!port) throw error;
-    await listen(0);
-  }
+  await listen(port);
   server.on("error", (error) => process.stderr.write(JSON.stringify({ event: "web-error", error: errorText(error) }) + "\n"));
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Browser listener has no TCP address");

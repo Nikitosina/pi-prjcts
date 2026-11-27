@@ -7,6 +7,7 @@ import * as durable from "@earendil-works/pi-durable";
 import * as typebox from "typebox";
 import * as value from "typebox/value";
 import plugin from "../plugins/tasks/index.ts";
+import { checkView } from "../src/plugin-sections.ts";
 
 const projectA = "00000000-0000-4000-8000-00000000000a";
 const projectB = "00000000-0000-4000-8000-00000000000b";
@@ -51,7 +52,10 @@ try {
   assert.deepEqual(Object.keys(tools).sort(), ["tasks_add", "tasks_attach_pr", "tasks_finish", "tasks_list", "tasks_update"]);
   assert.deepEqual(provided.rpcPolicy, { list: "read" });
   assert.deepEqual(Object.keys(provided.rpc), ["list"]);
-  assert.equal(provided.web.sidebar.title, "Tasks");
+  assert.deepEqual(
+    [provided.sections.tasks.title, provided.sections.tasks.place, provided.sections.tasks.refreshMs],
+    ["Tasks", "chat", 3000],
+  );
 
   // 8 17: a task without a Job, a PR or a link is a task
   const first = await call("tasks_add", { title: "Write the parser" });
@@ -140,6 +144,19 @@ try {
   await assert.rejects(call("tasks_update", { id: first.id, stage: "blocked" }), /finished/i);
   await assert.rejects(call("tasks_attach_pr", { id: first.id, ...GH, number: "9", replace: true }), /finished/i);
 
+  // The chat section shows the open tasks as rows, a PR without a link as a detail line, and counts the finished ones.
+  const view = await provided.sections.tasks.read({ projectId: projectA, chatId: "main" });
+  const openTasks = (await list()).tasks.filter((task) => task.stage !== "done");
+  assert.deepEqual(
+    view.rows.map((row) => row.text),
+    openTasks.map((task) => task.title),
+  );
+  assert.equal(view.footer, "1 finished");
+  const arcRow = view.rows.find((row) => row.text === second.title);
+  assert.ok(arcRow.detail.includes("arc arcadia#8") && !arcRow.links, JSON.stringify(arcRow));
+  assert.ok(["Planned", "In progress", "In review", "Blocked"].includes(arcRow.status.label));
+  await assert.rejects(provided.sections.tasks.read({ projectId: projectA, chatId: "../x" }), /project and a chat/);
+
   // RPC list: reads one chat, validates ids (3 4)
   const rpcList = (params, projectId = projectA) => provided.rpc.list({ projectId, params });
   assert.deepEqual(
@@ -147,6 +164,18 @@ try {
     [other.id],
   );
   assert.equal((await rpcList({ chatId: "main" })).tasks.length, 2);
+  // 21: the longest PR the store accepts still gives a view the host accepts.
+  const longest = await call("tasks_add", { title: "longest PR" });
+  await call("tasks_attach_pr", {
+    id: longest.id,
+    provider: "p".repeat(40),
+    repository: "r".repeat(200),
+    number: "9".repeat(64),
+    url: "https://example.test/pr",
+  });
+  const longView = await provided.sections.tasks.read({ projectId: projectA, chatId: "main" });
+  assert.doesNotThrow(() => checkView(longView, () => undefined), "21 a view with the longest PR passes the host's check");
+  await call("tasks_finish", { id: longest.id });
   for (const params of [{ chatId: "../x" }, { chatId: "" }, {}, undefined, { chatId: "main", extra: 1 }])
     await assert.rejects(rpcList(params), /chat/i, `4 ${JSON.stringify(params)}`);
   await assert.rejects(rpcList({ chatId: "main" }, "../escape"), /project/i);
@@ -161,7 +190,7 @@ try {
     provide: (caps) => Object.assign(reloaded, caps),
     projects: { load: (id) => ({ id }) },
   });
-  assert.equal((await reloaded.rpc.list({ projectId: projectA, params: { chatId: "main" } })).tasks.length, 2);
+  assert.equal((await reloaded.rpc.list({ projectId: projectA, params: { chatId: "main" } })).tasks.length, 3);
   assert.deepEqual(readdirSync(stateDir).sort(), [`${projectA}.json`], "6 only the project file stays (project B never wrote)");
   const file = join(stateDir, `${projectA}.json`);
   const before = readFileSync(file, "utf8");

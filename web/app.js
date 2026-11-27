@@ -1,32 +1,83 @@
 // UI 2.0 entry: selection, center focus, streams, status pill and line, hotkeys and the command palette.
 // Three areas on every screen: list (left), focus (center), context (right); the Host agent drawer opens over them.
-import { call, setToken, stream, token } from "./api.js";
+import { localHost, setToken, token } from "./api.js";
 import { clip, esc } from "./format.js";
 import { register, paintHints, onBindingsChange, typing } from "./hotkeys.js";
 import { emit, fail, on, project, stale, state, toast } from "./state.js";
-import { loadUi, setUi } from "./ui.js";
-import { paintStatusLine } from "./statusline.js";
-import { loadLimits } from "./limits.js";
 import { closeLimitDetail, limitDetailOpen } from "./limit-detail.js";
-import { closeDiskDetail, diskDetailOpen } from "./disk-detail.js";
+import { mountUi } from "./ui.js";
+import { mountLimits } from "./limits.js";
+import { mountDiskDetail } from "./disk-detail.js";
+import { mountStatusline } from "./statusline.js";
+import { mountTree } from "./tree.js";
+import { mountMedia } from "./media.js";
+import { mountSlash } from "./slash.js";
+import { mountMemory } from "./memory.js";
+import { mountChat } from "./chat.js";
+import { mountPlugins } from "./plugins.js";
+import { mountSidebar } from "./sidebar.js";
+import { mountReview } from "./review.js";
+import { mountWorkers } from "./workers.js";
+import { mountPrompts } from "./prompts.js";
+import { mountSettings } from "./settings.js";
+import { mountHostagent } from "./hostagent.js";
+import { mountPalette } from "./palette.js";
+import { closeHostMenu, hostForPage, hostMenuOpen, hostSwitcher, openHostMenu, savedHosts } from "./host-switcher.js";
 import {
-  archiveDialogOpen,
-  closeArchiveDialog,
+  groupOf,
+  groups,
+  hostOf,
+  loadAllProjects,
   loadProjects,
-  markSeen,
-  rememberChats,
-  renderTree,
-  requestArchive,
-  visibleChats,
-} from "./tree.js";
-import { currentChat, loadChat, stopTurn, toggleSteer } from "./chat.js";
-import "./sidebar.js";
-import { closeReview, renderReview } from "./review.js";
-import { reviewEntries, closeMergeDialog, loadJobs, loadSide, mergeDialogOpen, renderWorker } from "./workers.js";
-import { refreshRecentMemory, renderMemoryEntry, renderMemoryList } from "./memory.js";
-import { closeSettings, openSettings, SECTIONS, settingsBack, settingsOpen, showSection } from "./settings.js";
-import {
-  isOpen as drawerOpen,
+  onHostFrame,
+  online,
+  projectHost,
+  remoteGroups,
+  startHosts,
+} from "./hosts.js";
+import { mountDecisions } from "./decisions.js";
+import { mountNewProject } from "./new-project.js";
+
+// `admin` is the host of Settings, the Host agent and the status line, chosen in their header; project views use `projectHost`,
+// which sends each request to the host that listed its project.
+const admin = await hostForPage().catch((error) => {
+  if (error.status !== 401) throw error;
+  signIn("Open the local inbox link to sign in.");
+  // Sign-in reloads this bookmark. Never mount local views as a fallback for a remote host.
+  return new Promise(() => {});
+});
+const client = projectHost;
+const ui = mountUi(admin);
+const limits = mountLimits(admin);
+const diskDetail = mountDiskDetail(admin);
+const statusline = mountStatusline(admin, ui, limits, diskDetail);
+const tree = mountTree(client);
+const decisions = mountDecisions();
+mountNewProject();
+const media = mountMedia(client);
+const slash = mountSlash(client);
+const memory = mountMemory(client);
+const chat = mountChat(client, media, slash, memory);
+const plugins = mountPlugins(client);
+mountSidebar(client);
+const review = mountReview(client);
+const workers = mountWorkers(client, chat, media);
+const prompts = mountPrompts(client, admin);
+const settings = mountSettings(admin, client, ui, statusline, prompts, limits, plugins);
+const hostagent = mountHostagent(admin, chat, media);
+const palette = mountPalette(client);
+const { loadUi, setUi } = ui;
+const { paintStatusLine } = statusline;
+const { loadLimits } = limits;
+const { closeDiskDetail, diskDetailOpen } = diskDetail;
+const { archiveDialogOpen, closeArchiveDialog, markSeen, rememberChats, renderTree, requestArchive, visibleChats } = tree;
+const { currentChat, loadChat, questionChat, stopTurn, toggleSteer } = chat;
+const { closeReview, renderReview } = review;
+const { reviewEntries, closeMergeDialog, loadJobs, loadSide, mergeDialogOpen, renderWorker } = workers;
+const { refreshRecentMemory, renderMemoryEntry, renderMemoryList } = memory;
+const { closeSettings, openSettings, SECTIONS, settingsBack, settingsOpen, showSection } = settings;
+const {
+  isOpen: drawerOpen,
   loadApprovals,
   loadHostAgent,
   onHostTopic,
@@ -35,28 +86,30 @@ import {
   resetHostAgent,
   stopHostAgent,
   toggleHostAgent,
-} from "./hostagent.js";
-import { closePalette, openPalette, paletteOpen, setPaletteSource } from "./palette.js";
-import { closeSlashMenu, slashMenuOpen } from "./slash.js";
-import { closeLightbox, lightboxOpen } from "./media.js";
+} = hostagent;
+const { closePalette, openPalette, paletteOpen, setPaletteSource } = palette;
+const { closeSlashMenu, slashMenuOpen } = slash;
+const { closeLightbox, lightboxOpen } = media;
+export { workers, chat, ui };
 
 const app = document.querySelector("#app"),
   center = document.querySelector("#center"),
   chatView = document.querySelector("#chat-view"),
   focusView = document.querySelector("#focus-view");
-let changes = null,
-  hostChanges = null;
+let changes = null;
 
 // ---------------------------------------------------------------------------------------------------------------- selection
 
-async function select(projectId, chatId = "main", { keepFocus = false } = {}) {
-  if (!projectId) return;
-  const sameProject = projectId === state.projectId;
+async function select(projectId, chatId = "main", { keepFocus = false, host: preferred = null } = {}) {
+  const host = hostOf(projectId, preferred ?? state.host);
+  if (!projectId || !host) return;
+  const sameProject = projectId === state.projectId && host === state.host;
   if (sameProject && chatId === state.chatId && state.view) {
     if (!keepFocus) leaveFocus();
     return;
   }
   state.generation++;
+  state.host = host;
   state.projectId = projectId;
   state.chatId = chatId;
   state.view = null;
@@ -69,31 +122,54 @@ async function select(projectId, chatId = "main", { keepFocus = false } = {}) {
   markSeen(projectId, chatId);
   renderTree();
   paintCrumbs();
-  if (!sameProject) {
-    changes?.stop();
-    const gen = state.generation;
-    let connected = false; // the first sync of a stream is the opening read; a later one is a reconnect, after which missed changes are possible
-    changes = stream(
-      `/changes?project=${encodeURIComponent(projectId)}`,
-      (change) => {
-        if (state.projectId !== projectId) return;
-        if (change.t === "sync") {
-          emit("plugins-changed");
-          void refreshAll();
-          void refreshRecentMemory(connected ? { invalidate: true } : { again: true });
-          connected = true;
-        } else if (change.t === "topic") onTopic(change, gen);
-      },
-      (up) => {
-        state.connected = up;
-        emit("connection", up);
-        paintStatusLine();
-      },
-    );
-  }
+  if (!sameProject) watch(projectId, host);
   await refreshAll();
 }
-on("select-request", ({ projectId, chatId, keepFocus }) => void select(projectId, chatId, { keepFocus }));
+/** The selected project's change stream, on its own host; a host coming back online opens it again at once. */
+function watch(projectId, host) {
+  changes?.stop();
+  const gen = state.generation;
+  let connected = false; // the first sync of a stream is the opening read; a later one is a reconnect, after which missed changes are possible
+  changes = host.stream(
+    `/changes?project=${encodeURIComponent(projectId)}`,
+    (change) => {
+      if (state.projectId !== projectId || state.host !== host) return;
+      if (change.t === "sync") {
+        emit("plugins-changed");
+        void refreshAll();
+        void refreshRecentMemory(connected ? { invalidate: true } : { again: true });
+        connected = true;
+      } else if (change.t === "topic") onTopic(change, gen);
+    },
+    (up) => {
+      state.connected = up;
+      emit("connection", up);
+      paintStatusLine();
+    },
+  );
+}
+on("host-online", (group) => {
+  if (group.client === state.host && state.projectId) watch(state.projectId, state.host);
+});
+// A forgotten host leaves the page: its selected project gives way to the first project still listed.
+on("hosts", () => {
+  document.querySelector(".list-head").hidden = remoteGroups();
+  if (
+    state.projectId &&
+    !groups.some((group) => group.client === state.host && group.projects.some((item) => item.id === state.projectId))
+  ) {
+    if (state.projects[0]) void select(state.projects[0].id, "main");
+    else {
+      const url = new URL(location.href);
+      url.searchParams.delete("project");
+      url.searchParams.delete("chat");
+      location.replace(url);
+    }
+  }
+  paintCrumbs();
+  paintPill();
+});
+on("select-request", ({ projectId, chatId, keepFocus, host }) => void select(projectId, chatId, { keepFocus, host }));
 async function refreshAll() {
   const gen = state.generation;
   await Promise.all([loadChat(), loadJobs(), loadSide(), loadUsage()]);
@@ -115,7 +191,8 @@ function onTopic(change) {
     if (state.focus.kind === "memory" && !state.focus.path) renderFocus();
   }
   clearTimeout(listTimer);
-  listTimer = setTimeout(() => void loadProjects(), 400);
+  const group = groupOf(state.host);
+  listTimer = setTimeout(() => group && void loadProjects(group), 400);
 }
 on("view", (view) => {
   rememberChats(state.projectId, view.chats ?? []);
@@ -186,7 +263,8 @@ focusView.addEventListener("click", (event) => {
 // ---------------------------------------------------------------------------------------------------------------- top bar, pill, status line
 
 function paintCrumbs() {
-  const name = project()?.name ?? "",
+  const group = groupOf(state.host),
+    name = group?.projects.find((item) => item.id === state.projectId)?.name ?? "",
     chat = currentChat()?.title ?? (state.chatId === "main" ? "Main" : "");
   const focus =
     state.focus.kind === "worker"
@@ -196,8 +274,13 @@ function paintCrumbs() {
         : state.focus.kind === "pr"
           ? ` › PR #${state.focus.id}`
           : "";
+  // A remote project names its host first, with the host's state while it is not online.
+  const where =
+    group?.entry && name
+      ? `<span class="crumb-host" data-state="${esc(group.state)}">${esc(group.name)}${online(group) ? "" : ` · ${esc(group.state)}`}</span><span class="sep">›</span>`
+      : "";
   document.querySelector("#crumbs").innerHTML =
-    `<b>${esc(name)}</b>${chat ? `<span class="sep">/</span><span>${esc(chat)}</span>` : ""}<span class="muted">${esc(focus)}</span>`;
+    `${where}<b>${esc(name)}</b>${chat ? `<span class="sep">/</span><span>${esc(chat)}</span>` : ""}<span class="muted">${esc(focus)}</span>`;
   document.title = name ? `${name} · pi-prjcts` : "pi-prjcts";
 }
 function totals() {
@@ -210,7 +293,7 @@ function totals() {
   }
   if (state.live?.running && !state.projects.find((item) => item.id === state.projectId)?.activity?.chats?.[state.chatId]?.working)
     working++;
-  return { working, needs, approvals: pendingApprovals().length };
+  return { working, needs, approvals: groups.filter(online).reduce((sum, group) => sum + group.approvals.length, 0) };
 }
 function paintPill() {
   const { working, needs, approvals } = totals(),
@@ -224,7 +307,14 @@ function paintPill() {
 }
 on("live", paintPill);
 on("approvals", paintPill);
+on("decisions", paintPill);
+on("needs", paintPill);
 function jumpToStatus() {
+  if (decisions.count()) {
+    if (narrow.matches) app.dataset.sheet = "list";
+    else if (!state.ui.panels.list) void setUi({ panels: { list: true } });
+    return setTimeout(() => decisions.focusFirst(), 30);
+  }
   if (pendingApprovals().length) return toggleHostAgent(true, { at: "approvals" });
   const needs = state.projects.find((item) => item.notice?.questions);
   if (needs) return void select(needs.id, "main").then(() => document.querySelector("#questions textarea")?.focus());
@@ -239,8 +329,8 @@ function jumpToStatus() {
 async function loadUsage() {
   const gen = state.generation;
   const [usage, profiles] = await Promise.all([
-    call("usage-snapshot", { id: state.projectId, limit: 1 }).catch(() => null),
-    call("profiles-get", { projectId: state.projectId }).catch(() => null),
+    client.call("usage-snapshot", { id: state.projectId, limit: 1 }).catch(() => null),
+    client.call("profiles-get", { projectId: state.projectId }).catch(() => null),
   ]);
   if (stale(gen)) return;
   state.usage = usage;
@@ -288,6 +378,7 @@ document.addEventListener("pi-remote-host", renderRemoteHost);
 renderRemoteHost();
 
 function leaveTop() {
+  if (hostMenuOpen()) return closeHostMenu();
   if (lightboxOpen()) return closeLightbox();
   if (archiveDialogOpen()) return closeArchiveDialog();
   if (mergeDialogOpen()) return closeMergeDialog();
@@ -342,14 +433,15 @@ on("leave-focus", () => {
   paintCrumbs();
 });
 
+const hostHint = (projectId, kind) => (remoteGroups() ? `${kind} · ${groupOf(hostOf(projectId))?.name ?? ""}` : kind);
 setPaletteSource(() => [
   ...reviewEntries(),
   ...state.projects.flatMap((item) => [
-    { id: `p:${item.id}`, label: item.name, hint: "project", run: () => void select(item.id, "main") },
+    { id: `p:${item.id}`, label: item.name, hint: hostHint(item.id, "project"), run: () => void select(item.id, "main") },
     {
       id: `m:${item.id}`,
       label: `${item.name} › Memory`,
-      hint: "memory",
+      hint: hostHint(item.id, "memory"),
       run: () => void select(item.id, "main").then(() => emit("open", { kind: "memory" })),
     },
   ]),
@@ -379,10 +471,12 @@ setPaletteSource(() => [
     label: state.view?.paused ? "Resume project" : "Pause project",
     hint: "project",
     run: () =>
-      void call(state.view?.paused ? "resume" : "pause", {
-        id: state.projectId,
-        ...(state.view?.paused ? { confirm: state.projectId } : {}),
-      }).then(() => loadChat(), fail),
+      void client
+        .call(state.view?.paused ? "resume" : "pause", {
+          id: state.projectId,
+          ...(state.view?.paused ? { confirm: state.projectId } : {}),
+        })
+        .then(() => loadChat(), fail),
   },
   {
     id: "x:open-id",
@@ -437,50 +531,79 @@ function signIn(message = "") {
     }
   });
 }
+/** Host frames of the Settings and Host agent host: approvals reach its drawer and ui_focus moves the page even while it is closed.
+ * Project lists and approvals of every host are followed by their groups (web/hosts.js). */
+function adminFrame(group, change) {
+  if (group.client !== admin) return;
+  if (change.t === "sync") {
+    void loadApprovals();
+    if (drawerOpen()) void loadHostAgent();
+    return;
+  }
+  if (change.t !== "topic") return;
+  if (change.topic === "host-agent") emit("prompts-changed"); // Host agent prompt blocks, among its other changes
+  if (change.topic === "ui") void loadUi();
+  else if (change.topic === "limits")
+    void loadLimits(); // which providers show, saved here or elsewhere; reads only
+  else if (change.topic === "telegram")
+    emit("telegram"); // the bot or its pairing; Settings → Notifications rereads
+  else if (change.topic === "remote")
+    emit("remote"); // relay state, devices or pairing; Settings → Remote access rereads
+  else if (change.topic === "tiers") {
+    emit("tiers");
+    onTiersChanged();
+  } else if (change.topic !== "projects") onHostTopic(change);
+}
 async function start() {
   paintHints();
   paintStatusLine();
   if (!token) return signIn();
+  // Forgotten in another tab: this page's Settings host is gone, so the page returns to the local host.
+  admin.addEventListener?.("statechange", () => {
+    if (admin.state !== "forgotten") return;
+    const url = new URL(location.href);
+    url.searchParams.delete("host");
+    url.searchParams.delete("panel");
+    location.replace(url);
+  });
+  void hostSwitcher(document.querySelector("#agent-host"), admin, "agent").catch(fail);
   try {
-    await call("list");
+    await localHost.call("list");
   } catch (error) {
     return signIn(error.status === 401 ? "This link's token is no longer valid. Copy the current inbox link." : error.message);
   }
-  await loadUi();
-  await loadProjects();
+  void loadUi(); // a remote Settings host may be slow; the local sidebar must not wait for it
+  onHostFrame(adminFrame);
+  const remotes = startHosts(await savedHosts());
+  await loadProjects(groups[0]);
   const url = new URL(location.href);
-  const wanted = url.searchParams.get("project"),
-    first = state.projects.find((item) => item.id === wanted) ?? state.projects[0];
-  if (first) await select(first.id, first.id === wanted ? (url.searchParams.get("chat") ?? "main") : "main");
+  const wanted = url.searchParams.get("project");
+  // A bookmarked remote project waits for its host's first connection, a bounded time; the local group is already drawn.
+  if (((wanted && !hostOf(wanted)) || !admin.local) && remoteGroups())
+    await Promise.race([remotes, new Promise((done) => setTimeout(done, 8000))]);
+  // Settings and the Host agent of a remote host open with that host's project selected, so project sections match the header.
+  const adminGroup = groupOf(admin);
+  const first =
+    hostOf(wanted) && (admin.local || hostOf(wanted) === admin) ? wanted : (adminGroup?.projects[0]?.id ?? state.projects[0]?.id);
+  if (first) await select(first, first === wanted ? (url.searchParams.get("chat") ?? "main") : "main");
   else document.body.dataset.ready = "1";
+  const panel = url.searchParams.get("panel");
+  if (panel === "settings") openSettings();
+  if (panel === "agent") toggleHostAgent(true);
   void loadLimits(); // the host's last readings; providers are asked only by the refresh button
   void loadApprovals();
-  // Host topics: approvals reach the status pill and ui_focus moves the page even while the drawer is closed.
-  hostChanges = stream("/changes?project=host", (change) => {
-    if (change.t === "sync") {
-      void loadApprovals();
-      if (drawerOpen()) void loadHostAgent();
-      return;
-    }
-    if (change.t !== "topic") return;
-    if (change.topic === "host-agent") emit("prompts-changed"); // Host agent prompt blocks, among its other changes
-    if (change.topic === "ui") void loadUi();
-    else if (change.topic === "limits")
-      void loadLimits(); // which providers show, saved here or elsewhere; reads only
-    else if (change.topic === "telegram")
-      emit("telegram"); // the bot or its pairing; Settings → Notifications rereads
-    else if (change.topic === "remote")
-      emit("remote"); // relay state, devices or pairing; Settings → Remote access rereads
-    else if (change.topic === "tiers") {
-      emit("tiers");
-      onTiersChanged();
-    } else if (change.topic === "projects") void loadProjects();
-    else onHostTopic(change);
-  });
-  setInterval(() => void loadProjects(), 15000);
+  setInterval(() => void loadAllProjects(), 15000);
 }
-addEventListener("pagehide", () => {
-  changes?.stop();
-  hostChanges?.stop();
+// A Decision inbox question opens in its own chat on its own host, with its answer field focused.
+on("open-question", async ({ projectId, host, entry }) => {
+  app.dataset.sheet = "";
+  await select(projectId, state.projectId === projectId && state.host === host ? state.chatId : "main", { host });
+  if (state.projectId !== projectId || state.host !== host) return;
+  const item = entry ? state.view?.inbox?.find((candidate) => candidate.id === entry) : null;
+  const chatId = item ? (questionChat(item)?.id ?? "main") : state.chatId;
+  if (chatId !== state.chatId) await select(projectId, chatId, { host });
+  document.querySelector(entry ? `#questions [data-entry="${CSS.escape(entry)}"] textarea` : "#questions textarea")?.focus();
 });
+on("host-menu", openHostMenu);
+addEventListener("pagehide", () => changes?.stop());
 void start();

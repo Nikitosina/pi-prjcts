@@ -1,4 +1,4 @@
-// A fake simslim for scripts/simulator-panel-e2e.mjs: answers from the JSON device list in $SIMULATOR_FAKE_STATE and logs each call to
+// A fake simslim for scripts/simulator-section-e2e.mjs: answers from the JSON device list in $SIMULATOR_FAKE_STATE and logs each call to
 // $SIMULATOR_FAKE_LOG. `fail.<command>` in the state makes that command fail with the given message. Clone folders live under $HOME.
 import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";

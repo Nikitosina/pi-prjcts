@@ -28,7 +28,7 @@ await kit.run(async () => {
     page.evaluate(`import("/state.js").then((bus) => bus.emit("select-request", { projectId: ${js(alpha)}, chatId: ${js(chatId)} }))`);
   const section = () =>
     page.evaluate(
-      `(() => { const node = document.querySelector('#plugin-sections [data-plugin="tasks"]'); if (!node) return null; return { state: node.dataset.state, title: node.querySelector("h2").textContent, error: node.querySelector(".plugin-error").hidden ? "" : node.querySelector(".plugin-error").textContent, rows: [...node.querySelectorAll(".tasks-row")].map((row) => ({ title: row.querySelector(".tasks-title").textContent, stage: row.dataset.stage, label: row.querySelector(".tasks-stage").textContent, line: row.querySelector(".tasks-line").innerText, links: [...row.querySelectorAll("a")].map((a) => a.href), note: row.querySelector(".tasks-note")?.textContent ?? "" })), empty: node.querySelector(".tasks-empty")?.textContent ?? "", footer: node.querySelector(".tasks-foot").innerText }; })()`,
+      `(() => { const node = document.querySelector('#plugin-sections [data-plugin="tasks"]'); if (!node) return null; return { state: node.dataset.state, title: node.querySelector("h2").textContent, error: node.querySelector(".plugin-error").hidden ? "" : node.querySelector(".plugin-error").textContent, rows: [...node.querySelectorAll(".section-row")].map((row) => ({ title: row.querySelector(".section-text").textContent, label: row.querySelector(".section-status").textContent, tone: row.querySelector(".section-status").dataset.tone, line: row.innerText, links: [...row.querySelectorAll("a")].map((a) => a.href), details: [...row.querySelectorAll(".section-detail")].map((line) => line.textContent) })), empty: node.querySelector(".section-empty")?.textContent ?? "", footer: node.querySelector(".section-foot")?.textContent ?? "" }; })()`,
     );
   const rowsOf = async () => (await section())?.rows.map((row) => row.title).join("|");
   const waitUntil = async (description, test) => {
@@ -83,9 +83,9 @@ await kit.run(async () => {
     "8 17 20 refresh with no reload: a task without a PR shows its stage and 'no PR'; HTML in a title is text",
     planned.rows[0].label === "Planned" &&
       /no PR/.test(planned.rows[0].line) &&
-      planned.rows[0].note === "waiting for the owner" &&
+      planned.rows[0].details.includes("waiting for the owner") &&
       planned.rows[1].label === "In progress" &&
-      !(await page.evaluate(`!!document.querySelector("#plugin-sections .tasks-title b")`)),
+      !(await page.evaluate(`!!document.querySelector("#plugin-sections .section-text b")`)),
     planned,
   );
   const [attached] = await drive("main", [
@@ -178,7 +178,7 @@ await kit.run(async () => {
   check(
     "16 Workers and Pull requests stay above the section, untouched",
     await page.evaluate(
-      `(() => { const ids = [...document.querySelector("#context").children].map((node) => node.id || node.querySelector("[id]")?.id); return ids.join() === "workers-h,prs-h,plugin-sections" && !document.querySelector("#prs .tasks-row"); })()`,
+      `(() => { const ids = [...document.querySelector("#context").children].map((node) => node.id || node.querySelector("[id]")?.id); return ids.join() === "workers-h,prs-h,plugin-sections" && !document.querySelector("#prs .section-row"); })()`,
     ),
   );
 
@@ -188,7 +188,10 @@ await kit.run(async () => {
   const chatTwo = await section();
   check(
     "11 parallel tasks keep their own stage and note",
-    chatTwo.rows[1].label === "Blocked" && chatTwo.rows[1].note === "needs a key" && chatTwo.rows[0].label === "Planned",
+    chatTwo.rows[1].label === "Blocked" &&
+      chatTwo.rows[1].details.includes("needs a key") &&
+      chatTwo.rows[1].tone === "needs" &&
+      chatTwo.rows[0].label === "Planned",
     chatTwo,
   );
   await shot("03-desktop-chat-two");

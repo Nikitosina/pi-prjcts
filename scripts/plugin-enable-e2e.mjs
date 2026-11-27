@@ -200,24 +200,23 @@ await kit.run(async () => {
   check("15 the pause is only this project's", !(await counters()).paused.includes(beta), await counters());
   check("9 the other project's PR list still has the provider", (await prsOf(beta)).length === 1);
   check("9 the other project still answers", (await call(beta, "ping")).pong === beta && (await entry(beta, "gated")).enabled === true);
+  const section = async (id) => {
+    try {
+      return (await rpc({ action: "plugin-section", plugin: "gated", section: "data", id })).rows[0].text;
+    } catch (error) {
+      return `refused: ${error.message}`;
+    }
+  };
+  check("6 the plugin section refuses the disabled project", /disabled in this project/.test(await section(alpha)), await section(alpha));
+  check("9 the section answers the other project", (await section(beta)) === `data:${beta}`, await section(beta));
   const page = await kit.openPage(await kit.webUrl(alpha));
   await page.waitFor(`document.body.dataset.ready === "1"`, "inbox ready");
-  const route = (id) =>
-    page.evaluate(
-      `import("/api.js").then((api) => api.authorizedFetch("/plugins/gated/data?project=${id}").then(async (answer) => answer.status + ":" + (await answer.text())))`,
-    );
-  check(
-    "6 the web route refuses the disabled project",
-    (await route(alpha)).startsWith("4") || (await route(alpha)).startsWith("5"),
-    await route(alpha),
-  );
-  check("9 the route answers the other project", (await route(beta)) === `200:data:${beta}`, await route(beta));
   check("11 a disabled plugin disabled again is a no-op", (await set(alpha, "gated", false)).enabled === false);
 
   // 10: re-enable restores behavior.
   await set(alpha, "gated", true);
   check("15 the enable released the pause once", !(await counters()).paused.includes(alpha), await counters());
-  check("10 re-enabled", (await call(alpha, "ping")).pong === alpha && (await route(alpha)) === `200:data:${alpha}`);
+  check("10 re-enabled", (await call(alpha, "ping")).pong === alpha && (await section(alpha)) === `data:${alpha}`);
   // 30: a poll that another connected provider completes keeps the saved follow state of a provider the project turned off.
   await rpc({ action: "plugin", plugin: "fake", method: "connect", id: alpha, params: { confirm: alpha } });
   const followRepos = async () => (await rpc({ action: "follow-poll", id: alpha })).follow.repos.map((item) => item.repositoryId);
@@ -420,6 +419,4 @@ await kit.run(async () => {
   // 32: a project disabled before a restart is not asked either (its record, marked unresolved while it was off, survives the restart).
   check("32 after a restart the disabled plugin's unresolved write does not block admission", (await blocker(alpha)) === null);
   check("32 and the plugin was not asked", (await asked(alpha)) === 0, await counters());
-  // The refused route probes of 6 are the only expected HTTP errors.
-  kit.result.httpErrors = kit.result.httpErrors.filter((error) => !(error.url.endsWith("/plugins/gated/data") && error.status === 409));
 });

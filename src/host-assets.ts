@@ -10,5 +10,5 @@ export function inboxAssetNames(dir: string): string[] {
 }
 export function readBrowserAsset(path: string): Buffer {
   const name = relative(hostCheckout, path);
-  return revision && /^(web|plugins)\//.test(name) ? git("cat-file", "blob", `${revision}:${name}`) : readFileSync(path);
+  return revision && /^(web|plugins|relay\/bootstrap)\//.test(name) ? git("cat-file", "blob", `${revision}:${name}`) : readFileSync(path);
 }

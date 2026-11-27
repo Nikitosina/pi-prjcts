@@ -38,6 +38,10 @@ export const DANGEROUS_MINIMUM = [
  * with one line here, or states why it must not. `scripts/host-agent-e2e.mjs` checks the map against the live union.
  */
 export const ACTION_POLICY: Record<Action, ActionPolicy> = {
+  "api-version": allow("Read the inbox API version."),
+  "inbox-hosts": exclude("Client-side host selection belongs to the local inbox."),
+  "inbox-host-add": exclude("Only the local owner adds an inbox host."),
+  "inbox-host-forget": exclude("Only the local owner forgets an inbox host."),
   "remote-reload": allow("Reload remote access configuration."),
   "remote-status": allow("Remote access status."),
   "remote-devices": allow("Paired remote devices."),
@@ -178,6 +182,7 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
   "plugin-activate": exclude(
     "Adds a bundled plugin to the host's plugins.json; the owner does it in Settings → Plugins, and a separate restart loads it.",
   ),
+  "plugin-section": allow("Read a plugin section as the owner sees it in Settings or the chat's right panel."),
   plugin: allow("Call a plugin method; methods the plugin does not declare as reads or safe writes need the owner's approval."),
   "work-submit": exclude("Worker-scoped admission path; the Host agent sends with message."),
   notes: allow("A project's notes."),

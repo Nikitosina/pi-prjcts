@@ -31,4 +31,4 @@ Sidebar
 18. The section stays stale after a tool call, or an old answer overwrites a newer one, or a slow answer for the previous chat renders into the next chat.
 19. Switching chats, reloading the page or restarting the host shows the wrong chat's tasks or none.
 20. Task text is inserted as HTML.
-21. The panel overflows on a phone.
+21. The section overflows on a phone.

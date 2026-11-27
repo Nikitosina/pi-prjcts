@@ -707,7 +707,7 @@ async function ui2Images(run, page, record, dir, sinks) {
     "missing artifact degrades to a labelled note",
   );
   const facts = await page.evaluate(`(async () => {
-    const { transcriptHtml } = await import('/chat.js');
+    const { transcriptHtml } = (await import('/app.js')).chat;
     const only = transcriptHtml([{ kind: 'message', role: 'assistant', entryId: 9e9, at: 0, text: '', ref: '1.0', truncated: false, images: [{ ref: '1.0.0', mime: 'image/png', bytes: 2048 }] },
       { kind: 'message', role: 'user', origin: 'owner', entryId: 9e9 + 1, at: 0, text: '', ref: '2.0', truncated: false, images: [{ ref: '2.0.1', mime: 'image/"png', bytes: 10 }] }], false);
     const box = document.createElement('div');
@@ -2250,7 +2250,7 @@ const journeys = {
       );
       // Two quick changes: the host's answer to the first must not undo the second while it is still being written.
       const race = await page.evaluate(`(async () => {
-        const { setUi } = await import('/ui.js'), { state } = await import('/state.js');
+        const { setUi } = (await import('/app.js')).ui, { state } = await import('/state.js');
         const first = setUi({ statusLine: true });
         const second = setUi({ statusItems: state.ui.statusItems.map(item => item.id === 'model' ? { ...item, enabled: false } : item) });
         await first;
@@ -3004,28 +3004,27 @@ const journeys = {
         throw Error(`Plugins section does not show ${JSON.stringify(item)}: ${JSON.stringify(row)}`);
       record("visible", `Plugins section shows ${JSON.stringify(row.text.replace(/\s+/g, " "))}`);
     }
-    // Settings → Plugins: every launched plugin with a browser script mounts its panel, or shows why it could not.
-    const withPanel = mine.filter((item) => status.web.some((entry) => entry.plugin === item.name && entry.script));
+    // Settings → Plugins: every settings section of a launched plugin draws, or shows why it could not.
+    const names = new Set(mine.map((item) => item.name));
+    const wanted = status.sections.filter((entry) => entry.place === "settings" && names.has(entry.plugin));
     // The Plugins list lives in Settings, which the steps above already opened.
     await page.waitFor(`document.querySelector('#settings').open`, "Settings open");
     await page.waitFor(
-      `${JSON.stringify(withPanel.map((item) => item.name))}.every((name) => { const panel = document.querySelector('#settings .plugin-panel[data-plugin="' + name + '"]'); return !panel || ['ready', 'failed'].includes(panel.dataset.state); })`,
-      "plugin panels settled",
+      `${JSON.stringify(wanted)}.every((entry) => ['ready', 'failed'].includes(document.querySelector('#settings .plugin-section[data-plugin="' + entry.plugin + '"][data-section="' + entry.id + '"]')?.dataset.state))`,
+      "plugin sections settled",
     );
     record("entry", "opened Settings → Plugins");
     await page.shot(dir, "02-settings-plugins");
-    const panels = await page.evaluate(
-      `[...document.querySelectorAll('#settings .plugin-panel')].map((panel) => ({ name: panel.dataset.plugin, state: panel.dataset.state, error: panel.querySelector('.plugin-error')?.hidden ? null : panel.querySelector('.plugin-error')?.textContent, text: panel.querySelector('.plugin-slot')?.innerText ?? '' }))`,
+    const drawn = await page.evaluate(
+      `[...document.querySelectorAll('#settings .plugin-section')].map((node) => ({ plugin: node.dataset.plugin, section: node.dataset.section, state: node.dataset.state, error: node.querySelector('.plugin-error')?.hidden ? null : node.querySelector('.plugin-error')?.textContent, text: node.querySelector('.plugin-slot')?.innerText ?? '' }))`,
     );
-    writeFileSync(join(dir, "panels-dom.json"), JSON.stringify(panels, null, 2));
-    for (const item of withPanel) {
-      const panel = panels.find((candidate) => candidate.name === item.name);
-      const sidebarOnly = status.web.some((entry) => entry.plugin === item.name && entry.sidebar);
-      if (!panel && sidebarOnly) continue;
-      if (panel?.state !== "ready") throw Error(`the ${item.name} panel did not mount: ${JSON.stringify(panel)}`);
+    writeFileSync(join(dir, "sections-dom.json"), JSON.stringify(drawn, null, 2));
+    for (const entry of wanted) {
+      const node = drawn.find((candidate) => candidate.plugin === entry.plugin && candidate.section === entry.id);
+      if (node?.state !== "ready") throw Error(`the ${entry.plugin}.${entry.id} section did not draw: ${JSON.stringify(node)}`);
       record(
         "visible",
-        `Settings → Plugins mounts the ${item.name} panel: ${JSON.stringify(panel.text.replace(/\s+/g, " ").slice(0, 200))}`,
+        `Settings → Plugins draws the ${entry.plugin}.${entry.id} section: ${JSON.stringify(node.text.replace(/\s+/g, " ").slice(0, 200))}`,
       );
     }
   },

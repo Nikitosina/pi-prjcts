@@ -41,7 +41,7 @@ The browser step drives the inbox at `/`: case 11 checks that its Pull requests 
 Retired with the classic client, so no longer checked in a browser: the grouped card's per-provider actions and the `#` PR menu
 (11/23), the failed-plugin banner (9; the `plugins` RPC still reports failures), the Owner setup plugin step (10; Owner setup was
 removed) and the "plugin is not loaded" note in the PR card (20; `automation-snapshot` still flags `unloadedProviders`).
-26. A plugin's declared browser file (`web.script`) changed on disk after the plugin loaded is served before the host restarts, so the browser runs plugin code the running host did not load (ui2-web-failures S12).
+26. Retired: plugins no longer ship browser files (`scripts/plugin-sections-failures.md`), so no plugin file is served to the browser.
 27. The checkout's standing instructions (`AGENTS.md`) change while the host runs, e.g. on a branch switch: every later worker fails to start with "standing instructions changed" until the host restarts, or starts with the instructions read when the host started instead of the current ones.
 
 ## Developing a plugin (2026-11-10)
