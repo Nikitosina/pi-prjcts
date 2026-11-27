@@ -909,7 +909,11 @@ async function dispatchRequest(input: RequestData, literalMessage = false): Prom
         validate: (project) => {
           if (project.deleted) throw new Error("Project is deleted");
         },
-        operation: (owner) => owner.chatUpdate(input.chatId, { title: input.title, archived: input.archived }),
+        operation: async (owner) => {
+          const chat = await owner.chatUpdate(input.chatId, { title: input.title, archived: input.archived });
+          void telegram.chatChanged(input.id, chat);
+          return chat;
+        },
       });
     case "delete":
       return lifecycle(

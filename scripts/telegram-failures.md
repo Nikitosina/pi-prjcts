@@ -97,3 +97,14 @@ Incident on the deployed host: `sentSeq` 1119, `sentPart` for seq 1120 had `part
 
 59. The owner is replaced (unpair and pair another chat) while a held notice resends: a later part, caption or follow-up goes to the replacement, or the part that reached the old chat is routed for the new account or not counted as confirmed. Proof: `scripts/telegram-media-unit.mjs` (red before, green after).
 60. A progress message of the old account is edited in the new chat, or a progress or message record is written for the new owner by a send that began for the old one. Proof: `scripts/telegram-jobs-unit.mjs`.
+
+## One topic per coordinator chat in the private chat, added before the change (2026-11-27)
+Owner decision: with Threaded Mode on for the bot (`getMe` says `has_topics_enabled`), every coordinator chat gets its own topic in the paired private chat, created lazily with `createForumTopic` and named `<Project> · <Chat title>`. The mapping (project, chat, `message_thread_id`) is Telegram state. Telegram had private-topic regressions in 2026 (tdlib/telegram-bot-api 847, 905, 944), so a topic problem never blocks the notice queue. Proof: `scripts/telegram-e2e.mjs` (fake Bot API with topics; T61-T68).
+61. With topics off (`has_topics_enabled` false or missing) any request carries `message_thread_id` or calls a topic method, or the existing flow changes.
+62. A notice, progress message, media or album, or a command reply goes to the general thread (or to another chat's topic) although its coordinator chat has a topic; a notice with no chat does not go to the project's Main topic; a later part of one notice (second chunk, spillover, album) uses another thread than its first part.
+63. Two notices or a notice and a progress update for the same chat arrive together and create two topics, or the mapping is lost across a restart so a second topic appears.
+64. A message in a topic goes to the `/projects` route or the wrong chat instead of the topic's chat; a reply to a question inside a topic does not answer it; a message in the general thread stops using the reply target and `state.route`; a message in an unknown thread is dropped.
+65. The owner deletes a topic: the next notice fails forever, is lost, or is sent twice. It must drop the mapping, create a new topic and send once.
+66. `createForumTopic` fails (400, 5xx, dropped connection, a malformed result): the notice is stuck retrying, blocks the notices behind it, or is lost. It must go to the general thread once, and the next notice tries the topic again after a short wait, not on every call.
+67. Re-pairing to another chat or changing the bot keeps the old mapping, so a new owner's notice is sent to a thread of the old chat. A bot whose topics were turned off keeps sending thread ids.
+68. Archiving a chat leaves its topic open, or renaming a chat leaves the old topic name; a failure of `closeForumTopic` or `editForumTopic` fails the chat update or the notice queue.

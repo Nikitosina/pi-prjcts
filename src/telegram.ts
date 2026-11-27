@@ -1,5 +1,6 @@
 import { Type } from "typebox";
 import { Compile } from "typebox/compile";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -29,17 +30,31 @@ type Action =
   | { t: "model-page"; projectId: string; role: ModelRole; revision: string; offset: number }
   | ({ t: "model-set"; projectId: string; revision: string } & ModelSelection);
 type Target = { projectId: string; chatId: string; entryId?: string };
+type TopicRef = { projectId: string; chatId: string };
+/** `closed`: the chat is archived and its topic was closed, so restoring the chat reopens it. */
+type Topic = TopicRef & { thread: number; closed?: true };
+type TopicName = () => string | Promise<string>;
 type DeliveryError = { at: number; method: string; description: string } & (
   { kind: "api"; httpStatus: number; code: number; descriptionProvided: boolean } | { kind: "network" | "not-sent" | "incomplete-response" }
 );
 export type HeldOutcome = "resend" | "delivered";
-type SentPart = { seq: number; chatId?: number; parts: number; plan?: TelegramPart[]; pendingMedia?: boolean; anchorMessageId?: number };
+/** `thread`: the topic every part of the notice goes to; absent means the general thread. */
+type SentPart = {
+  seq: number;
+  chatId?: number;
+  parts: number;
+  plan?: TelegramPart[];
+  pendingMedia?: boolean;
+  anchorMessageId?: number;
+  thread?: number;
+};
 /** A notice whose attachment upload may or may not have reached Telegram. It no longer blocks later notices; the owner resolves it. */
 type HeldNotice = { seq: number; at: number; ownerChatId: number; sentPart: SentPart; notice?: Notice };
 type State = {
   version: 1;
   token: string | null;
-  bot: { id: number; username: string } | null;
+  /** `topics`: the bot has Threaded Mode on (`has_topics_enabled`), so each coordinator chat gets a topic in the owner's private chat. */
+  bot: { id: number; username: string; topics?: boolean } | null;
   owner: { chatId: number; name: string } | null;
   pairing: { code: string; expiresAt: number; wrong: number } | null;
   /** `sentPart`: parts of notice `seq` already sent, so a retry after a mid-way failure does not repeat them. */
@@ -56,6 +71,7 @@ type State = {
   deliveryErrors?: DeliveryError[];
   /** One progress message per Job, edited in place; `text` is what it shows now. */
   progress?: Record<string, { messageId: number; text: string; chatId?: number }>;
+  topics?: Topic[];
 };
 /** A Job's plan as the progress message shows it. `etaMin` is the caller's estimate; without it the remaining estimates are summed. */
 export type JobProgress = {
@@ -77,6 +93,7 @@ type Message = {
   from?: { id: number; first_name?: string; username?: string };
   text?: string;
   reply_to_message?: { message_id: number };
+  message_thread_id?: number;
 };
 type Button = { text: string; callback_data: string };
 /** A trusted transport guard may throw this only before forwarding a request, never after a timeout. */
@@ -165,6 +182,11 @@ const BOT_COMMANDS = [
   { command: "model", description: "Show or set a role's model" },
 ];
 const COMMANDS_RETRY_MS = [1000, 5000, 30_000, 120_000];
+const TOPIC_NAME_MAX = 128;
+const TOPIC_GONE = /message thread not found|TOPIC_ID_INVALID|TOPIC_DELETED|TOPIC_CLOSED|topic (?:is )?(?:closed|deleted)/i;
+const sameTopic = (a: TopicRef, b: TopicRef) => a.projectId === b.projectId && a.chatId === b.chatId;
+const inThread = (thread?: number) => (thread === undefined ? {} : { message_thread_id: thread });
+const topicLabel = (project: string, chat: string) => `${project} · ${chat}`.replace(/[\uE000\uE001]/g, "");
 
 const UNCERTAIN_MEDIA =
   "Telegram attachment delivery is uncertain. It is held without automatic resend to avoid duplicates; later notices continue. Verify in Telegram, then resend or mark it delivered.";
@@ -334,10 +356,13 @@ export function startTelegram(options: {
     state.keys[id] = action;
     return `k:${id}`;
   };
+  /** The topic of the message being answered, so command replies and acknowledgements stay in it. */
+  const inbound = new AsyncLocalStorage<number | undefined>();
   async function say(text: string, buttons: Button[][] = [], target?: Target) {
     if (!state.owner) return;
     const sent = await call<{ message_id: number }>("sendMessage", {
       chat_id: state.owner.chatId,
+      ...inThread(inbound.getStore()),
       text: clip(text),
       ...(buttons.length ? { reply_markup: { inline_keyboard: buttons } } : {}),
     });
@@ -345,6 +370,60 @@ export function startTelegram(options: {
     persist();
   }
 
+  const topicsOn = () => state.owner !== null && state.bot?.topics === true;
+  const topicOf = (ref: TopicRef) => state.topics?.find((topic) => sameTopic(topic, ref));
+  const topicKey = (ref: TopicRef) => `${ref.projectId}\n${ref.chatId}`;
+  const creating = new Map<string, Promise<number | undefined>>(),
+    cooldown = new Map<string, number>();
+  async function createTopic(ref: TopicRef, name: TopicName): Promise<number | undefined> {
+    const owner = state.owner!.chatId;
+    try {
+      const label = clip((await name()).trim() || "Main", TOPIC_NAME_MAX),
+        created = await call<{ message_thread_id?: number }>("createForumTopic", { chat_id: owner, name: label }),
+        thread = created?.message_thread_id;
+      if (typeof thread !== "number" || !Number.isSafeInteger(thread) || thread <= 0) throw new Error("invalid createForumTopic result");
+      if (state.owner?.chatId !== owner) return undefined;
+      state.topics = [...(state.topics ?? []).filter((topic) => !sameTopic(topic, ref)), { ...ref, thread }];
+      persist();
+      return thread;
+    } catch {
+      cooldown.set(topicKey(ref), Date.now() + backoffMs * 5);
+      return undefined;
+    }
+  }
+  /** The topic of a coordinator chat, created on first use. Undefined sends to the general thread: topics off, a failed creation or its cool-down. */
+  async function topicFor(ref: TopicRef, name: TopicName): Promise<number | undefined> {
+    if (!topicsOn()) return undefined;
+    const known = topicOf(ref);
+    if (known) return known.thread;
+    const id = topicKey(ref);
+    if ((cooldown.get(id) ?? 0) > Date.now()) return undefined;
+    let pending = creating.get(id);
+    if (!pending) {
+      pending = createTopic(ref, name).finally(() => creating.delete(id));
+      creating.set(id, pending);
+    }
+    return pending;
+  }
+  /** Runs a send in a topic; if Telegram says the topic is gone, the mapping is dropped, a new topic is created and the same send is repeated once. */
+  async function inTopic<T>(
+    ref: TopicRef,
+    name: TopicName,
+    thread: number | undefined,
+    run: (thread?: number) => Promise<T>,
+    remember: (thread?: number) => void,
+  ): Promise<T> {
+    try {
+      return await run(thread);
+    } catch (error) {
+      if (thread === undefined || !(error instanceof TelegramError && error.code === 400 && TOPIC_GONE.test(error.message))) throw error;
+      state.topics = (state.topics ?? []).filter((topic) => !(sameTopic(topic, ref) && topic.thread === thread));
+      persist();
+      const fresh = await topicFor(ref, name);
+      remember(fresh);
+      return run(fresh);
+    }
+  }
   const active = () => listProjects().filter((project) => !project.deleted && !project.archived);
   const pick = <T extends { title: string }>(items: T[], query: string): T | undefined => {
     const index = Number(query);
@@ -603,12 +682,15 @@ export function startTelegram(options: {
     const text = message.text?.trim();
     if (!text) return;
     const target = message.reply_to_message ? state.messages[String(message.reply_to_message.message_id)] : undefined;
+    const topic =
+      message.message_thread_id === undefined ? undefined : state.topics?.find((item) => item.thread === message.message_thread_id);
     if (target?.entryId && !text.startsWith("/")) {
       const entry = inbox(projectDir(target.projectId)).find((item) => item.id === target.entryId);
       if (entry?.kind === "question" && !entry.result) return say(await answer(target.projectId, target.entryId, text, updateId));
     }
     if (text.startsWith("/")) return command(text);
     if (target) return deliver(target, text, updateId);
+    if (topic) return deliver({ projectId: topic.projectId, chatId: topic.chatId }, text, updateId);
     if (!state.route) return say("Pick a project first: /projects");
     return deliver(state.route, text, updateId);
   }
@@ -702,6 +784,7 @@ export function startTelegram(options: {
       if (state.owner?.chatId !== chat.id) {
         state.messages = {};
         state.progress = {};
+        state.topics = [];
       }
       state.owner = {
         chatId: chat.id,
@@ -718,8 +801,8 @@ export function startTelegram(options: {
       return;
     }
     if (!state.owner || chat.id !== state.owner.chatId || (callback && callback.from.id !== state.owner.chatId)) return;
-    if (callback) return onCallback(callback);
-    if (message) return onMessage(message, update.update_id);
+    if (callback) return inbound.run(callback.message?.message_thread_id, () => onCallback(callback));
+    if (message) return inbound.run(message.message_thread_id, () => onMessage(message, update.update_id));
   }
 
   async function loop() {
@@ -801,9 +884,23 @@ export function startTelegram(options: {
       }
     }
   }
+  /** Threaded Mode is switched in BotFather at any time, so the flag is read again at every start. */
+  async function refreshTopics() {
+    const token = state.token,
+      bot = state.bot;
+    if (!token || !bot) return;
+    try {
+      const me = await call<{ id: number; has_topics_enabled?: boolean }>("getMe", {}, undefined, token);
+      if (token !== state.token || me.id !== bot.id || bot.topics === (me.has_topics_enabled === true)) return;
+      bot.topics = me.has_topics_enabled === true;
+      persist();
+      options.changed?.();
+    } catch {}
+  }
   if (options.receiveUpdates !== false) {
     void loop();
     void registerCommands();
+    void refreshTopics();
   }
 
   /** Notice text is model Markdown, sent as Telegram HTML; the header and footer are ours, escaped. */
@@ -883,13 +980,24 @@ export function startTelegram(options: {
       persist();
       throw new Error(UNCERTAIN_MEDIA);
     }
-    if (state.sentPart?.seq !== notice.seq) state.sentPart = { seq: notice.seq, chatId: startOwner, parts: 0, plan };
+    const ref: TopicRef = { projectId: notice.projectId, chatId: notice.chatId || "main" },
+      name: TopicName = () => topicLabel(notice.project, notice.chat || "Main");
+    if (state.sentPart?.seq !== notice.seq) {
+      const thread = await topicFor(ref, name);
+      state.sentPart = { seq: notice.seq, chatId: startOwner, parts: 0, plan, ...(thread === undefined ? {} : { thread }) };
+    }
     const sentPart = state.sentPart;
     const chatId = (sentPart.chatId ??= startOwner);
     // Every part goes to the chat the notice was bound to; an owner replaced mid-delivery never receives the rest.
     const bound = () => {
       if (state.owner?.chatId !== chatId) throw new Error("Telegram recipient changed during delivery");
     };
+    const remember = (thread?: number) => {
+      if (thread === undefined) delete sentPart.thread;
+      else sentPart.thread = thread;
+      persist();
+    };
+    const send = <T>(run: (thread?: number) => Promise<T>) => inTopic(ref, name, sentPart.thread, run, remember);
     const parts = sentPart.plan ?? plan;
     sentPart.plan = parts;
     persist();
@@ -942,12 +1050,15 @@ export function startTelegram(options: {
         }
         if (!media.length) {
           sent = [
-            await call("sendMessage", {
-              chat_id: chatId,
-              text: `${htmlToPlain(part.caption)}\n[Attachment unavailable, unauthorized, or exceeds upload limits]`,
-              ...markup,
-              ...reply,
-            }),
+            await send((thread) =>
+              call<{ message_id: number }>("sendMessage", {
+                chat_id: chatId,
+                ...inThread(thread),
+                text: `${htmlToPlain(part.caption)}\n[Attachment unavailable, unauthorized, or exceeds upload limits]`,
+                ...markup,
+                ...reply,
+              }),
+            ),
           ];
         } else {
           sentPart.pendingMedia = true;
@@ -959,7 +1070,11 @@ export function startTelegram(options: {
                 : telegramMediaForm(media[0], chatId, part.caption, document);
             if ("reply_markup" in markup) form.body.set("reply_markup", JSON.stringify(markup.reply_markup));
             if ("reply_parameters" in reply) form.body.set("reply_parameters", JSON.stringify(reply.reply_parameters));
-            const result = await call<{ message_id: number } | { message_id: number }[]>(form.method, form.body);
+            const result = await send((thread) => {
+              if (thread === undefined) form.body.delete("message_thread_id");
+              else form.body.set("message_thread_id", String(thread));
+              return call<{ message_id: number } | { message_id: number }[]>(form.method, form.body);
+            });
             const messages = Array.isArray(result) ? result : [result];
             if (
               messages.length !== refs.length ||
@@ -992,12 +1107,15 @@ export function startTelegram(options: {
               persist();
               if (error.code === 400 || error.code === 413) {
                 sent = [
-                  await call("sendMessage", {
-                    chat_id: chatId,
-                    text: `${htmlToPlain(part.caption)}\n[Telegram rejected this attachment]`,
-                    ...markup,
-                    ...reply,
-                  }),
+                  await send((thread) =>
+                    call<{ message_id: number }>("sendMessage", {
+                      chat_id: chatId,
+                      ...inThread(thread),
+                      text: `${htmlToPlain(part.caption)}\n[Telegram rejected this attachment]`,
+                      ...markup,
+                      ...reply,
+                    }),
+                  ),
                 ];
               } else throw error;
             } else throw error;
@@ -1006,10 +1124,31 @@ export function startTelegram(options: {
         }
       } else {
         try {
-          sent = [await call("sendMessage", { chat_id: chatId, text: part.text, parse_mode: "HTML", ...markup, ...reply })];
+          sent = [
+            await send((thread) =>
+              call<{ message_id: number }>("sendMessage", {
+                chat_id: chatId,
+                ...inThread(thread),
+                text: part.text,
+                parse_mode: "HTML",
+                ...markup,
+                ...reply,
+              }),
+            ),
+          ];
         } catch (error) {
           if (!(error instanceof TelegramError && error.code === 400 && /can't parse entities/i.test(error.message))) throw error;
-          sent = [await call("sendMessage", { chat_id: chatId, text: htmlToPlain(part.text), ...markup, ...reply })];
+          sent = [
+            await send((thread) =>
+              call<{ message_id: number }>("sendMessage", {
+                chat_id: chatId,
+                ...inThread(thread),
+                text: htmlToPlain(part.text),
+                ...markup,
+                ...reply,
+              }),
+            ),
+          ];
         }
       }
       const routed = state.owner?.chatId === chatId;
@@ -1178,7 +1317,25 @@ export function startTelegram(options: {
           // Any other 400 means the message is gone: fall through and send a new one.
         }
       }
-      const sent = await call<{ message_id: number }>("sendMessage", { chat_id, text, parse_mode: "HTML" });
+      const ref: TopicRef = { projectId: view.projectId, chatId: view.chatId },
+        name: TopicName = async () => {
+          const title = await options
+            .chats(view.projectId)
+            .then((chats) => chats.find((chat) => chat.id === view.chatId)?.title)
+            .catch(() => undefined);
+          let project = view.projectId;
+          try {
+            project = loadProject(view.projectId).name;
+          } catch {}
+          return topicLabel(project, title ?? "Main");
+        };
+      const sent = await inTopic(
+        ref,
+        name,
+        await topicFor(ref, name),
+        (thread) => call<{ message_id: number }>("sendMessage", { chat_id, ...inThread(thread), text, parse_mode: "HTML" }),
+        () => {},
+      );
       if (state.owner?.chatId !== chat_id) return;
       state.progress![view.jobId] = { messageId: sent.message_id, text, chatId: chat_id };
       state.messages[String(sent.message_id)] = { projectId: view.projectId, chatId: view.chatId };
@@ -1203,6 +1360,7 @@ export function startTelegram(options: {
       pairing:
         state.pairing && state.pairing.expiresAt > Date.now() ? { code: state.pairing.code, expiresAt: state.pairing.expiresAt } : null,
       route,
+      topics: state.bot?.topics === true,
       lastError: state.lastError,
       held: (state.held ?? []).map((item) => ({
         seq: item.seq,
@@ -1225,11 +1383,35 @@ export function startTelegram(options: {
     snapshot,
     flush,
     resolveHeld,
+    /** Keeps a chat's topic in step with the chat: closed while archived, named after the chat's title. Best-effort. */
+    async chatChanged(projectId: string, chat: DurableChat) {
+      const topic = topicOf({ projectId, chatId: chat.id });
+      if (!topic || !topicsOn()) return;
+      const chat_id = state.owner!.chatId,
+        message_thread_id = topic.thread;
+      try {
+        if (chat.archived) {
+          await call("closeForumTopic", { chat_id, message_thread_id });
+          topic.closed = true;
+        } else {
+          if (topic.closed) {
+            await call("reopenForumTopic", { chat_id, message_thread_id });
+            delete topic.closed;
+          }
+          await call("editForumTopic", {
+            chat_id,
+            message_thread_id,
+            name: clip(topicLabel(loadProject(projectId).name, chat.title), TOPIC_NAME_MAX),
+          });
+        }
+        persist();
+      } catch {}
+    },
     progress,
     async setToken(token: string) {
-      let bot: { id: number; username: string };
+      let bot: { id: number; username: string; has_topics_enabled?: boolean };
       try {
-        bot = await call<{ id: number; username: string }>("getMe", {}, undefined, token);
+        bot = await call<{ id: number; username: string; has_topics_enabled?: boolean }>("getMe", {}, undefined, token);
       } catch (error) {
         throw new Error(
           error instanceof TelegramError && error.code === 401
@@ -1240,8 +1422,10 @@ export function startTelegram(options: {
       const same = state.bot?.id === bot.id;
       Object.assign(
         state,
-        { token, bot: { id: bot.id, username: bot.username }, lastError: null },
-        same ? {} : { owner: null, pairing: null, offset: 0, route: null, keys: {}, messages: {}, deliveryErrors: [], held: [] },
+        { token, bot: { id: bot.id, username: bot.username, topics: bot.has_topics_enabled === true }, lastError: null },
+        same
+          ? {}
+          : { owner: null, pairing: null, offset: 0, route: null, keys: {}, messages: {}, deliveryErrors: [], held: [], topics: [] },
       );
       rejected = false;
       persist();
@@ -1275,6 +1459,7 @@ export function startTelegram(options: {
         lastError: null,
         deliveryErrors: [],
         held: [],
+        topics: [],
       });
       persist();
       restart();

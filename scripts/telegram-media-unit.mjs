@@ -90,7 +90,8 @@ let fault = null,
   updates = [],
   sends = [],
   attempts = [],
-  id = 0;
+  id = 0,
+  topicId = 900;
 const server = createServer(async (req, res) => {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
@@ -146,6 +147,7 @@ const server = createServer(async (req, res) => {
     gate = null;
     await run();
   }
+  if (method === "createForumTopic") return reply({ ok: true, result: { message_thread_id: ++topicId } });
   const message_ids = Array.from({ length: method === "sendMediaGroup" ? input.media.length : 1 }, () => ++id);
   sends.push({ method, input, message_id: message_ids[0], message_ids });
   reply({
@@ -863,6 +865,53 @@ try {
   assert.equal(sends.length, 1);
   assert.equal(sends[0].method, "sendMessage");
   assert(!sends[0].input.text.includes("Test · Main"));
+
+  // 62/65: with topics on, one media and an album go to the chat's topic; a topic that is gone is recreated and the upload repeated once.
+  const topicsOn = (topics = []) => {
+    const state = JSON.parse(readFileSync(statePath));
+    writeFileSync(statePath, JSON.stringify({ ...state, bot: { id: 1, username: "b", topics: true }, topics }));
+  };
+  reset(`Before ![Image](${ref("demo.png")}) after`);
+  topicsOn();
+  start();
+  await bridge.flush();
+  assert.deepEqual(
+    attempts.map((a) => a.method),
+    ["createForumTopic", "sendPhoto"],
+  );
+  assert.equal(attempts[0].input.name, "Test · Main");
+  assert.equal(sends[0].input.message_thread_id, String(topicId));
+  mapped();
+  reset(`![One](${ref("demo.png")}) ![Two](${ref("Screenshot (1 (copy)).png")})`);
+  topicsOn();
+  start();
+  await bridge.flush();
+  assert.deepEqual(
+    sends.map((s) => s.method),
+    ["sendMediaGroup"],
+  );
+  assert.equal(sends[0].input.message_thread_id, String(topicId));
+  mapped();
+  reset(`![Image](${ref("demo.png")})`);
+  topicsOn([{ projectId: project, chatId: "main", thread: 500 }]);
+  fault = { method: "sendPhoto", code: 400, description: "Bad Request: message thread not found" };
+  start();
+  await bridge.flush();
+  assert.deepEqual(
+    attempts.map((a) => a.method),
+    ["sendPhoto", "createForumTopic", "sendPhoto"],
+  );
+  assert.equal(sends.length, 1);
+  assert.equal(sends[0].input.message_thread_id, String(topicId));
+  assert.deepEqual(JSON.parse(readFileSync(statePath)).topics, [{ projectId: project, chatId: "main", thread: topicId }]);
+  mapped();
+  reset(`![Image](${ref("demo.png")})`);
+  topicsOn();
+  fault = { method: "createForumTopic", code: 500 };
+  start();
+  await bridge.flush();
+  assert.equal(sends.length, 1, "a failing topic creation sends the upload to the general thread");
+  assert.equal(sends[0].input.message_thread_id, undefined);
 
   console.log(
     "PASS one-message native caption/envelope/actions/routing; albums/overflow; byte/MIME/security/fallback; retry/order/restart/uncertainty",
