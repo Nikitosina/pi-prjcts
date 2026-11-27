@@ -66,7 +66,7 @@ const wrapFetch = `(() => {
   window.fetch = async (url, init) => {
     if (url !== "/api" || !init?.body) return real(url, init);
     const body = JSON.parse(init.body);
-    const entry = { size: body.writes?.length, action: body.action, project: body.projectId ?? body.id, chat: body.chatId ?? "main", text: body.text, requestId: body.requestId, start: performance.now() };
+    const entry = { size: body.writes?.length, paths: body.writes?.map((write) => write.path), action: body.action, project: body.projectId ?? body.id, chat: body.chatId ?? "main", text: body.text, requestId: body.requestId, start: performance.now() };
     window.__calls.push(entry);
     const rule = window.__rules[body.action] ?? {};
     if (rule.delay) await sleep(rule.delay);
@@ -1010,12 +1010,13 @@ await kit.run(async () => {
     await ev(`document.querySelector('#feed [data-earlier]').click()`);
     await kit.delay(1200);
     const rows = await ev(
-      `new Set([...document.querySelectorAll('#feed .memory-row[data-tool="projects_knowledge_write"][data-status="ok"] [data-memory]')].map((n) => n.dataset.memory)).size`,
+      `[...new Set([...document.querySelectorAll('#feed .memory-row[data-tool="projects_knowledge_write"][data-status="ok"] [data-memory]')].map((n) => n.dataset.memory))].sort()`,
     );
     const asks = await calls("memory-writes");
+    const asked = asks.flatMap((item) => item.paths).sort();
     check(
       "R38 more unknown writes on screen than one question holds are asked about in several questions, none left out",
-      rows > 20 && asks.length >= 2 && asks.every((item) => item.size <= 20) && asks.reduce((sum, item) => sum + item.size, 0) === rows,
+      rows.length > 20 && asks.length >= 2 && asks.every((item) => item.size <= 20) && JSON.stringify(asked) === JSON.stringify(rows),
       { rows, asks },
     );
   });

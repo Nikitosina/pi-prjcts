@@ -140,7 +140,12 @@ function openSharedStream(host, path, onFrame, onState = () => {}) {
     up = false,
     release = null;
   channel.onmessage = ({ data }) => {
-    if (data.hello) return void (inner && channel.postMessage({ up }));
+    if (data.hello) {
+      if (!inner) return;
+      channel.postMessage({ up });
+      channel.postMessage({ frame: { t: "sync" } });
+      return;
+    }
     if (inner) return;
     if (data.frame) onFrame(data.frame);
     else onState(data.up);
@@ -148,6 +153,7 @@ function openSharedStream(host, path, onFrame, onState = () => {}) {
   channel.postMessage({ hello: true });
   navigator.locks
     .request(name, { signal: abort.signal }, () => {
+      if (abort.signal.aborted) return;
       inner = openStream(
         host,
         path,

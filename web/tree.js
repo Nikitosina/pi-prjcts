@@ -5,7 +5,7 @@
 import { esc, clip } from "./format.js";
 import { binding, display, onBindingsChange } from "./hotkeys.js";
 import { emit, fail, on, stale, state, toast } from "./state.js";
-import { groups, HostState, online, remoteGroups } from "./hosts.js";
+import { groupOf, groups, HostState, online, remoteGroups } from "./hosts.js";
 
 export function mountTree(client) {
   const tree = document.querySelector("#tree");
@@ -13,7 +13,12 @@ export function mountTree(client) {
   const archiving = new Set(); // `${project}:${chat}` while its archive request runs
   const ARCHIVE_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M2.5 3h11v3h-11zM3.5 6v7h9V6M6.5 8.5h3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
   const archiveTitle = () => `Archive chat${binding("archive-chat") ? ` (${display(binding("archive-chat"))})` : ""}`;
-  const chatsByProject = new Map(); // project id -> [{ id, title }] from the last `show` of that project
+  const chatsByProject = new Map(); // chat key (see chatKey) -> [{ id, title }] from the last `show` of that project
+  /** Two hosts may list one project id, so a remote host's chats are stored under its group key too; the local host keeps the bare id. */
+  const chatKey = (projectId, host = state.host) => {
+    const group = groupOf(host);
+    return group && !group.client.local ? `${group.key}:${projectId}` : projectId;
+  };
   const open = new Set();
   const closedHosts = new Set(); // group keys the owner folded
   const SEEN = "pi-ui2-seen";
@@ -28,11 +33,12 @@ export function mountTree(client) {
   function rememberChats(projectId, chats) {
     storeChats(
       projectId,
+      state.host,
       chats.filter((chat) => !chat.archived).map((chat) => ({ id: chat.id, title: chat.title })),
     );
   }
-  function storeChats(projectId, chats) {
-    chatsByProject.set(projectId, chats);
+  function storeChats(projectId, host, chats) {
+    chatsByProject.set(chatKey(projectId, host), chats);
     try {
       localStorage.setItem("pi-ui2-chats", JSON.stringify(Object.fromEntries(chatsByProject)));
     } catch {}
@@ -45,7 +51,7 @@ export function mountTree(client) {
   }
   /** Chats of the selected project in tree order; hotkeys 1–9 pick from this. */
   function visibleChats() {
-    return chatsByProject.get(state.projectId) ?? [{ id: "main", title: "Main" }];
+    return chatsByProject.get(chatKey(state.projectId)) ?? [{ id: "main", title: "Main" }];
   }
   function dot(activity) {
     if (activity?.needs) return `<span class="dot needs" aria-label="needs you"></span>`;
@@ -53,12 +59,12 @@ export function mountTree(client) {
     if (activity?.paused) return `<span class="dot paused" aria-label="paused"></span>`;
     return `<span class="dot idle" aria-hidden="true"></span>`;
   }
-  function projectRows(projects) {
+  function projectRows(projects, host = groups[0].client) {
     return projects
       .map((project) => {
-        const selected = project.id === state.projectId,
+        const selected = project.id === state.projectId && host === state.host,
           expanded = open.has(project.id);
-        const chats = chatsByProject.get(project.id) ?? [{ id: "main", title: "Main" }];
+        const chats = chatsByProject.get(chatKey(project.id, host)) ?? [{ id: "main", title: "Main" }];
         const questions = project.notice?.questions ?? 0;
         const rows = expanded
           ? chats
@@ -105,7 +111,11 @@ export function mountTree(client) {
       ? `<span class="host-state" data-tone="${up ? "online" : group.state === HostState.Connecting ? "wait" : "off"}">${esc(label)}</span>`
       : "";
     const rows =
-      up && !folded ? (group.projects.length ? projectRows(group.projects) : `<p class="muted small empty-line">No projects yet.</p>`) : "";
+      up && !folded
+        ? group.projects.length
+          ? projectRows(group.projects, group.client)
+          : `<p class="muted small empty-line">No projects yet.</p>`
+        : "";
     return `<div class="host-group" role="group" aria-label="${esc(group.name)}${group.entry ? ` · ${esc(label)}` : ""}" data-host-group="${esc(group.key)}" data-state="${esc(group.state)}"><div class="host-head">${toggle}${status}<button type="button" class="host-menu-btn" data-host-menu="${esc(group.key)}" aria-label="${esc(group.name)} actions" aria-haspopup="menu" title="Host actions">⋯</button></div>${rows}</div>`;
   }
   function renderTree() {
@@ -135,9 +145,9 @@ export function mountTree(client) {
     if (archiveDialog.open) archiveDialog.close();
   }
   /** Asks before archiving a chat of `projectId`; the row's button and the archive-chat hotkey both come here. */
-  function requestArchive(projectId, chatId) {
+  function requestArchive(projectId, chatId, host = state.host) {
     if (chatId === "main") return toast("Main cannot be archived.");
-    const chat = chatsByProject.get(projectId)?.find((item) => item.id === chatId);
+    const chat = chatsByProject.get(chatKey(projectId, host))?.find((item) => item.id === chatId);
     if (!chat || archiveDialog.open || archiving.has(`${projectId}:${chatId}`)) return;
     const opener = document.activeElement,
       ask = ++asked;
@@ -146,7 +156,7 @@ export function mountTree(client) {
     const confirm = archiveDialog.querySelector("[data-archive-confirm]");
     confirm.addEventListener("click", () => {
       confirm.disabled = true;
-      void archive(projectId, chat, () => ask === asked && closeArchiveDialog());
+      void archive(projectId, host, chat, () => ask === asked && closeArchiveDialog());
     });
     archiveDialog.addEventListener(
       "close",
@@ -162,29 +172,34 @@ export function mountTree(client) {
     archiveDialog.showModal();
     confirm.focus();
   }
-  async function archive(projectId, chat, done) {
+  async function archive(projectId, host, chat, done) {
     const key = `${projectId}:${chat.id}`;
     if (archiving.has(key)) return;
     archiving.add(key);
     renderTree();
     // The order as the owner saw it: a host refresh during the request may already have dropped the chat.
-    const before = chatsByProject.get(projectId) ?? [],
+    const before = chatsByProject.get(chatKey(projectId, host)) ?? [],
       index = before.findIndex((item) => item.id === chat.id);
     try {
       // Archiving aborts a running turn in the runtime; refuse instead of stopping it behind the owner's back.
-      const view = await client.call("show", { id: projectId, chatId: chat.id });
+      const view = await (host ?? client).call("show", { id: projectId, chatId: chat.id });
       if (view.chats?.find((item) => item.id === chat.id)?.busy)
         throw new Error(
           `“${clip(chat.title, 40)}” is answering. Open it and stop the turn (${display(binding("stop"))}) before archiving.`,
         );
-      await client.call("chat-update", { id: projectId, chatId: chat.id, archived: true });
+      await (host ?? client).call("chat-update", { id: projectId, chatId: chat.id, archived: true });
       done();
-      const rest = (chatsByProject.get(projectId) ?? []).filter((item) => item.id !== chat.id),
+      const rest = (chatsByProject.get(chatKey(projectId, host)) ?? []).filter((item) => item.id !== chat.id),
         left = (id) => rest.some((item) => item.id === id),
         next = [...before.slice(index + 1), ...before.slice(0, Math.max(0, index)).reverse()].find((item) => left(item.id));
-      storeChats(projectId, rest);
-      if (state.projectId === projectId && state.chatId === chat.id) emit("select-request", { projectId, chatId: next?.id ?? "main" });
-      toast(`Archived “${clip(chat.title, 40)}”.`, { action: "Undo", onAction: () => void unarchive(projectId, chat, index), ms: 8000 });
+      storeChats(projectId, host, rest);
+      if (state.projectId === projectId && state.host === host && state.chatId === chat.id)
+        emit("select-request", { projectId, chatId: next?.id ?? "main", host });
+      toast(`Archived “${clip(chat.title, 40)}”.`, {
+        action: "Undo",
+        onAction: () => void unarchive(projectId, host, chat, index),
+        ms: 8000,
+      });
     } catch (error) {
       done();
       fail(error);
@@ -193,15 +208,15 @@ export function mountTree(client) {
       renderTree();
     }
   }
-  async function unarchive(projectId, chat, index) {
+  async function unarchive(projectId, host, chat, index) {
     const gen = state.generation;
     try {
-      await client.call("chat-update", { id: projectId, chatId: chat.id, archived: false });
-      const chats = (chatsByProject.get(projectId) ?? []).filter((item) => item.id !== chat.id);
+      await (host ?? client).call("chat-update", { id: projectId, chatId: chat.id, archived: false });
+      const chats = (chatsByProject.get(chatKey(projectId, host)) ?? []).filter((item) => item.id !== chat.id);
       chats.splice(Math.max(0, index), 0, chat);
-      storeChats(projectId, chats);
+      storeChats(projectId, host, chats);
       if (stale(gen)) renderTree();
-      else emit("select-request", { projectId, chatId: chat.id });
+      else emit("select-request", { projectId, chatId: chat.id, host });
     } catch (error) {
       fail(error);
     }
@@ -213,7 +228,8 @@ export function mountTree(client) {
 
   tree.addEventListener("click", async (event) => {
     const archiveButton = event.target.closest("[data-archive-chat]");
-    if (archiveButton) return requestArchive(archiveButton.dataset.projectId, archiveButton.dataset.archiveChat);
+    if (archiveButton)
+      return requestArchive(archiveButton.dataset.projectId, archiveButton.dataset.archiveChat, rowHost(archiveButton) ?? state.host);
     const fold = event.target.closest("[data-host-toggle]");
     if (fold) {
       const key = fold.dataset.hostToggle;
@@ -228,13 +244,14 @@ export function mountTree(client) {
     }
     const head = event.target.closest("[data-project]");
     if (head) {
-      const id = head.dataset.project;
-      if (id === state.projectId) {
+      const id = head.dataset.project,
+        host = rowHost(head);
+      if (id === state.projectId && (!host || host === state.host)) {
         open.has(id) ? open.delete(id) : open.add(id);
         renderTree();
       } else {
         open.add(id);
-        emit("select-request", { projectId: id, chatId: "main", host: rowHost(head) });
+        emit("select-request", { projectId: id, chatId: "main", host });
       }
       return;
     }
@@ -242,8 +259,9 @@ export function mountTree(client) {
     if (chat) return emit("select-request", { projectId: chat.dataset.projectId, chatId: chat.dataset.chat, host: rowHost(chat) });
     const memory = event.target.closest("[data-memory-node]");
     if (memory) {
-      if (memory.dataset.projectId !== state.projectId)
-        emit("select-request", { projectId: memory.dataset.projectId, chatId: "main", host: rowHost(memory) });
+      const host = rowHost(memory);
+      if (memory.dataset.projectId !== state.projectId || (host && host !== state.host))
+        emit("select-request", { projectId: memory.dataset.projectId, chatId: "main", host });
       emit("open", { kind: "memory" });
       return;
     }
