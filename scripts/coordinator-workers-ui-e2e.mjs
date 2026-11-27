@@ -515,7 +515,7 @@ try {
 
   // C3: a burst of jobs reads is one bounded worker-contexts request, never a transcript read of an ended agent.
   const before = await evaluate(`window.__spy.contexts.length`, s);
-  await evaluate(`import('/workers.js').then((m) => Promise.all(Array.from({ length: 15 }, () => m.loadJobs())))`, s);
+  await evaluate(`import('/app.js').then(({ workers: m }) => Promise.all(Array.from({ length: 15 }, () => m.loadJobs())))`, s);
   await delay(1500);
   const spy = await evaluate(`window.__spy`, s);
   const endedIds = snap.jobs
@@ -533,7 +533,7 @@ try {
   );
 
   // C2: an unknown context reads as unknown, never 0 %.
-  const reloadJobs = () => evaluate(`import('/workers.js').then((m) => m.loadJobs())`, s);
+  const reloadJobs = () => evaluate(`import('/app.js').then(({ workers: m }) => m.loadJobs())`, s);
   const waitContextsCall = async (count) => waitFor(`window.__spy.contexts.length > ${count}`, s, "next worker-contexts request", 40);
   for (const [label, value] of [
     ["null entry", null],

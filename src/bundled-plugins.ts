@@ -19,7 +19,7 @@ export const BUNDLED_PLUGINS: readonly BundledPlugin[] = [
     id: "simulator",
     name: "iOS simulators",
     description:
-      "Managed iOS simulator clones per project, with Coordinator and worker tools and a screenshot panel. Needs Xcode on this Mac.",
+      "Managed iOS simulator clones per project, with Coordinator and worker tools and a settings section. Needs Xcode on this Mac.",
     directory: directory("simulator"),
   },
   {

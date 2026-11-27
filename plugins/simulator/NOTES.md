@@ -1,11 +1,14 @@
-# Project simulator panel
+# Project simulator sections
 
-The owner first selected layout A: a small, read-only simulator card above Workers beside the coordinator chat, with an expanded screenshot dialog. The separate tab and fleet-dock prototypes were rejected and removed. Simulators stay optional.
+The owner first selected layout A: a small, read-only simulator card above Workers beside the coordinator chat, with an expanded screenshot dialog. The card later moved to Settings → Plugins as a panel (`mount(slot, panel)`) with clone tabs, lifecycle buttons, a More actions menu and a screenshot.
 
-When the classic inbox retired its context-panel hooks, the card moved to Settings → Plugins as a panel (`mount(slot, panel)`). It keeps the card's controls: one tab per owned clone, boot and shut down, new clone from a shut-down source, reset, delete, turning management on and off, inspect and acknowledge, retry of an unconfirmed request, and an enlarged screenshot. The panel API has no dialogs or toasts, so confirmations open inline in the panel and results show as a line under the controls.
+Plugin browser code is now removed for every host (REMOTE_SPEC.md decision 16), so the panel, its stylesheet and the `/plugins/simulator/frame` route are gone. Core draws two declarative settings sections from `section.ts`:
 
-The owner then asked for a simpler panel with more icons and secondary information tucked away. One row carries the clone tabs (a dot and hidden text for the state), a single status badge and icon tools (enlarge, new clone) beside a labelled Boot or Shut down. Reset, delete and turning management off sit in a More actions disclosure that opens by click, Enter or tap and closes after a choice or a press outside; each still asks inline. Metadata and the explanatory copy sit under Details. Errors, the unknown-outcome acknowledgement and Retry exact request stay in a visible alert box. Escape keeps its app-wide meaning, so it closes Settings rather than the menu.
+- iOS simulators: management on or off with one button (turning it off asks inline), one row per owned clone with its name, state and lease holder, and an unknown outcome with its reason and a dangerous acknowledgement that calls `recover`.
+- Simulator slimming: one row per simslim category, kept or slimmed, with one toggle that saves the whole list through `configure`. Agents have no tool for these categories, so this is the owner's only control.
 
-The panel uses the plugin's RPC methods and the bearer-authenticated `/plugins/simulator/frame` route through `panel.rpc` and `panel.fetch`. It does not forward pointer, keyboard or gesture input. Polling and captures run only while the panel is mounted and the page is visible; the mount's signal stops them and its object URLs are revoked. A request whose answer never arrived stays per project in page memory, so Retry exact request resends the same request id after Settings is reopened.
+Boot, shut down, create, reset and delete stay with the Coordinator and worker tools, as do screenshots and rotation. The page shows no screenshot.
 
-Frontend proof uses a private host with fixture devices: `scripts/simulator-panel-e2e.mjs` runs a fake simslim and a fake XcodeBuildMCP, never a real simulator. Backend ownership enforcement and real lifecycle checks are separate.
+Each button carries a request id derived from a per-start nonce, the project, a counter bumped after each `configure` or `recover`, and the button's target. An unchanged state therefore draws the same view on every poll, and a changed one never replays an old receipt.
+
+Frontend proof uses a private host with fixture devices: `scripts/simulator-section-e2e.mjs` runs a fake simslim, never a real simulator. Backend ownership enforcement and real lifecycle checks are separate.

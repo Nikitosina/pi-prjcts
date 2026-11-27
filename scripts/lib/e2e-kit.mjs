@@ -366,7 +366,7 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
       });
       chrome.stdio[3].write(JSON.stringify({ id: key, method, params, ...(sessionId ? { sessionId } : {}) }) + "\0");
     });
-  kit.openPage = async (url, { video = "all" } = {}) => {
+  kit.openPage = async (url, { video = "all", trustedSpki } = {}) => {
     const clog = createWriteStream(join(artifacts, "chrome.log"), { flags: "a", mode: 0o600 });
     chrome = spawn(
       "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -377,6 +377,7 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
         "--no-default-browser-check",
         "--disable-background-networking",
         `--user-data-dir=${join(root, "chrome-profile")}`,
+        ...(trustedSpki ? [`--ignore-certificate-errors-spki-list=${trustedSpki}`] : []),
         "--remote-debugging-pipe",
         "about:blank",
       ],
@@ -415,6 +416,9 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
         }
       }
     });
+    return newTab(url, video);
+  };
+  async function newTab(url, video) {
     const { targetId } = await send("Target.createTarget", { url: "about:blank" });
     const { sessionId: s } = await send("Target.attachToTarget", { targetId, flatten: true });
     for (const method of ["Runtime.enable", "Log.enable", "Network.enable", "Page.enable"]) await send(method, {}, s);
@@ -424,6 +428,8 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
     if (videoEnabled() && video === "all") await send("Page.startScreencast", { format: "jpeg", quality: 70 }, s);
     await send("Page.navigate", { url }, s);
     const page = {
+      newTab: (url) => newTab(url, video),
+      close: () => send("Target.closeTarget", { targetId }),
       evaluate: async (expression) => {
         const r = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true }, s);
         if (r.exceptionDetails) throw Error(r.exceptionDetails.text + " " + (r.exceptionDetails.exception?.description ?? ""));
@@ -459,7 +465,7 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
       throw Error(`Timed out waiting for ${label}`);
     };
     return page;
-  };
+  }
   /** The inbox at `/` with a project selected (optionally one of its chats), in the owned host's browser UI. */
   kit.webUrl = async (id, chatId) => {
     const web = await kit.rpc({ action: "web" });
