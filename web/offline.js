@@ -33,7 +33,6 @@ const READ = [
   "[data-tree]",
   "input[type=search]",
   "#settings nav button",
-  "#settings .settings-close",
 ].join(",");
 const CONTROLS = "button, input, textarea, select";
 

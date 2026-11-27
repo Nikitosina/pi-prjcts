@@ -145,8 +145,8 @@ export function mountChat(client, media, slash, memory) {
   const reportPattern = /^\[(worker|scout|reviewer) ([0-9a-f-]{36}) ([\w-]+(?: to start)?): ([^\]\n]*)\]([\s\S]*)$/;
   const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/;
 
-  /** Re-reads the selected chat. Coalesces: a call while one is in flight runs once more afterwards. */
   let unloaded = ""; // the offline host never loaded this chat
+  /** Re-reads the selected chat. Coalesces: a call while one is in flight runs once more afterwards. */
   async function loadChat() {
     if (loading) {
       loading.again = true;

@@ -158,6 +158,7 @@ export function mountTree(client) {
   /** Asks before archiving a chat of `projectId`; the row's button and the archive-chat hotkey both come here. */
   function requestArchive(projectId, chatId, host = state.host) {
     if (chatId === "main") return toast("Main cannot be archived.");
+    if (offlineCopy(groupOf(host) ?? {})) return toast(OFFLINE_WRITES);
     const chat = chatsByProject.get(chatKey(projectId, host))?.find((item) => item.id === chatId);
     if (!chat || archiveDialog.open || archiving.has(`${projectId}:${chatId}`)) return;
     const opener = document.activeElement,
