@@ -4,6 +4,7 @@
 import { uuid } from "./api.js";
 import { clip, esc, markdown, oneLine, shortModel } from "./format.js";
 import { emit, fail, inline, on, state, toast } from "./state.js";
+import { dropDraft, hostAgentDraftKey, loadDraft, saveDraft } from "./drafts.js";
 
 export function mountHostagent(client, chat, media) {
   const { forgetReveals, mergeGroups, morph, showThinking, thinkingHtml, transcriptClick, transcriptFocus, transcriptHtml } = chat;
@@ -72,6 +73,7 @@ export function mountHostagent(client, chat, media) {
   }
 
   on("chat-display", () => isOpen() && void loadHostAgent());
+  client.addEventListener?.("statechange", () => client.state === "online" && isOpen() && void loadHostAgent());
 
   async function loadHostAgent() {
     const load = ++loads;
@@ -82,6 +84,7 @@ export function mountHostagent(client, chat, media) {
       loadApprovals(),
     ]);
     if (load !== loads) return;
+    emit("panel-live", "agent");
     available = !!history;
     drawer.dataset.available = available ? "1" : "0";
     if (!available) {
@@ -393,6 +396,11 @@ export function mountHostagent(client, chat, media) {
 
   // ---------------------------------------------------------------------------------------------------------------- composer
 
+  // This page's Host agent belongs to one host: its unsent text is kept under that host's storage prefix.
+  const draftKey = hostAgentDraftKey(client);
+  input.value = loadDraft(draftKey)?.text ?? "";
+  input.addEventListener("input", () => saveDraft(draftKey, input.value, input.selectionStart));
+  addEventListener("pagehide", () => saveDraft(draftKey, input.value, input.selectionStart));
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
@@ -405,12 +413,14 @@ export function mountHostagent(client, chat, media) {
     if (!text || !available || form.dataset.sending === "1") return;
     form.dataset.sending = "1";
     input.value = "";
+    dropDraft(draftKey);
     try {
       await client.call("host-agent-send", { requestId: uuid(), text });
       error = "";
       await loadHostAgent();
     } catch (reason) {
       input.value = text;
+      saveDraft(draftKey, text);
       // "has no model" / "not in the model catalog": say it where the owner is looking and open the model picker.
       if (/model/i.test(reason.message ?? "")) {
         error = reason.message;

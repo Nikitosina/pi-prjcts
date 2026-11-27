@@ -74,8 +74,8 @@ const { loadLimits } = limits;
 const { closeDiskDetail, diskDetailOpen } = diskDetail;
 const { archiveDialogOpen, closeArchiveDialog, markSeen, rememberChats, renderTree, requestArchive, visibleChats } = tree;
 const { currentChat, loadChat, questionChat, stopTurn, toggleSteer } = chat;
-const { closeReview, renderReview } = review;
-const { reviewEntries, closeMergeDialog, loadJobs, loadSide, mergeDialogOpen, renderWorker } = workers;
+const { closeReview, renderReview, rereadReview } = review;
+const { reviewEntries, closeMergeDialog, loadJobs, loadSide, mergeDialogOpen, renderWorker, rereadWorker } = workers;
 const { refreshRecentMemory, renderMemoryEntry, renderMemoryList } = memory;
 const { closeSettings, openSettings, SECTIONS, settingsBack, settingsOpen, showSection } = settings;
 const {
@@ -153,9 +153,19 @@ function watch(projectId, host) {
 on("host-online", (group) => {
   if (group.client !== state.host || !state.projectId) return;
   watch(state.projectId, state.host);
-  // A view with unsaved input (a Memory edit, a review comment, a message to a worker) keeps its draft: it is not replaced by a fresh read.
-  if (state.focus.kind !== "chat" && !focusView.querySelector("textarea:not(:placeholder-shown), .mem-edit")) renderFocus();
+  if (state.focus.kind === "chat") return;
+  // One path: every open view reads again. A view with unsaved input (a Memory edit, a review comment, a message to a worker) is never replaced;
+  // its data is renewed in the background so its controls unlock after its own live read.
+  if (focusView.querySelector("textarea:not(:placeholder-shown), .mem-edit")) return void rereadFocus();
+  renderFocus({ mark: false });
 });
+function rereadFocus() {
+  const focus = state.focus;
+  if (focus.kind === "worker") return rereadWorker(focus.id);
+  if (focus.kind === "pr") return rereadReview(focus);
+  if (focus.kind === "memory" && focus.path) return renderMemoryEntry(focusView, focus.path, focus.edit, { quiet: true });
+  if (focus.kind === "memory") return renderMemoryList(focusView, { quiet: true });
+}
 // A forgotten host leaves the page: its selected project gives way to the first project still listed.
 on("hosts", () => {
   document.querySelector(".list-head").hidden = remoteGroups();
@@ -228,7 +238,7 @@ function showChat() {
   chatView.hidden = false;
   renderTree();
 }
-function renderFocus() {
+function renderFocus({ mark = true } = {}) {
   closeReview();
   const focus = state.focus;
   center.dataset.focus = focus.kind;
@@ -236,7 +246,7 @@ function renderFocus() {
   focusView.hidden = false;
   focusView.className = `view focus-${focus.kind}`;
   if (focus.kind === "worker") void renderWorker(focusView, focus.id, { steer: focus.steer });
-  else if (focus.kind === "pr") void renderReview(focusView, focus);
+  else if (focus.kind === "pr") void renderReview(focusView, focus, "", { mark });
   else if (focus.kind === "memory" && focus.path) void renderMemoryEntry(focusView, focus.path, focus.edit);
   else if (focus.kind === "memory") void renderMemoryList(focusView);
   renderTree();
@@ -565,13 +575,17 @@ async function start() {
   paintStatusLine();
   if (!token) return signIn();
   // Forgotten in another tab, revoked, or no longer paired or compatible: this page's Settings host is not usable, so the page returns to the local host.
-  admin.addEventListener?.("statechange", () => {
-    if (!GONE.has(admin.state)) return;
+  const leaveGone = () => {
+    if (!GONE.has(admin.state)) return false;
     const url = new URL(location.href);
     url.searchParams.delete("host");
     url.searchParams.delete("panel");
     location.replace(url);
-  });
+    return true;
+  };
+  admin.addEventListener?.("statechange", leaveGone);
+  // The first connection of a remote Settings host may already have ended revoked: the page never opens its Settings or Host agent.
+  if (leaveGone()) return;
   void hostSwitcher(document.querySelector("#agent-host"), admin, "agent").catch(fail);
   try {
     await localHost.call("list");
@@ -594,6 +608,7 @@ async function start() {
   if (first) await select(first, first === wanted ? (url.searchParams.get("chat") ?? "main") : "main");
   else document.body.dataset.ready = "1";
   const panel = url.searchParams.get("panel");
+  if (leaveGone()) return;
   if (panel === "settings") openSettings();
   if (panel === "agent") toggleHostAgent(true);
   void loadLimits(); // the host's last readings; providers are asked only by the refresh button

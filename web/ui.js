@@ -90,9 +90,10 @@ export function mountUi(client) {
     apply(next);
     queued++;
     const done = writing.then(async () => {
+      let gate = client;
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
-          const result = await client.call("ui-set", { revision: state.uiRevision, patch });
+          const result = await gate.call("ui-set", { revision: state.uiRevision, patch });
           state.uiRevision = result.revision;
           if (queued === 1) apply(normalize(result.ui));
           return true;
@@ -102,7 +103,15 @@ export function mountUi(client) {
             await readUi(); // show what the host kept, not the refused change
             return false;
           }
-          state.uiRevision = (await client.call("ui-get")).revision;
+          // The revision lookup and the write that follows never run after the host went offline in between.
+          gate = client.guard();
+          try {
+            state.uiRevision = (await gate.call("ui-get")).revision;
+          } catch (lookup) {
+            fail(lookup);
+            await readUi();
+            return false;
+          }
         }
       }
     });

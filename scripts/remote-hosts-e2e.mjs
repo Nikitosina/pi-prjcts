@@ -245,18 +245,17 @@ await client.run(async () => {
         await control("stop");
         await page.waitFor(statusIs("offline"), "lost replies");
         assert.match(await page.evaluate("writeResult"), /result unknown, check after reconnecting/i);
-        await control("restart", 2);
-        await other.waitFor(
-          async () => (await control("status")).requests.filter((r) => r === "search").length === 2,
-          "first replay in flight",
+        assert.match(
+          await page.evaluate("readResult"),
+          /offline|connection lost|never loaded/i,
+          "13: the read settled when the host dropped",
         );
-        await control("stop");
-        await page.waitFor(statusIs("offline"), "lost replay");
         await control("restart", 2);
-        assert.equal(await page.evaluate("readResult"), "retry probe");
+        await page.waitFor(statusIs("online"), "host back");
+        await new Promise((done) => setTimeout(done, 1000));
         const requests = (await control("status")).requests;
-        assert.equal(requests.filter((r) => r === "message").length, 1);
-        assert.equal(requests.filter((r) => r === "search").length, 3);
+        assert.equal(requests.filter((r) => r === "message").length, 1, "a write is never resent");
+        assert.equal(requests.filter((r) => r === "search").length, 1, "13: a read is never replayed after the reconnect");
         await page.evaluate(`(async()=>{window.large = await probe.authorizedFetch('/large');})()`);
         assert.equal((await page.evaluate(`probe.call('list')`)).length, 0);
         assert.match(await page.evaluate(`probe.authorizedFetch('/changes?project=host').then(r=>r.text())`), /sync/);

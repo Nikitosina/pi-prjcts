@@ -72,6 +72,17 @@ export function mountSettings(client, project, ui, statusline, promptView, limit
     return true;
   }
   on("select", () => dialog.open && paint());
+  // A reconnect reads the open section again; unsaved prompt text is kept in localStorage (prompts.js), so repainting never loses it.
+  client.addEventListener?.("statechange", () => {
+    if (client.state !== "online" || !dialog.open) return;
+    // Unsaved tier edits are not replaced: a live read of the same data only unlocks the panel.
+    if (dialog.querySelector("[data-unsaved]"))
+      void client.call("tiers-get").then(
+        () => emit("panel-live", "settings"),
+        () => {},
+      );
+    else paint(true);
+  });
   dialog.addEventListener("cancel", (event) => event.preventDefault()); // Esc goes through the hotkey registry (leave-focus)
   // The close event is queued: a dialog reopened since then keeps the section it just painted.
   dialog.addEventListener("close", () => {
@@ -132,6 +143,7 @@ export function mountSettings(client, project, ui, statusline, promptView, limit
       .then(() => {
         if (alive()) body.scrollTop = scroll;
       })
+      .finally(() => alive() && emit("panel-live", "settings"))
       .catch((error) => {
         if (alive()) body.innerHTML = `<p class="error-line">${esc(error.message)}</p>`;
       });
@@ -154,10 +166,11 @@ export function mountSettings(client, project, ui, statusline, promptView, limit
   }
   async function update(changes, message) {
     const gen = state.generation,
-      id = state.projectId;
-    const snap = await projectSettings();
+      id = state.projectId,
+      gate = project.guard(id);
+    const snap = await gate.call("settings-snapshot", { id });
     if (stale(gen)) return null;
-    const result = await project.call("settings-update", { id, confirm: id, expectedRevision: snap.revision, changes });
+    const result = await gate.call("settings-update", { id, confirm: id, expectedRevision: snap.revision, changes });
     if (message) say(message);
     emit("settings-changed");
     return result;
@@ -306,9 +319,9 @@ ${live.compactionFailure && !live.compacting ? `<details class="compaction-failu
   // ---------------------------------------------------------------------------------------------------------------- Model
 
   /** profiles-set with the revision it read; a refusal (stale revision, unknown tier, locked tool) is shown and the section re-reads. */
-  async function setProfile(revision, patch, label) {
+  async function setProfile(revision, patch, label, gate = project) {
     try {
-      await project.call("profiles-set", { projectId: state.projectId, revision, profile, patch });
+      await gate.call("profiles-set", { projectId: state.projectId, revision, profile, patch });
       say(label);
       emit("profiles");
     } catch (error) {
@@ -435,7 +448,8 @@ ${live.compactionFailure && !live.compacting ? `<details class="compaction-failu
     body.addEventListener("change", async (event) => {
       const box = event.target.closest("[data-tool-name]");
       if (!box) return;
-      const profiles = await project.call("profiles-get", { projectId: state.projectId }).catch(sayFail);
+      const gate = project.guard(state.projectId);
+      const profiles = await gate.call("profiles-get", { projectId: state.projectId }).catch(sayFail);
       if (!profiles || !alive()) return;
       const disabled = new Set(profiles.profiles[profile].tools?.disabled ?? []);
       box.checked ? disabled.delete(box.dataset.toolName) : disabled.add(box.dataset.toolName);
@@ -443,6 +457,7 @@ ${live.compactionFailure && !live.compacting ? `<details class="compaction-failu
         profiles.revision,
         { tools: { disabled: [...disabled] } },
         `${box.dataset.toolName} ${box.checked ? "on" : "off"} for ${profile}`,
+        gate,
       );
     });
   }
@@ -885,6 +900,7 @@ ${live.compactionFailure && !live.compacting ? `<details class="compaction-failu
     };
     const draw = () => {
       const changed = dirty();
+      body.toggleAttribute("data-unsaved", changed);
       body.innerHTML = `${line("Ordered models per tier; the first is preferred, the rest are the fallback order.", "Drag a model or use the arrows. On a quota or rate limit, work moves down the list and never back. A model without credentials shows struck through. A tier a project uses cannot be removed.")}${tiers
         .map((tier, t) => {
           const found = search.t === t ? matches(tier) : [];

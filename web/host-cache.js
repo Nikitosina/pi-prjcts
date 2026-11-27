@@ -7,6 +7,10 @@
 
 export const limits = { hostBytes: 16 * 1024 * 1024 };
 
+let last = 0;
+/** One increasing number for every read, save and wipe: the clock alone ties within a millisecond and an older answer could then replace a newer one. */
+export const stamp = () => (last = Math.max(Date.now(), last + 1));
+
 const encoder = new TextEncoder();
 const bytesOf = (text) => encoder.encode(text).length;
 
@@ -90,7 +94,7 @@ export function hostCache(hostId) {
             wait(metas.get(key), (existing) => {
               // The newest read wins: a slower, older answer of the same read never replaces one that began after it.
               if (existing && existing.readAt > startedAt) return;
-              metas.put({ id: key, hostId, savedAt: Date.now(), readAt: startedAt, bytes });
+              metas.put({ id: key, hostId, savedAt: stamp(), readAt: startedAt, bytes });
               datas.put(data, key);
               wait(metas.index("host").getAll(hostId), (all) => {
                 let total = all.reduce((sum, item) => sum + item.bytes, 0);
@@ -116,7 +120,7 @@ export function hostCache(hostId) {
  * not exist yet, so another tab's first save cannot escape it; a failed deletion still leaves the entries unreadable and is thrown to the caller.
  * Only called for a remote host, so a page with no remote hosts never opens the database. */
 export async function wipeHost(hostId) {
-  await transact("readwrite", (_metas, _datas, tombs) => tombs.put(Date.now(), hostId));
+  await transact("readwrite", (_metas, _datas, tombs) => tombs.put(stamp(), hostId));
   await transact("readwrite", (metas, datas) => {
     wait(metas.index("host").getAllKeys(hostId), (keys) => {
       for (const key of keys) {

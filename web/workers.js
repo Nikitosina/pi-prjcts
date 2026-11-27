@@ -667,5 +667,14 @@ export function mountWorkers(client, chat, media) {
     else toast("No review provider serves this project.");
   });
 
-  return { loadJobs, chatWorkers, loadSide, mergeDialogOpen, closeMergeDialog, renderWorker, reviewEntries };
+  /** Reads the open worker's transcript again without touching what is drawn (a message to the worker is being written): only the data the banner dates is renewed. */
+  async function rereadWorker(id) {
+    const gen = state.generation,
+      focus = state.focus;
+    const page = await client
+      .call("thread-history", { id: state.projectId, threadId: id, limit: 200, messageText: "full" })
+      .catch(() => null);
+    if (page && !stale(gen) && state.focus === focus) focus.data = page;
+  }
+  return { loadJobs, chatWorkers, loadSide, mergeDialogOpen, closeMergeDialog, renderWorker, rereadWorker, reviewEntries };
 }

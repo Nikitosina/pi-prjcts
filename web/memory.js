@@ -1,7 +1,7 @@
 // Memory (knowledge reimagined): the project's Preferences, Decisions and Procedures from `memory-index`, with the archive behind a
 // toggle and broken links listed. Entries open and save through knowledge-read/-write; chat rows undo a write with `memory-undo`.
 import { ago, esc, markdown } from "./format.js";
-import { emit, fail, on, stale, state, toast } from "./state.js";
+import { claim, emit, fail, newest, on, stale, state, toast } from "./state.js";
 
 export function mountMemory(client) {
   const KINDS = [
@@ -161,20 +161,26 @@ export function mountMemory(client) {
   }
 
   /** The Memory list in the center. */
-  async function renderMemoryList(root) {
+  async function renderMemoryList(root, { quiet = false } = {}) {
+    const token = claim(root);
+    if (quiet) {
+      const memory = await loadMemory().catch(() => null);
+      if (memory && newest(root, token)) state.focus.data = memory.index;
+      return;
+    }
     root.innerHTML = `<div class="focus-head"><button type="button" class="back" data-cmd="leave-focus" aria-label="Back to chat">← <kbd>Esc</kbd></button><h1>Memory</h1><span class="scope">Project</span><button type="button" class="info" data-info="What agents remember about this project. Preferences go into every prompt; decisions and procedures are read on demand. Edits keep revision history." aria-label="About memory">ⓘ</button></div><p class="loading-line">Loading memory…</p>`;
     const gen = state.generation;
     let memory;
     try {
       memory = await loadMemory();
     } catch (error) {
-      if (stale(gen) || !root.isConnected) return;
+      if (stale(gen) || !root.isConnected || !newest(root, token)) return;
       root.querySelector(".loading-line").outerHTML =
         `<p class="error-line">Could not read memory: ${esc(error.message)} <button type="button" class="link-btn" data-retry-memory>Retry</button></p>`;
       root.querySelector("[data-retry-memory]").addEventListener("click", () => void renderMemoryList(root));
       return;
     }
-    if (stale(gen) || !memory || !root.isConnected) return;
+    if (stale(gen) || !memory || !root.isConnected || !newest(root, token)) return;
     state.focus.data = memory.index; // what the view shows, for its offline copy marker
     paintList(root, memory);
   }
@@ -216,18 +222,24 @@ export function mountMemory(client) {
   const withoutFrontMatter = (text) => text.replace(/^---\n[\s\S]*?\n---\n?/, "");
 
   /** One entry in the center: rendered, with Edit (revision-checked through knowledge-write). */
-  async function renderMemoryEntry(root, path, edit = false) {
-    const gen = state.generation;
+  async function renderMemoryEntry(root, path, edit = false, { quiet = false } = {}) {
+    const gen = state.generation,
+      token = claim(root);
+    if (quiet) {
+      const fresh = await client.call("knowledge-read", { id: state.projectId, path }).catch(() => null);
+      if (fresh && !stale(gen) && newest(root, token)) state.focus.data = fresh;
+      return;
+    }
     root.innerHTML = `<div class="focus-head"><button type="button" class="back" data-cmd="leave-focus" aria-label="Back">← <kbd>Esc</kbd></button><h1>${esc(memoryTitle(path))}</h1></div><p class="loading-line">Loading…</p>`;
     let doc;
     try {
       doc = await client.call("knowledge-read", { id: state.projectId, path });
     } catch (error) {
-      if (stale(gen)) return;
+      if (stale(gen) || !newest(root, token)) return;
       root.querySelector(".loading-line").textContent = error.message;
       return;
     }
-    if (stale(gen) || !root.isConnected) return;
+    if (stale(gen) || !root.isConnected || !newest(root, token)) return;
     state.focus.data = doc;
     const entry = cache.entries.find((item) => item.path === path);
     const kind = KINDS.find((item) => item.id === (entry?.kind ?? memoryKind(path)));

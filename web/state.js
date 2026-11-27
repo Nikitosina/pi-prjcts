@@ -40,6 +40,14 @@ export function emit(event, payload) {
   }
 }
 export const stale = (generation) => generation !== state.generation;
+const renders = new WeakMap();
+/** Every render of a view takes a token from its root; a read that began for an older render must not draw (`newest`), however late it answers. */
+export const claim = (root) => {
+  const token = (renders.get(root) ?? 0) + 1;
+  renders.set(root, token);
+  return token;
+};
+export const newest = (root, token) => renders.get(root) === token;
 export const project = () => state.projects.find((item) => item.id === state.projectId) ?? null;
 export const chatArgs = () => (state.chatId && state.chatId !== "main" ? { chatId: state.chatId } : {});
 

@@ -42,34 +42,21 @@ export async function remoteTransport(entry) {
   const client = Object.assign(new EventTarget(), entry, {
     local: false,
     state: "offline",
+    /** Counts the times the connection went away, so a flow that began before one can tell it must not go on. */
+    epoch: 0,
     close,
+    /** Nothing is replayed (REMOTE_SPEC.md, decision 14): a request that loses its connection fails at once, and the view asks again after the reconnect. */
     async run(read, signal, operation) {
-      const execute = (s) =>
-        operation(async (path, init = {}) => {
+      const session = active;
+      if (client.state !== "online" || !session) throw Error(client.state);
+      try {
+        return await operation(async (path, init = {}) => {
           const body = init.body == null ? null : await new Response(init.body).arrayBuffer();
-          return s.request({ ...init, path, body });
+          return session.request({ ...init, path, body });
         });
-      for (;;) {
-        const session = active;
-        if (client.state !== "online" || !session) throw Error(client.state);
-        try {
-          return await execute(session);
-        } catch (error) {
-          if (signal?.aborted || !session.closed) throw error;
-          if (!read) throw Error("Result unknown, check after reconnecting.");
-        }
-        while (client.state === "offline" && !stopped)
-          await new Promise((resolve, reject) => {
-            const finish = () => {
-              if (client.state === "offline" && !signal?.aborted && !stopped) return;
-              client.removeEventListener("statechange", finish);
-              signal?.removeEventListener("abort", finish);
-              signal?.aborted ? reject(signal.reason) : resolve();
-            };
-            client.addEventListener("statechange", finish);
-            signal?.addEventListener("abort", finish, { once: true });
-            finish();
-          });
+      } catch (error) {
+        if (signal?.aborted || !session.closed) throw error;
+        throw Error(read ? "Connection lost." : "Result unknown, check after reconnecting.");
       }
     },
     authorizedFetch(path, init = {}) {
@@ -77,6 +64,7 @@ export async function remoteTransport(entry) {
     },
   });
   function state(value) {
+    if (value !== "online") client.epoch++;
     client.state = value;
     client.dispatchEvent(new Event("statechange"));
   }

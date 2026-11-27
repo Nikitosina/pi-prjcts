@@ -16,7 +16,24 @@ export function mountReview(client) {
     cleanup?.();
     cleanup = null;
   }
-  async function renderReview(root, focus, afterWrite = "") {
+  /** Opening a review marks it seen, which is a write: only an owner's open of a live host does it. A copy shown offline and a view read again
+   * after a reconnect mark nothing. */
+  async function openSnapshot(rpc, mark) {
+    if (!mark || client.offline) return rpc("open", { seen: false });
+    try {
+      return await rpc("open", { seen: true });
+    } catch (error) {
+      if (client.offline) return rpc("open", { seen: false });
+      throw error;
+    }
+  }
+  /** Reads the open review again without touching what is drawn (a comment is being written): only the data the banner dates is renewed. */
+  async function rereadReview(focus) {
+    const gen = state.generation;
+    const fresh = await client.call("pr-review-open", { id: state.projectId, provider: focus.provider, pr: focus.id, seen: false });
+    if (state.generation === gen && state.focus === focus) focus.data = fresh;
+  }
+  async function renderReview(root, focus, afterWrite = "", { mark = true } = {}) {
     closeReview();
     const room = document.createElement("section"),
       panel = document.createElement("div");
@@ -54,7 +71,7 @@ export function mountReview(client) {
     };
     room.innerHTML = `<div class="rv-head">${back}<h1>Reading PR #${esc(focus.id)}…</h1></div>`;
     try {
-      const s = await rpc("open", { seen: !afterWrite });
+      const s = await openSnapshot(rpc, mark && !afterWrite);
       state.focus.data = s;
       let currentFiles;
       tour = reviewTour(
@@ -378,5 +395,5 @@ export function mountReview(client) {
     root.append(msg);
   }
 
-  return { closeReview, renderReview };
+  return { closeReview, renderReview, rereadReview };
 }

@@ -6,6 +6,7 @@ import { clip, clock, dur, esc, imagesHtml, markdown, oneLine } from "./format.j
 import { FILE_ONLY_NOTE, PathSource, insertText, pathsFromTransfer } from "./path-drop.js";
 import { chatArgs, emit, fail, on, stale, state, toast } from "./state.js";
 import { follower } from "./follow.js";
+import { chatDraftKey, dropDraft, loadDraft, saveDraft } from "./drafts.js";
 
 export function mountChat(client, media, slash, memory) {
   const { hydrateMedia } = media;
@@ -28,7 +29,8 @@ export function mountChat(client, media, slash, memory) {
   const pendingSends = []; // owner messages sent from this page that the transcript does not show yet, oldest first
   // The recovery handle of an unsettled send survives a reload: its id, project, chat and exact text, so Retry sends the same message under the same id.
   // One storage key per attempt, so tabs never overwrite each other's handles.
-  const HANDLE_PREFIX = "pi-pending-send:",
+  const QUARANTINE = "pi-quarantined-send:",
+    HANDLE_PREFIX = "pi-pending-send:",
     LEGACY_HANDLES = "pi-pending-sends";
   const savedHandles = new Map(); // attempt id → the stored text of its handle
   function loadHandles() {
@@ -42,10 +44,15 @@ export function mountChat(client, media, slash, memory) {
       localStorage.removeItem(LEGACY_HANDLES);
     } catch {}
     try {
-      for (let index = 0; index < localStorage.length; index++) {
-        const key = localStorage.key(index);
-        if (!key?.startsWith(HANDLE_PREFIX)) continue;
+      for (const key of Object.keys(localStorage)) {
+        if (!key.startsWith(HANDLE_PREFIX)) continue;
         const item = JSON.parse(localStorage.getItem(key) ?? "null");
+        // A handle from before hosts were named cannot say which host it was sent to: it is set aside, never routed to the local host.
+        if (item && typeof item.hostId !== "string") {
+          localStorage.setItem(QUARANTINE + key.slice(HANDLE_PREFIX.length), localStorage.getItem(key));
+          localStorage.removeItem(key);
+          continue;
+        }
         if (
           typeof item?.id === "string" &&
           key === HANDLE_PREFIX + item.id &&
@@ -60,7 +67,7 @@ export function mountChat(client, media, slash, memory) {
           savedHandles.set(item.id, localStorage.getItem(key));
           found.push({
             id: item.id,
-            hostId: typeof item.hostId === "string" ? item.hostId : "local",
+            hostId: item.hostId,
             projectId: item.projectId,
             chatId: item.chatId,
             text: item.text,
@@ -210,6 +217,7 @@ export function mountChat(client, media, slash, memory) {
     if (send?.restored) send.restored = false;
   };
   input.addEventListener("input", () => {
+    persistComposer();
     const held = drafts.get(draftKey());
     if (!held) return;
     held.text = input.value;
@@ -218,27 +226,42 @@ export function mountChat(client, media, slash, memory) {
       renderFeed();
     }
   });
+  let composerStore = null; // the storage key of the draft the composer shows
+  function persistComposer() {
+    if (composerStore) saveDraft(composerStore, input.value, input.selectionStart);
+  }
+  /** Puts `text` in the composer and keeps it as this chat's draft. */
+  function setComposer(text) {
+    input.value = text;
+    grow();
+    persistComposer();
+  }
+  addEventListener("pagehide", persistComposer);
+  on("chat-gone", ({ host, projectId, chatId }) => {
+    const key = chatDraftKey(host, projectId, chatId);
+    if (composerStore === key) composerStore = null;
+    dropDraft(key);
+  });
   on("select", () => {
     unloaded = "";
     const now = draftKey(),
-      left = composerKey;
+      left = composerKey,
+      away = left && left !== now ? drafts.get(left) : undefined;
+    // An unedited restored draft goes back to the bubble's own Retry; an edited one waits for its chat.
+    if (away && away.text === away.original) {
+      if (composerStore) dropDraft(composerStore);
+      forgetRestored(away.sendId);
+      drafts.delete(left);
+    } else persistComposer();
     composerKey = now;
-    const away = left && left !== now ? drafts.get(left) : undefined;
-    if (away) {
-      if (input.value === away.text) {
-        input.value = "";
-        grow();
-      }
-      // An unedited restored draft goes back to the bubble's own Retry; an edited one waits for its chat.
-      if (away.text === away.original) {
-        forgetRestored(away.sendId);
-        drafts.delete(left);
-      }
-    }
-    const here = drafts.get(now);
-    if (here && !input.value) {
-      input.value = here.text;
-      grow();
+    composerStore = chatDraftKey(state.host, state.projectId, state.chatId);
+    const saved = loadDraft(composerStore),
+      held = drafts.get(now);
+    input.value = held?.text ?? saved?.text ?? "";
+    grow();
+    if (saved && !held) {
+      const caret = Math.min(saved.caret ?? saved.text.length, input.value.length);
+      input.setSelectionRange(caret, caret);
     }
     older = [];
     olderGroups = null;
@@ -384,11 +407,10 @@ export function mountChat(client, media, slash, memory) {
   function failSend(send) {
     send.state = "failed";
     if (inCurrentChat(send) && !input.value) {
-      input.value = send.text;
       send.restored = true;
       composerKey = draftKey(send.projectId, send.chatId, send.hostId);
       drafts.set(composerKey, { text: send.text, original: send.text, sendId: send.id });
-      grow();
+      setComposer(send.text);
     }
   }
   const NO_HANDLE = "This browser cannot keep a recovery copy of the message, so it was not sent.";
@@ -926,8 +948,7 @@ export function mountChat(client, media, slash, memory) {
     const gen = state.generation,
       ownedDraft = drafts.get(draftKey());
     drafts.delete(draftKey());
-    input.value = "";
-    grow();
+    setComposer("");
     follow.follow();
     const slash = slashCommand(text);
     if (slash) {
@@ -935,7 +956,7 @@ export function mountChat(client, media, slash, memory) {
         await slash.command.run(slash.argument);
         if (!stale(gen)) void loadChat();
       } catch (error) {
-        if (!stale(gen) && !input.value) input.value = text;
+        if (!stale(gen) && !input.value) setComposer(text);
         fail(error);
       }
       return;
@@ -954,9 +975,8 @@ export function mountChat(client, media, slash, memory) {
     };
     if (!rememberSend(send)) {
       // Nothing is sent without a handle that survives a reload: the text stays where the owner typed it.
-      if (!input.value) input.value = text;
+      if (!input.value) setComposer(text);
       if (ownedDraft) drafts.set(draftKey(), ownedDraft);
-      grow();
       toast(NO_HANDLE, { error: true, ms: 8000 });
       return;
     }
@@ -1108,10 +1128,7 @@ export function mountChat(client, media, slash, memory) {
         const held = drafts.get(draftKey(send.projectId, send.chatId, send.hostId));
         // Only a draft the owner has not touched goes with its bubble; an edited one is a new, unsent message.
         if (held?.sendId === send.id && held.text === held.original) {
-          if (input.value === held.text) {
-            input.value = "";
-            grow();
-          }
+          if (input.value === held.text) setComposer("");
           drafts.delete(draftKey(send.projectId, send.chatId, send.hostId));
         }
       }

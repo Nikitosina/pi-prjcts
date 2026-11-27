@@ -1,5 +1,6 @@
 // The only module that talks to the host. Requests go through `call`.
-import { hostCache, wipeHost } from "./host-cache.js";
+import { dropHostStorage } from "./drafts.js";
+import { hostCache, stamp, wipeHost } from "./host-cache.js";
 
 const key = `pi-projects-token:${location.origin}`;
 const supplied = new URLSearchParams(location.hash.slice(1)).get("token");
@@ -213,28 +214,19 @@ function hostClient(transport) {
   let served = false; // a copy was shown at some point, so a live answer may have to take its place on screen
   const offlineError = () => new HostError(`${transport.name} is offline. Changes are disabled until it is back.`, 0, true, false);
   const plain = (read, action, input, signal) => run(read, signal, (fetch) => requestAction(fetch, action, input, signal));
-  return Object.assign(transport, {
+  const host = Object.assign(transport, {
     provenance: (data) => (data && typeof data === "object" ? (provenance.get(data) ?? null) : null),
     storagePrefix: transport.local ? "" : `pi-host:${transport.hostId}:`,
-    /** A read that gates a write: never a copy, and it fails at once when the host goes offline instead of waiting to be replayed. */
-    async live(action, input, signal) {
-      if (!cache) return plain(true, action, input, signal);
-      if (transport.state === "offline") throw offlineError();
-      const attempt = new AbortController(),
-        forward = () => attempt.abort(signal.reason),
-        watch = () => transport.state === "offline" && attempt.abort(offlineError());
-      signal?.addEventListener("abort", forward, { once: true });
-      transport.addEventListener("statechange", watch);
-      try {
-        return await plain(true, action, input, attempt.signal);
-      } catch (error) {
-        throw attempt.signal.aborted && !signal?.aborted ? attempt.signal.reason : error;
-      } finally {
-        signal?.removeEventListener("abort", forward);
-        transport.removeEventListener("statechange", watch);
-      }
+    /** A flow that reads and then writes (Archive's idle check, a revision lookup before a save): its reads never answer from a copy, and once the
+     * host has gone offline at any time since the guard was made, even if it is back, its reads and writes are refused. */
+    guard() {
+      const epoch = transport.epoch;
+      return { call: (action, input, signal) => transport.call(action, input, signal, { fresh: true, epoch }) };
     },
-    async call(action, input, signal) {
+    /** One call. A read of a remote host answers from its offline copy while the host is offline, and an unfinished one answers the same way the moment
+     * the host drops: nothing waits for a reconnect and nothing is replayed (REMOTE_SPEC.md, decision 14). `fresh` reads never answer from a copy;
+     * `epoch` is the guard's count of connection losses. */
+    async call(action, input, signal, { fresh = false, epoch = null } = {}) {
       const read = isRead(action, input);
       const serve = async () => {
         const saved = uncached.has(action) ? null : await cache.get(action, input);
@@ -246,41 +238,36 @@ function hostClient(transport) {
         return saved;
       };
       for (;;) {
+        if (cache && epoch !== null && transport.epoch !== epoch) throw offlineError();
         if (cache && transport.state === "offline") {
-          if (!read) throw offlineError();
+          if (!read || fresh) throw offlineError();
           const saved = await serve();
           if (saved === undefined) continue;
           if (!saved) throw new NeverLoadedError(transport.name);
           return saved.data;
         }
         if (!cache || !read) return plain(read, action, input, signal);
-        const started = Date.now();
-        const live = plain(read, action, input, signal).then((data) => {
+        const started = stamp();
+        const attempt = new AbortController(),
+          forward = () => attempt.abort(signal.reason),
+          drop = () => transport.state === "offline" && attempt.abort(offlineError());
+        signal?.addEventListener("abort", forward, { once: true });
+        transport.addEventListener("statechange", drop);
+        try {
+          const data = await plain(read, action, input, attempt.signal);
           if (!uncached.has(action)) {
             note(data, Date.now(), true);
             if (SAVING.has(transport.state)) void cache.put(action, input, data, started);
           }
           if (served) transport.dispatchEvent?.(new Event("copy"));
           return data;
-        });
-        // A read that loses its connection waits for the host to return (and is replayed), unless a saved copy can answer at once.
-        // The losing read is not cancelled: its answer is saved, but nothing renders it, so it never makes a copy on screen live.
-        let stopWatching = () => {};
-        const dropped = new Promise((resolve) => {
-          const watch = () =>
-            transport.state === "offline" &&
-            void serve().then(
-              (saved) => saved && resolve(saved.data),
-              () => {},
-            );
-          transport.addEventListener("statechange", watch);
-          stopWatching = () => transport.removeEventListener("statechange", watch);
-        });
-        live.catch(() => {});
-        try {
-          return await Promise.race([live, dropped]);
+        } catch (error) {
+          if (signal?.aborted || !attempt.signal.aborted) throw error;
+          // The host dropped while this read was in flight: the loop answers it from the copy, or refuses it, right now.
+          if (fresh) throw attempt.signal.reason;
         } finally {
-          stopWatching();
+          signal?.removeEventListener("abort", forward);
+          transport.removeEventListener("statechange", drop);
         }
       }
     },
@@ -307,6 +294,9 @@ function hostClient(transport) {
       });
     },
   });
+  /** True while a remote host is offline and answers from its offline copy; never for the local host. */
+  Object.defineProperty(host, "offline", { get: () => !!cache && transport.state === "offline" });
+  return host;
 }
 export const localHost = hostClient({ local: true, authorizedFetch: localFetch });
 
@@ -345,6 +335,7 @@ export async function forgetHost(id) {
       () => null,
       (error) => error,
     );
+    dropHostStorage(id);
     stopViews(id);
     await forgetDevice(id);
     clients.delete(id);

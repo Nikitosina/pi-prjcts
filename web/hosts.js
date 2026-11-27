@@ -2,6 +2,7 @@
 // A host group owns that host's project list, pending approvals and one host change stream; the tree, the Decision inbox and the status
 // pill read the groups. `projectHost` is the client of project views: each request goes to the host that listed its project.
 import { forgetHost, localHost, remoteHost } from "./api.js";
+import { dropHostStorage } from "./drafts.js";
 import { wipeHost } from "./host-cache.js";
 import { emit, fail, state } from "./state.js";
 
@@ -124,7 +125,10 @@ function drop(group) {
   if (!groups.includes(group)) return;
   streams.get(group)?.stop();
   streams.delete(group);
-  if (group.entry) wipeHost(group.entry.hostId).catch((error) => fail(error));
+  if (group.entry) {
+    wipeHost(group.entry.hostId).catch((error) => fail(error));
+    dropHostStorage(group.entry.hostId);
+  }
   groups.splice(groups.indexOf(group), 1);
   publish();
   emit("hosts", group);
@@ -141,7 +145,10 @@ function follow(group) {
   if (next === HostState.Forgotten) return drop(group);
   const was = group.state;
   group.state = next;
-  if (next === HostState.Revoked) wipeHost(group.entry.hostId).catch((error) => fail(error));
+  if (next === HostState.Revoked) {
+    wipeHost(group.entry.hostId).catch((error) => fail(error));
+    dropHostStorage(group.entry.hostId);
+  }
   // A host that is no longer browsable gives up its projects, so no view of it stays on screen as if it were current.
   if (UNBROWSABLE.has(next)) group.projects = [];
   if (next === HostState.Online && was !== HostState.Online) watch(group);
@@ -190,12 +197,15 @@ const pathProject = (path) =>
 /** The client of project views. A project id in the input or path picks its host; anything else goes to the selected project's host. */
 export const projectHost = {
   call: (action, input, signal) => routed(input?.projectId ?? input?.id).call(action, input, signal),
-  live: (action, input, signal) => routed(input?.projectId ?? input?.id).live(action, input, signal),
+  guard: (projectId) => routed(projectId).guard(),
   stream: (path, onFrame, onState) => routed(pathProject(path)).stream(path, onFrame, onState),
   url: (path, options) => routed(pathProject(path)).url(path, options),
   authorizedFetch: (path, init) => routed(pathProject(path)).authorizedFetch(path, init),
   get local() {
     return routed().local;
+  },
+  get offline() {
+    return routed().offline;
   },
   get storagePrefix() {
     return routed().storagePrefix;

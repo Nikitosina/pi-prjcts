@@ -71,6 +71,9 @@ export function mountOffline(admin) {
     queued = false,
     observer = null;
   const adminOffline = () => !admin.local && admin.state === "offline";
+  // A panel of Settings or the Host agent that was open when its host came back stays an offline copy until the panel's own read answered.
+  const refreshing = new Set();
+  const PANELS = { settings: "#settings", agent: "#host-agent" };
 
   function install() {
     if (banner) return;
@@ -96,6 +99,24 @@ export function mountOffline(admin) {
         : `<b>Back online</b>: ${esc(group.name)} is refreshing this view. Until then it is the offline copy from ${esc(clock(read.at))}.`;
     banner.dataset.copy = read ? "1" : "0";
   }
+  /** The banner of an admin panel, put back whenever the panel drew over it. */
+  function panelBanner(root, shown) {
+    let note = root.querySelector(":scope > .offline-banner");
+    if (!shown) return void (note && !note.hidden && (note.hidden = true));
+    if (!note) {
+      note = document.createElement("div");
+      note.className = "offline-banner";
+      note.setAttribute("role", "status");
+      root.prepend(note);
+    }
+    const next = refreshing.size && !adminOffline() ? "back" : "offline";
+    const html =
+      next === "back"
+        ? `<b>Back online</b>: ${esc(admin.name)} is refreshing this panel. Until then it is the offline copy.`
+        : `<b>Offline copy</b> of ${esc(admin.name)}. ${esc(OFFLINE_WRITES)}`;
+    if (note.innerHTML !== html) note.innerHTML = html;
+    note.hidden = false;
+  }
   function paint() {
     install();
     const group = groupOf(state.host);
@@ -105,7 +126,12 @@ export function mountOffline(admin) {
     document.body.dataset.hostOffline = frozen ? "1" : "0";
     paintBanner(frozen);
     for (const root of project) frozen ? freeze(root, OFFLINE_WRITES) : thaw(root);
-    for (const root of adminViews) adminOffline() ? freeze(root, OFFLINE_WRITES) : thaw(root);
+    for (const root of adminViews) {
+      const panel = Object.keys(PANELS).find((name) => document.querySelector(PANELS[name]) === root);
+      const locked = !admin.local && (admin.state === "offline" || refreshing.has(panel));
+      panelBanner(root, locked);
+      locked ? freeze(root, OFFLINE_WRITES) : thaw(root);
+    }
   }
   function later() {
     if (queued) return;
@@ -118,7 +144,19 @@ export function mountOffline(admin) {
     watching = { host: state.host };
     state.host?.addEventListener?.("copy", later);
   }
-  admin.addEventListener?.("statechange", () => (remoteGroups() || !admin.local) && later());
+  admin.addEventListener?.("statechange", () => {
+    if (admin.state === "online") {
+      for (const [name, selector] of Object.entries(PANELS)) {
+        const root = document.querySelector(selector);
+        if (root && (root.open || root.getAttribute("aria-hidden") === "false")) refreshing.add(name);
+      }
+    } else refreshing.clear();
+    if (remoteGroups() || !admin.local) later();
+  });
+  on("panel-live", (name) => {
+    refreshing.delete(name);
+    later();
+  });
   for (const event of ["select", "hosts", "view", "open", "projects"])
     on(event, () => {
       if (!banner && !remoteGroups() && admin.local) return;

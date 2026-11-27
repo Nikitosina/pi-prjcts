@@ -40,6 +40,9 @@ export function mountTree(client) {
     );
   }
   function storeChats(projectId, host, chats) {
+    // A chat that left the list (archived here or elsewhere) takes its unsent draft with it.
+    for (const gone of chatsByProject.get(chatKey(projectId, host)) ?? [])
+      if (!chats.some((chat) => chat.id === gone.id)) emit("chat-gone", { host: host ?? state.host, projectId, chatId: gone.id });
     chatsByProject.set(chatKey(projectId, host), chats);
     try {
       localStorage.setItem("pi-ui2-chats-by-host", JSON.stringify(Object.fromEntries(chatsByProject)));
@@ -194,12 +197,13 @@ export function mountTree(client) {
       index = before.findIndex((item) => item.id === chat.id);
     try {
       // Archiving aborts a running turn in the runtime; refuse instead of stopping it behind the owner's back.
-      const view = await (host ?? client).live("show", { id: projectId, chatId: chat.id });
+      const gate = (host ?? client).guard(projectId);
+      const view = await gate.call("show", { id: projectId, chatId: chat.id });
       if (view.chats?.find((item) => item.id === chat.id)?.busy)
         throw new Error(
           `“${clip(chat.title, 40)}” is answering. Open it and stop the turn (${display(binding("stop"))}) before archiving.`,
         );
-      await (host ?? client).call("chat-update", { id: projectId, chatId: chat.id, archived: true });
+      await gate.call("chat-update", { id: projectId, chatId: chat.id, archived: true });
       done();
       const rest = (chatsByProject.get(chatKey(projectId, host)) ?? []).filter((item) => item.id !== chat.id),
         left = (id) => rest.some((item) => item.id === id),
