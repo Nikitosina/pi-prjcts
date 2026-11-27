@@ -137,7 +137,7 @@ await kit.run(async () => {
   check(
     "A2 a link to an old section id still opens Appearance",
     await page.evaluate(
-      `import("/settings.js").then((settings) => { settings.openSettings("statusline"); return document.querySelector('#settings').dataset.section === "appearance" && !!document.querySelector('[data-part="statusline"]'); })`,
+      `import("/state.js").then((page) => { page.emit("open-settings", "statusline"); return document.querySelector('#settings').dataset.section === "appearance" && !!document.querySelector('[data-part="statusline"]'); })`,
     ),
   );
   await page.shot("04-appearance", { force: true });

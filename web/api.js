@@ -126,6 +126,55 @@ function openStream(host, path, onFrame, onState = () => {}) {
   };
 }
 
+/**
+ * The local host's own stream (`/changes?project=host`) is held by one tab at a time and relayed to the others: a browser allows six
+ * connections per origin across all tabs, and a stream per tab would leave none for requests once a second tab is open.
+ * The tab holding the Web Lock opens it; when that tab closes another takes over and its first frame is a `sync`.
+ */
+function openSharedStream(host, path, onFrame, onState = () => {}) {
+  if (!navigator.locks || typeof BroadcastChannel === "undefined") return openStream(host, path, onFrame, onState);
+  const name = `pi-stream:${location.origin}${path}`,
+    channel = new BroadcastChannel(name),
+    abort = new AbortController();
+  let inner = null,
+    up = false,
+    release = null;
+  channel.onmessage = ({ data }) => {
+    if (data.hello) return void (inner && channel.postMessage({ up }));
+    if (inner) return;
+    if (data.frame) onFrame(data.frame);
+    else onState(data.up);
+  };
+  channel.postMessage({ hello: true });
+  navigator.locks
+    .request(name, { signal: abort.signal }, () => {
+      inner = openStream(
+        host,
+        path,
+        (frame) => {
+          channel.postMessage({ frame });
+          onFrame(frame);
+        },
+        (value) => {
+          up = value;
+          channel.postMessage({ up });
+          onState(value);
+        },
+      );
+      return new Promise((done) => (release = done));
+    })
+    .catch(() => {});
+  return {
+    stop() {
+      abort.abort();
+      inner?.stop();
+      inner = null;
+      release?.();
+      channel.close();
+    },
+  };
+}
+
 const reads = new Set(
   `approvals-list automation-snapshot chat-history coordinator-skills deploy-snapshot host-agent-history jobs-snapshot knowledge-read limits-snapshot list machine-status memory-index memory-recent memory-writes plugin-catalog plugin-section plugins profile-tools profiles-get prompt-blocks-get prompt-render prs remote-devices remote-status schedule-history schedule-snapshot search settings-snapshot show storage-status storage-summary telegram-snapshot thread-history tiers-get tool-summaries-usage transcript-image ui-get usage-snapshot worker-contexts pr-review-files pr-review-file pr-review-lines pr-review-tour-status`.split(
     " ",
@@ -143,7 +192,7 @@ function hostClient(transport) {
       );
     },
     stream(path, onFrame, onState) {
-      return openStream(transport, path, onFrame, onState);
+      return (transport.local && path === "/changes?project=host" ? openSharedStream : openStream)(transport, path, onFrame, onState);
     },
     async url(path, { image, maxBytes, ...options } = {}) {
       return run(true, options.signal, async (fetch) => {

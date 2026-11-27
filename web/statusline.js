@@ -4,9 +4,9 @@ import { esc, shortModel, tokens, usd } from "./format.js";
 import { on, state } from "./state.js";
 import { drawLimitDetail, limitDetailFor, limitSummary } from "./limit-detail.js";
 
-export function mountStatusline(client, ui, limits, disk_detail) {
+export function mountStatusline(client, ui, limitsModule, disk_detail) {
   const { DEFAULT_UI } = ui;
-  const { limitShown, refreshLimits } = limits;
+  const { limitShown, refreshLimits } = limitsModule;
   const { drawDiskDetail } = disk_detail;
 
   /** Owner-facing names and one-line hints, in the built-in order; the ids are the host's fixed `statusItems` ids. */

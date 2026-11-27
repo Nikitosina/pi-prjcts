@@ -207,6 +207,10 @@ export function mountTree(client) {
     }
   }
 
+  /** The host of the group a row sits in, so an action names its host when two hosts list one project id; null in the single-host list. */
+  const rowHost = (element) =>
+    groups.find((group) => group.key === element.closest("[data-host-group]")?.dataset.hostGroup)?.client ?? null;
+
   tree.addEventListener("click", async (event) => {
     const archiveButton = event.target.closest("[data-archive-chat]");
     if (archiveButton) return requestArchive(archiveButton.dataset.projectId, archiveButton.dataset.archiveChat);
@@ -230,23 +234,25 @@ export function mountTree(client) {
         renderTree();
       } else {
         open.add(id);
-        emit("select-request", { projectId: id, chatId: "main" });
+        emit("select-request", { projectId: id, chatId: "main", host: rowHost(head) });
       }
       return;
     }
     const chat = event.target.closest("[data-chat]");
-    if (chat) return emit("select-request", { projectId: chat.dataset.projectId, chatId: chat.dataset.chat });
+    if (chat) return emit("select-request", { projectId: chat.dataset.projectId, chatId: chat.dataset.chat, host: rowHost(chat) });
     const memory = event.target.closest("[data-memory-node]");
     if (memory) {
-      if (memory.dataset.projectId !== state.projectId) emit("select-request", { projectId: memory.dataset.projectId, chatId: "main" });
+      if (memory.dataset.projectId !== state.projectId)
+        emit("select-request", { projectId: memory.dataset.projectId, chatId: "main", host: rowHost(memory) });
       emit("open", { kind: "memory" });
       return;
     }
     const create = event.target.closest("[data-new-chat]");
     if (create) {
       try {
-        const chat = await client.call("chat-create", { id: create.dataset.newChat });
-        emit("select-request", { projectId: create.dataset.newChat, chatId: chat.id ?? chat.chat?.id ?? "main" });
+        const host = rowHost(create);
+        const chat = await (host ?? client).call("chat-create", { id: create.dataset.newChat });
+        emit("select-request", { projectId: create.dataset.newChat, chatId: chat.id ?? chat.chat?.id ?? "main", host });
       } catch (error) {
         fail(error);
       }

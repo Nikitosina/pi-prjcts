@@ -169,7 +169,7 @@ on("hosts", () => {
   paintCrumbs();
   paintPill();
 });
-on("select-request", ({ projectId, chatId, keepFocus }) => void select(projectId, chatId, { keepFocus }));
+on("select-request", ({ projectId, chatId, keepFocus, host }) => void select(projectId, chatId, { keepFocus, host }));
 async function refreshAll() {
   const gen = state.generation;
   await Promise.all([loadChat(), loadJobs(), loadSide(), loadUsage()]);
