@@ -255,6 +255,7 @@ try {
           80,
         );
         await pageA.waitFor(group("online"), "host online again", 40);
+        await pageA.waitFor(`!!document.querySelector('[data-host-group="${hostId}"] [data-project="${gamma}"]')`, "Gamma listed", 40);
         await pageA.evaluate(`document.querySelector('[data-host-group="${hostId}"] [data-project="${gamma}"]').click(); undefined`);
         await pageA.waitFor(`document.querySelector('#crumbs').innerText.includes('Gamma')`, "Gamma selected");
         await pageA.waitFor(`!${composer}.disabled`, "composer ready", 40);
@@ -269,7 +270,14 @@ try {
         await pageA.waitFor(group("online"), "host back");
         await pageA.waitFor(`window.sent.some((c) => c.action === 'show')`, "the chat reads again", 40);
         await pause(600);
-        assert.equal(await pageA.evaluate(`${composer}.disabled`), true, "the composer unlocked before the live read answered");
+        assert.equal(
+          await pageA.evaluate(`${composer}.disabled`),
+          true,
+          "the composer unlocked before the live read answered: " +
+            (await pageA.evaluate(
+              `(async () => { const { state } = await import('/state.js'); const g = document.body.dataset.hostOffline; return JSON.stringify({ g, sent: window.sent.map((c) => c.action), p: state.host?.provenance?.(state.view), epoch: state.host?.epoch }); })()`,
+            )),
+        );
         await pageA.evaluate(`window.release['show'](); undefined`);
         await pageA.waitFor(`!${composer}.disabled`, "unlocked by the live read", 40);
       });

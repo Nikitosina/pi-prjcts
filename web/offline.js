@@ -123,7 +123,9 @@ export function mountOffline(admin) {
     // A host that is back stays frozen until the displayed data came from a live read of this connection: the text on screen may still be the copy.
     const read = group && !offlineCopy(group) ? group.client?.provenance(displayed()) : null;
     // Only an answer read live in the current connection period counts: one from before the last drop may be out of date.
-    const stale = !!read && (read.live === false || read.epoch !== group.client.epoch);
+    // After a connection loss a shown chat that is no live answer of this period (or not loaded yet) is not known to be fresh.
+    const unread = !!group && group.client?.epoch > 0 && !read && state.focus.kind === "chat";
+    const stale = unread || (!!read && (read.live === false || read.epoch !== group.client.epoch));
     const frozen = group && (offlineCopy(group) || stale) ? group : null;
     document.body.dataset.hostOffline = frozen ? "1" : "0";
     paintBanner(frozen);
