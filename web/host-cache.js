@@ -1,18 +1,24 @@
 // Offline read cache of the remote hosts (REMOTE_SPEC.md, Multi-host inbox, decision 13). It keeps the answers of read actions the page
 // already loaded, in IndexedDB of the local origin, one set per host ID. The local host is never cached: it serves this page itself.
-// The database opens on the first remote read, so a page without remote hosts never touches it.
+// The database opens on the first remote read, so a page with no remote hosts never touches it.
+//
+// A wipe leaves a tombstone (`wiped`: host ID → time). A save only lands when its read started after the tombstone and an entry only
+// reads back when it was saved after it, so another tab's late save, or an entry a failed deletion left behind, never shows again.
 
 export const limits = { hostBytes: 16 * 1024 * 1024 };
 
-// A wiped host saves nothing again in this page: an answer that was still in flight must not refill it. A new page starts open.
-const wiped = new Set();
+const encoder = new TextEncoder();
+const bytesOf = (text) => encoder.encode(text).length;
+
 let db = null;
 function open() {
   db ??= new Promise((resolve, reject) => {
-    const request = indexedDB.open("pi-host-cache", 1);
+    const request = indexedDB.open("pi-host-cache", 2);
     request.onupgradeneeded = () => {
-      request.result.createObjectStore("meta", { keyPath: "id" }).createIndex("host", "hostId");
-      request.result.createObjectStore("data");
+      const base = request.result;
+      if (!base.objectStoreNames.contains("meta")) base.createObjectStore("meta", { keyPath: "id" }).createIndex("host", "hostId");
+      if (!base.objectStoreNames.contains("data")) base.createObjectStore("data");
+      if (!base.objectStoreNames.contains("wiped")) base.createObjectStore("wiped");
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
@@ -20,16 +26,17 @@ function open() {
   db.catch(() => (db = null));
   return db;
 }
-async function transact(work) {
-  const tx = (await open()).transaction(["meta", "data"], "readwrite");
+const STORES = ["meta", "data", "wiped"];
+async function transact(mode, work) {
+  const tx = (await open()).transaction(STORES, mode);
   return new Promise((resolve, reject) => {
-    const result = work(tx.objectStore("meta"), tx.objectStore("data"));
-    tx.oncomplete = () => resolve(result.value);
+    let value;
+    work(tx.objectStore("meta"), tx.objectStore("data"), tx.objectStore("wiped"), (result) => (value = result));
+    tx.oncomplete = () => resolve(value);
     tx.onabort = () => reject(tx.error ?? Error("Host cache transaction aborted"));
   });
 }
-const request = (req) =>
-  new Promise((resolve, reject) => ((req.onsuccess = () => resolve(req.result)), (req.onerror = () => reject(req.error))));
+const wait = (req, then) => ((req.onsuccess = () => then(req.result)), req);
 
 const stable = (value) =>
   JSON.stringify(value, (_key, item) =>
@@ -41,44 +48,51 @@ const stable = (value) =>
 /** The cache of one host. Reads of another host's entries are impossible: every id starts with this host ID and every record is checked against it. */
 export function hostCache(hostId) {
   const id = (action, input) => `${hostId}\0${action}\0${stable(input ?? {})}`;
-  const closed = () => wiped.has(hostId);
   return {
-    /** `{ data, savedAt }`, or null when this read was never saved (or the cache is unavailable). */
+    /** `{ data, savedAt }`, or null when this read was never saved, was wiped, or the cache is unavailable. */
     async get(action, input) {
-      if (closed()) return null;
       try {
         const key = id(action, input);
-        const tx = (await open()).transaction(["meta", "data"]);
-        const [meta, data] = await Promise.all([request(tx.objectStore("meta").get(key)), request(tx.objectStore("data").get(key))]);
-        return meta?.hostId === hostId && data !== undefined ? { data, savedAt: meta.savedAt } : null;
+        return await transact("readonly", (metas, datas, tombs, done) => {
+          wait(metas.get(key), (meta) =>
+            wait(datas.get(key), (data) =>
+              wait(tombs.get(hostId), (wipedAt) => {
+                done(
+                  meta?.hostId === hostId && data !== undefined && meta.savedAt > (wipedAt ?? 0) ? { data, savedAt: meta.savedAt } : null,
+                );
+              }),
+            ),
+          );
+        });
       } catch (error) {
         console.warn("Host cache unavailable", error);
         return null;
       }
     },
-    /** Saves one answer, then removes this host's oldest saved reads until the host is within its limit. An answer over the limit is not saved. */
-    async put(action, input, data) {
-      if (closed()) return;
+    /** Saves one answer of a read that began at `startedAt`, then removes this host's oldest saved reads until its stored bytes fit the limit.
+     * An answer over the limit, or one whose read began before a wipe, is not saved. */
+    async put(action, input, data, startedAt) {
       try {
-        const bytes = stable(data).length;
+        const key = id(action, input),
+          text = stable(data),
+          bytes = bytesOf(text) + 2 * bytesOf(key);
         if (bytes > limits.hostBytes) return;
-        const key = id(action, input);
-        await transact((metas, datas) => {
-          if (closed()) return {};
-          metas.put({ id: key, hostId, savedAt: Date.now(), bytes });
-          datas.put(data, key);
-          const all = metas.index("host").getAll(hostId);
-          all.onsuccess = () => {
-            let total = all.result.reduce((sum, item) => sum + item.bytes, 0);
-            for (const old of all.result.sort((a, b) => a.savedAt - b.savedAt)) {
-              if (total <= limits.hostBytes) break;
-              if (old.id === key) continue;
-              total -= old.bytes;
-              metas.delete(old.id);
-              datas.delete(old.id);
-            }
-          };
-          return {};
+        await transact("readwrite", (metas, datas, tombs) => {
+          wait(tombs.get(hostId), (wipedAt) => {
+            if ((wipedAt ?? 0) >= startedAt) return;
+            metas.put({ id: key, hostId, savedAt: Date.now(), bytes });
+            datas.put(data, key);
+            wait(metas.index("host").getAll(hostId), (all) => {
+              let total = all.reduce((sum, item) => sum + item.bytes, 0);
+              for (const old of all.sort((a, b) => a.savedAt - b.savedAt)) {
+                if (total <= limits.hostBytes) break;
+                if (old.id === key) continue;
+                total -= old.bytes;
+                metas.delete(old.id);
+                datas.delete(old.id);
+              }
+            });
+          });
         });
       } catch (error) {
         console.warn("Host cache not saved", error);
@@ -87,23 +101,18 @@ export function hostCache(hostId) {
   };
 }
 
-/** Deletes every entry of one host (Forget host, revocation) and stops this page saving for it. Only touches the database when it already exists, so a page that never cached stays untouched. */
+/** Deletes every entry of one host (Forget host, revocation). The tombstone is written first and on its own, so a failed deletion still
+ * leaves the entries unreadable; the error is thrown so the caller can report it. Only opens the database when it exists. */
 export async function wipeHost(hostId) {
-  wiped.add(hostId);
-  try {
-    const known = await indexedDB.databases?.(); // a browser without it opens the database, which is harmless
-    if (!db && known && !known.some((item) => item.name === "pi-host-cache")) return;
-    await transact((metas, datas) => {
-      const keys = metas.index("host").getAllKeys(hostId);
-      keys.onsuccess = () => {
-        for (const key of keys.result) {
-          metas.delete(key);
-          datas.delete(key);
-        }
-      };
-      return {};
+  const known = await indexedDB.databases?.(); // a browser without it opens the database, which is harmless
+  if (!db && known && !known.some((item) => item.name === "pi-host-cache")) return;
+  await transact("readwrite", (_metas, _datas, tombs) => tombs.put(Date.now(), hostId));
+  await transact("readwrite", (metas, datas) => {
+    wait(metas.index("host").getAllKeys(hostId), (keys) => {
+      for (const key of keys) {
+        metas.delete(key);
+        datas.delete(key);
+      }
     });
-  } catch (error) {
-    console.warn("Host cache not wiped", error);
-  }
+  });
 }

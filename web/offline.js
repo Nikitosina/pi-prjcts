@@ -15,6 +15,7 @@ const READ = [
   "[data-cmd=settings]",
   "[data-cmd=host-agent]",
   "[data-toggle]",
+  ".media-open",
   "[data-reveal]",
   "[data-memory]:not([data-edit])",
   "[data-open-worker]:not([data-steer])",
@@ -36,8 +37,12 @@ const READ = [
 ].join(",");
 const CONTROLS = "button, input, textarea, select";
 
-/** The read whose saved time a kind of center view shows. */
-const COPY_READ = { chat: "show", worker: "thread-history", memory: "memory-index", pr: "pr-review-open" };
+/** The read the open center view displays, whose time the banner shows. */
+function displayedRead() {
+  const { kind, path } = state.focus;
+  if (kind === "memory") return path ? "knowledge-read" : "memory-index";
+  return { chat: "show", worker: "thread-history", pr: "pr-review-open" }[kind];
+}
 
 function freeze(root, reason) {
   for (const control of root.querySelectorAll(CONTROLS)) {
@@ -69,7 +74,7 @@ export function mountOffline(admin) {
   banner.setAttribute("role", "status");
   banner.hidden = true;
   document.querySelector("#center").prepend(banner);
-  const project = ["#dock", "#context", "#focus-view"].map((selector) => document.querySelector(selector)),
+  const project = ["#feed", "#dock", "#context", "#focus-view"].map((selector) => document.querySelector(selector)),
     adminViews = ["#settings", "#host-agent"].map((selector) => document.querySelector(selector));
   const adminOffline = () => !admin.local && admin.state === "offline";
   let watching = null;
@@ -77,15 +82,19 @@ export function mountOffline(admin) {
   function paintBanner(group) {
     banner.hidden = !group;
     if (!group) return;
-    const read = group.client.copies.get(COPY_READ[state.focus.kind]);
+    const read = group.client.copies.get(displayedRead());
     banner.innerHTML = read
-      ? `<b>Offline copy</b> of ${esc(group.name)} · data from ${esc(clock(read))}. ${esc(OFFLINE_WRITES)}`
+      ? offlineCopy(group)
+        ? `<b>Offline copy</b> of ${esc(group.name)} · data from ${esc(clock(read.at))}. ${esc(OFFLINE_WRITES)}`
+        : `<b>Back online</b>: ${esc(group.name)} is refreshing this view. Until then it is the offline copy from ${esc(clock(read.at))}.`
       : `<b>Offline</b>: ${esc(group.name)} has no copy of this view. ${esc(OFFLINE_WRITES)}`;
     banner.dataset.copy = read ? "1" : "0";
   }
   function paint() {
     const group = groupOf(state.host);
-    const frozen = group && offlineCopy(group) ? group : null;
+    // A host that is back stays frozen until the displayed read has live data: the text on screen may still be the copy.
+    const stale = group && !offlineCopy(group) && group.client?.copies.get(displayedRead())?.live === false;
+    const frozen = group && (offlineCopy(group) || stale) ? group : null;
     document.body.dataset.hostOffline = frozen ? "1" : "0";
     paintBanner(frozen);
     for (const root of project) frozen ? freeze(root, OFFLINE_WRITES) : thaw(root);

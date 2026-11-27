@@ -91,7 +91,10 @@ export async function remoteTransport(entry) {
   function lost(error) {
     active = null;
     if (stopped) return;
-    if (error.code === 4403) return close("revoked");
+    if (error.code === 4403) {
+      channel.postMessage("revoked");
+      return close("revoked");
+    }
     state("offline");
     clearTimeout(timer);
     timer = setTimeout(connect, delay);
@@ -99,6 +102,7 @@ export async function remoteTransport(entry) {
   }
   channel.onmessage = ({ data }) => {
     if (data === "forget") close("forgotten");
+    if (data === "revoked") close("revoked");
   };
   addEventListener("pagehide", () => close(), { once: true });
   addEventListener("pageshow", (e) => {

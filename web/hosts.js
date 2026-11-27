@@ -25,6 +25,7 @@ const frameHandlers = new Set();
 const streams = new Map(); // group → host change stream
 const loads = new Map(); // group → its list read in flight
 
+const UNBROWSABLE = new Set([HostState.Revoked, HostState.NotPaired, HostState.NeedsUpdate]);
 export const remoteGroups = () => groups.length > 1;
 export const groupOf = (client) => groups.find((group) => group.client === client) ?? null;
 export const online = (group) => group.state === HostState.Online;
@@ -87,7 +88,7 @@ async function loadCached(group) {
   if (!groups.includes(group) || !offlineCopy(group)) return;
   if (projects) {
     group.projects = projects.filter((item) => !item.archived && !item.deleted);
-    group.copyAt = group.client.copies.get("list") ?? null;
+    group.copyAt = group.client.copies.get("list")?.at ?? null;
   }
   group.unloaded = !group.projects.length && !projects;
   publish();
@@ -120,7 +121,7 @@ function drop(group) {
   if (!groups.includes(group)) return;
   streams.get(group)?.stop();
   streams.delete(group);
-  if (group.entry) void wipeHost(group.entry.hostId);
+  if (group.entry) wipeHost(group.entry.hostId).catch((error) => fail(error));
   groups.splice(groups.indexOf(group), 1);
   publish();
   emit("hosts", group);
@@ -137,7 +138,9 @@ function follow(group) {
   if (next === HostState.Forgotten) return drop(group);
   const was = group.state;
   group.state = next;
-  if (next === HostState.Revoked) void wipeHost(group.entry.hostId);
+  if (next === HostState.Revoked) wipeHost(group.entry.hostId).catch((error) => fail(error));
+  // A host that is no longer browsable gives up its projects, so no view of it stays on screen as if it were current.
+  if (UNBROWSABLE.has(next)) group.projects = [];
   if (next === HostState.Online && was !== HostState.Online) watch(group);
   if (next === HostState.Offline) void loadCached(group);
   if (next !== HostState.Online) {

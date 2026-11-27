@@ -151,7 +151,9 @@ function watch(projectId, host) {
   );
 }
 on("host-online", (group) => {
-  if (group.client === state.host && state.projectId) watch(state.projectId, state.host);
+  if (group.client !== state.host || !state.projectId) return;
+  watch(state.projectId, state.host);
+  if (state.focus.kind !== "chat") renderFocus();
 });
 // A forgotten host leaves the page: its selected project gives way to the first project still listed.
 on("hosts", () => {

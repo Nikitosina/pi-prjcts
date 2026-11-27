@@ -203,27 +203,53 @@ const SAVING = new Set(["online", "offline"]);
 function hostClient(transport) {
   const run = transport.run ?? ((_read, _signal, work) => work(transport.authorizedFetch));
   const cache = transport.local ? null : hostCache(transport.hostId);
-  /** action → when the data last shown for it was read: live, or saved earlier and served from the cache while offline. */
+  /** action → `{ at, live }`: when the data last shown for it was read, and whether that read was live or a copy served from the cache. */
   const copies = new Map();
   return Object.assign(transport, {
     copies,
     storagePrefix: transport.local ? "" : `pi-host:${transport.hostId}:`,
     async call(action, input, signal) {
       const read = isRead(action, input);
-      if (cache && transport.state === "offline") {
-        if (!read) throw new HostError(`${transport.name} is offline. Changes are disabled until it is back.`, 0, true, false);
-        const saved = uncached.has(action) ? null : await cache.get(action, input);
-        saved ? copies.set(action, saved.savedAt) : copies.delete(action);
-        transport.dispatchEvent?.(new Event("copy"));
-        if (!saved) throw new NeverLoadedError(transport.name);
-        return saved.data;
+      for (;;) {
+        if (cache && transport.state === "offline") {
+          if (!read) throw new HostError(`${transport.name} is offline. Changes are disabled until it is back.`, 0, true, false);
+          const saved = uncached.has(action) ? null : await cache.get(action, input);
+          // The host may have come back or been revoked while the cache answered: that answer is then not for this moment.
+          if (transport.state !== "offline") continue;
+          if (saved) copies.set(action, { at: saved.savedAt, live: false });
+          else copies.delete(action);
+          transport.dispatchEvent?.(new Event("copy"));
+          if (!saved) throw new NeverLoadedError(transport.name);
+          return saved.data;
+        }
+        if (!cache || !read) return run(read, signal, (fetch) => requestAction(fetch, action, input, signal));
+        // A read that loses its connection falls back to the cache instead of waiting for the host to return.
+        const started = Date.now(),
+          attempt = new AbortController(),
+          forward = () => attempt.abort(signal.reason);
+        let dropped = false;
+        const watch = () => {
+          if (transport.state !== "offline") return;
+          dropped = true;
+          attempt.abort();
+        };
+        signal?.addEventListener("abort", forward, { once: true });
+        transport.addEventListener("statechange", watch);
+        try {
+          const data = await run(read, attempt.signal, (fetch) => requestAction(fetch, action, input, attempt.signal));
+          if (!uncached.has(action)) {
+            if (copies.get(action)?.live === false) queueMicrotask(() => transport.dispatchEvent(new Event("copy")));
+            copies.set(action, { at: Date.now(), live: true });
+            if (SAVING.has(transport.state)) void cache.put(action, input, data, started);
+          }
+          return data;
+        } catch (error) {
+          if (signal?.aborted || (!dropped && transport.state !== "offline")) throw error;
+        } finally {
+          signal?.removeEventListener("abort", forward);
+          transport.removeEventListener("statechange", watch);
+        }
       }
-      const data = await run(read, signal, (fetch) => requestAction(fetch, action, input, signal));
-      if (cache && read && !uncached.has(action)) {
-        copies.set(action, Date.now());
-        if (SAVING.has(transport.state)) void cache.put(action, input, data);
-      }
-      return data;
     },
     stream(path, onFrame, onState) {
       return (transport.local && path === "/changes?project=host" ? openSharedStream : openStream)(transport, path, onFrame, onState);
@@ -282,10 +308,14 @@ export async function forgetHost(id) {
   const { forgetDevice, stopViews } = await import("./remote-client.js");
   await navigator.locks.request(`pair:${id}`, async () => {
     await localHost.call("inbox-host-forget", { hostId: id });
-    await wipeHost(id);
+    const wiped = await wipeHost(id).then(
+      () => null,
+      (error) => error,
+    );
     stopViews(id);
     await forgetDevice(id);
     clients.delete(id);
+    if (wiped) throw Error(`The host is forgotten, but its offline copy could not be deleted: ${wiped.message}`);
   });
 }
 

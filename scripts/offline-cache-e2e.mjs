@@ -1,4 +1,4 @@
-// Multi-host inbox stage 4 (scripts/remote-hosts-failures.md, 38–51): the offline read cache of remote hosts, disabled writes while a host is
+// Multi-host inbox stage 4 (scripts/remote-hosts-failures.md, 38–59): the offline read cache of remote hosts, disabled writes while a host is
 // offline, live data replacing the copy on reconnect, per-host limits and isolation, and the wipe on Forget host and revocation.
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -17,6 +17,8 @@ const remote = await createKit("offline-cache-remote", {
 try {
   await local.run(async () => {
     const url = new URL((await local.rpc({ action: "web" })).url);
+    local.initRepo();
+    await local.createProject("Local notes");
     await remote.run(async () => {
       mkdirSync(join(remote.home, "remote"), { recursive: true });
       writeFileSync(join(remote.home, "remote/config.json"), JSON.stringify({ enabled: true, relay: relay.origin, hostName: "Home Mac" }));
@@ -37,6 +39,8 @@ try {
         q(
           `new Promise((ok) => { const r = indexedDB.open('pi-host-cache'); r.onsuccess = () => { const q = r.result.transaction('meta').objectStore('meta').index('host').count(${JSON.stringify(host)}); q.onsuccess = () => { r.result.close(); ok(q.result); }; }; r.onerror = () => ok(-1); })`,
         );
+      const disabled = (selector) =>
+        q(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); return !!e && e.disabled && e.title.length > 0; })()`);
       const narrow = async (sheet) => {
         await page.viewport(390, 844, true);
         await page.waitFor(`matchMedia('(max-width: 760px)').matches && innerWidth === 390`, "390 px layout");
@@ -71,6 +75,18 @@ try {
       await page.waitFor(`document.querySelector('#composer-input').placeholder.includes('coordinator')`, "live composer");
       await shot("host-online");
       assert.ok((await cached()) >= 3, "reads of the online host were saved");
+      await remote
+        .rpc({ action: "knowledge-write", id: garden, path: "preferences.md", text: "# Preferences\n\nMemory version one.\n" })
+        .catch(async () => {
+          const prefs = await remote.rpc({ action: "knowledge-read", id: garden, path: "preferences.md" });
+          await remote.rpc({
+            action: "knowledge-write",
+            id: garden,
+            path: "preferences.md",
+            text: "# Preferences\n\nMemory version one.\n",
+            expectedRevision: prefs.revision,
+          });
+        });
       const messagesBefore = (await remote.rpc({ action: "show", id: garden })).messages.length;
       const callsBefore = remote.result.calls.length;
 
@@ -87,8 +103,6 @@ try {
       assert.match(await q(`document.querySelector('#status-pill').innerText`), /All quiet/);
 
       // 43, 44: every write is disabled with a reason, the client refuses it, nothing reaches the host
-      const disabled = (selector) =>
-        q(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); return !!e && e.disabled && e.title.length > 0; })()`);
       assert.ok(await disabled("#composer-input"), "composer disabled with a reason");
       assert.ok(await disabled("#composer .send"), "send disabled");
       assert.ok(await disabled("[data-new-chat]"), "New chat disabled");
@@ -151,29 +165,117 @@ try {
         "unopened loads live",
       );
 
+      // 54, 55, 56, 58, 59: a second offline cycle with a Memory document open
+      const remoteClient = `(async () => { const { remoteHost, localHost } = await import('/api.js'); return remoteHost((await localHost.call('inbox-hosts'))[0]); })()`;
+      await q(`document.querySelector('[data-project-id="${garden}"][data-memory-node]').click()`);
+      await page.waitFor(`!!document.querySelector('#focus-view [data-memory="preferences.md"]')`, "memory list");
+      await q(`document.querySelector('#focus-view [data-memory="preferences.md"]').click()`);
+      await page.waitFor(`document.querySelector('#focus-view').innerText.includes('Memory version one')`, "memory document");
+      // 54: a cache read that is overtaken by the host coming back is not returned as live data
+      const raced = await q(`(async () => {
+        const host = await ${remoteClient};
+        host.state = 'offline';
+        const read = host.call('show', { id: ${JSON.stringify(garden)} });
+        host.state = 'online';
+        const data = await read;
+        return { live: host.copies.get('show')?.live, messages: data.messages.length > 0 };
+      })()`);
+      assert.deepEqual(raced, { live: true, messages: true }, "54: the copy was not returned as live data");
+      // 56: reads in flight when the host drops fall back to the cache instead of waiting for the host
+      await q(`(async () => {
+        const host = await ${remoteClient};
+        window.calls = new Set();
+        window.loop = setInterval(() => {
+          const call = host.call('knowledge-read', { id: ${JSON.stringify(garden)}, path: 'preferences.md' });
+          const done = () => window.calls.delete(call);
+          window.calls.add(call);
+          call.then(done, done);
+        }, 20);
+      })()`);
+      await remote.stopHost();
+      await page.waitFor(group("offline"), "offline again");
+      await q(`clearInterval(window.loop)`);
+      await page.waitFor(`window.calls.size === 0`, "56: no read waits for the host");
+      // 59: the banner shows the time of the displayed read, not of the memory list
+      await q(`(async () => {
+        const host = await ${remoteClient};
+        host.copies.set('memory-index', { at: host.copies.get('knowledge-read').at - 5 * 3600 * 1000, live: false });
+        host.dispatchEvent(new Event('copy'));
+      })()`);
+      const expected = await q(
+        `(async () => { const host = await ${remoteClient}; return (await import('/format.js')).clock(host.copies.get('knowledge-read').at); })()`,
+      );
+      await page.waitFor(
+        `document.querySelector('#offline-banner').innerText.includes('data from ${expected}')`,
+        "59: banner time of the displayed read",
+      );
+      assert.ok(await disabled("[data-edit-memory]"), "memory Edit disabled offline");
+      // 58: a write control inside the feed is frozen too
+      await q(
+        `document.querySelector('#feed').insertAdjacentHTML('beforeend', '<button type="button" data-retry-job="x" id="fake-retry">Retry</button><button type="button" class="media-open" id="fake-media">Open</button>')`,
+      );
+      await page.waitFor(`document.querySelector('#fake-retry').disabled`, "58: Retry in the feed disabled");
+      assert.equal(await q(`document.querySelector('#fake-media').disabled`), false, "reading controls of the feed stay enabled");
+      await q(`document.querySelector('#fake-retry').remove(); document.querySelector('#fake-media').remove()`);
+      // 55: back online the open document is read again, and only then is it live
+      remote.startHost();
+      await remote.waitHost();
+      const prefs = await remote.rpc({ action: "knowledge-read", id: garden, path: "preferences.md" });
+      await remote.rpc({
+        action: "knowledge-write",
+        id: garden,
+        path: "preferences.md",
+        text: "# Preferences\n\nMemory version two.\n",
+        expectedRevision: prefs.revision,
+      });
+      await page.waitFor(group("online"), "online again");
+      await page.waitFor(
+        `document.querySelector('#focus-view').innerText.includes('Memory version two')`,
+        "55: the document was read again",
+      );
+      await page.waitFor(
+        `document.querySelector('#offline-banner').hidden && !document.querySelector('[data-edit-memory]').disabled`,
+        "55: live and editable",
+      );
+      await page.waitFor(
+        `(() => { const back = document.querySelector('#focus-view:not([hidden]) .back'); back?.click(); return document.querySelector('#focus-view').hidden; })()`,
+        "back to chat",
+      );
+
       // 47, 48: a host's entries are its own and its oldest reads leave first
       const evicted = await q(`(async () => {
         const { hostCache, limits, wipeHost } = await import('/host-cache.js');
         const wait = () => new Promise((ok) => setTimeout(ok, 8));
         const keep = limits.hostBytes;
-        limits.hostBytes = 400;
+        limits.hostBytes = 500;
         const a = hostCache('evict-A'), b = hostCache('evict-B');
-        await b.put('read', { n: 1 }, 'b'.repeat(100));
-        for (const n of [1, 2, 3, 4]) { await a.put('read', { n }, 'a'.repeat(100)); await wait(); }
+        const before = Date.now();
+        await b.put('read', { n: 1 }, 'b'.repeat(100), Date.now());
+        for (const n of [1, 2, 3, 4]) { await a.put('read', { n }, 'a'.repeat(100), Date.now()); await wait(); }
         await a.put('read', { n: 5 }, 'x'.repeat(1000));
+        const c = hostCache('bytes-C');
+        await c.put('read', { n: 1 }, '€'.repeat(100), Date.now());
+        await wait();
+        await c.put('read', { n: 2 }, '€'.repeat(100), Date.now());
         const result = {
           oldestGone: (await a.get('read', { n: 1 })) === null,
           rest: (await Promise.all([2, 3, 4].map((n) => a.get('read', { n })))).every((item) => item?.data.length === 100),
           oversize: (await a.get('read', { n: 5 })) === null,
           otherUntouched: (await b.get('read', { n: 1 }))?.data.length === 100,
           notShared: (await b.get('read', { n: 2 })) === null,
-          sameInputOrder: (await a.get('read', { n: 4 }))?.data.length === 100,
+          bytesCounted: (await c.get('read', { n: 1 })) === null && (await c.get('read', { n: 2 })) !== null,
+        sameInputOrder: (await a.get('read', { n: 4 }))?.data.length === 100,
         };
         limits.hostBytes = keep;
         await wipeHost('evict-A');
         result.wiped = (await a.get('read', { n: 4 })) === null;
-        await a.put('read', { n: 6 }, 'late');
+        await a.put('read', { n: 6 }, 'late', before);
         result.noRefill = (await a.get('read', { n: 6 })) === null;
+        const tombstone = await new Promise((ok) => { const r = indexedDB.open('pi-host-cache'); r.onsuccess = () => { const g = r.result.transaction('wiped').objectStore('wiped').get('evict-A'); g.onsuccess = () => { r.result.close(); ok(g.result > 0); }; }; });
+        await a.put('read', { n: 7 }, 'after', Date.now());
+        result.tombstone = tombstone;
+        result.freshSaveAfterWipe = (await a.get('read', { n: 7 }))?.data === 'after';
+        await wipeHost('bytes-C');
         return result;
       })()`);
       assert.deepEqual(evicted, {
@@ -185,6 +287,9 @@ try {
         sameInputOrder: true,
         wiped: true,
         noRefill: true,
+        tombstone: true,
+        freshSaveAfterWipe: true,
+        bytesCounted: true,
       });
       assert.equal(await cached("evict-B"), 1);
 
@@ -211,6 +316,8 @@ try {
       await page.waitFor(group("revoked"), "revoked");
       await local.waitFor(async () => (await cached()) === 0, "revocation wiped the cache");
       assert.doesNotMatch(await groupText(), /Garden plan|Offline copy/);
+      await page.waitFor(`!document.querySelector('#feed').innerText.includes('Garden reply')`, "52: no view of the revoked host stays");
+      await page.waitFor(`document.querySelector('#crumbs').innerText.includes('Local notes')`, "52: the open view moved to a live host");
       // The tunnel cancels the open streams of a revoked device after the relay closed its socket; Chrome logs that send (pre-existing, not the cache).
       local.result.errors = local.result.errors.filter((error) => error !== "WebSocket is already in CLOSING or CLOSED state.");
       await page.shot("revoked", { force: true });
