@@ -447,10 +447,12 @@ export function startTelegram(options: {
     run: (thread?: number) => Promise<T>,
     remember: (thread?: number) => void,
   ): Promise<T> {
+    const bot = state.bot?.id;
     try {
       return await run(thread);
     } catch (error) {
       if (thread === undefined || !(error instanceof TelegramError && error.code === 400 && TOPIC_GONE.test(error.message))) throw error;
+      if (state.owner?.chatId !== recipient || state.bot?.id !== bot) throw new Error("Telegram recipient changed during delivery");
       state.topics = (state.topics ?? []).filter((topic) => !(sameTopic(topic, ref) && topic.thread === thread));
       persist();
       const fresh = await topicFor(ref, name);
@@ -1437,12 +1439,14 @@ export function startTelegram(options: {
       // Edits of one topic run in order and each sends the chat's latest name, so the last change wins.
       const run = async () => {
         try {
+          await topicsRead;
           await creating.get(creationId(ref));
           const topic = topicOf(ref);
           if (!topic || !topicsOn()) return;
           const owner = state.owner!.chatId,
             label = clip((await topicNameOf(ref, projectId, chat.title, chat.archived === true)()).trim(), TOPIC_NAME_MAX);
-          if (named.get(topic.thread) === label || state.owner?.chatId !== owner) return;
+          if (named.get(topic.thread) === label || state.owner?.chatId !== owner || !topicsOn() || topicOf(ref)?.thread !== topic.thread)
+            return;
           try {
             await call("editForumTopic", { chat_id: owner, message_thread_id: topic.thread, name: label });
             named.set(topic.thread, label);

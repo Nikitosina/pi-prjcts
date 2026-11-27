@@ -1067,6 +1067,41 @@ try {
   await bridge.chatChanged(project, mainChat(true));
   assert.equal(topicNames.get(500), "📦 Test · Main", "5 the archive after an uncertain restore is not skipped");
 
+  // 6: the owner is replaced while Telegram answers "topic gone"; no topic is created in the new owner's chat for the old notice.
+  reset(`![Image](${ref("demo.png")})`);
+  topicsOn([{ projectId: project, chatId: "main", thread: 500 }]);
+  let replacedUpdate = 0;
+  fault = {
+    method: "sendPhoto",
+    code: 400,
+    description: "Bad Request: message thread not found",
+    run: async () => {
+      bridge.unpair();
+      const { code } = (await bridge.pair()).pairing;
+      updates.push({
+        update_id: ++replacedUpdate,
+        message: { message_id: 1, chat: { id: 2, type: "private", first_name: "Other" }, from: { id: 2 }, text: `/start ${code}` },
+      });
+      for (let i = 0; i < 100 && (await bridge.snapshot()).owner !== "Other"; i++) await new Promise((resolve) => setTimeout(resolve, 30));
+    },
+  };
+  start(true);
+  await bridge.flush().catch(() => {});
+  assert(!attempts.some((a) => a.method === "createForumTopic"), "6 no topic is created for a notice of the former owner");
+  assert(!attempts.some((a) => a.method === "sendPhoto" && a.input.chat_id === "2"), "6 the notice never reaches the new owner");
+
+  // 7: an archive edit during the startup topics refresh waits for it instead of seeing the stale topics flag.
+  reset("unused");
+  topicsOn([{ projectId: project, chatId: "main", thread: 500 }]);
+  const flagOff = JSON.parse(readFileSync(statePath));
+  flagOff.bot.topics = false;
+  writeFileSync(statePath, JSON.stringify(flagOff));
+  topicNames.set(500, "Test · Main");
+  meTopics = true;
+  start(true);
+  await bridge.chatChanged(project, mainChat(true));
+  assert.equal(topicNames.get(500), "📦 Test · Main", "7 the archive edit waits for the topics refresh");
+
   console.log(
     "PASS one-message native caption/envelope/actions/routing; albums/overflow; byte/MIME/security/fallback; retry/order/restart/uncertainty",
   );
