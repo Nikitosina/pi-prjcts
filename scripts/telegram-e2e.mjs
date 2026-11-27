@@ -1052,7 +1052,7 @@ try {
 
   // T76: the architecture document describes the rename behaviour.
   const architecture = readFileSync(new URL("../ARCHITECTURE.md", import.meta.url), "utf8");
-  assert.ok(!/closes its topic|reopens it/.test(architecture), "76 ARCHITECTURE.md does not claim close and reopen");
+  assert.ok(!/closes its topic|restoring reopens/.test(architecture), "76 ARCHITECTURE.md does not claim close and reopen");
   assert.match(architecture, /📦/, "76 ARCHITECTURE.md describes the prefix");
 
   // T67: topics turned off again, or another bot: no thread ids.
