@@ -1078,11 +1078,15 @@ try {
     run: async () => {
       bridge.unpair();
       const { code } = (await bridge.pair()).pairing;
-      updates.push({
+      const pairing = {
         update_id: ++replacedUpdate,
         message: { message_id: 1, chat: { id: 2, type: "private", first_name: "Other" }, from: { id: 2 }, text: `/start ${code}` },
-      });
-      for (let i = 0; i < 100 && (await bridge.snapshot()).owner !== "Other"; i++) await new Promise((resolve) => setTimeout(resolve, 30));
+      };
+      // pair() aborts the poll in flight, which can swallow an update pushed meanwhile, so it is offered again until it lands.
+      for (let i = 0; i < 100 && (await bridge.snapshot()).owner !== "Other"; i++) {
+        if (!updates.length) updates.push(pairing);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      }
     },
   };
   start(true);
