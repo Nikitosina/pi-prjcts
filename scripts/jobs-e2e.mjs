@@ -439,8 +439,10 @@ async function open() {
   const jobs = createJobs({
     boot: bootId,
     promptBehaviors: () => {
-      behaviorLoads += 1;
+      let loaded = false;
       return (agent) => {
+        if (!loaded) behaviorLoads += 1;
+        loaded = true;
         behaviorAnswers += 1;
         return `BEHAVIOR:${agent.role}`;
       };
@@ -1333,6 +1335,27 @@ assert.deepEqual(await jobs.stallTick(harness, T + 21 * 60_000), [gate.id], "an 
   await until(() => gateEntered, "READYHOLD worker holds its last reply after Ready");
   const held = (await jobsOf(harness)).find((item) => item.title === "Job READYHOLD");
   assert.equal(held.status, "ready");
+  // S3: the notifier's chats with work equal what the full snapshot gives, an ended agent that still runs a turn included.
+  const chatsWithWork = async () => {
+    const view = await jobs.snapshot(harness);
+    return [
+      ...view.jobs.filter((job) => job.status === "running").map((job) => job.chat),
+      ...view.agents.filter((agent) => agent.working || (!agent.jobId && agent.endedAt === null)).map((agent) => agent.chat),
+    ];
+  };
+  const unique = (chats) => [...new Set(chats)].sort();
+  assert.deepEqual(unique((await jobs.activity(harness)).workingChats), unique(await chatsWithWork()), "S3 activity matches the snapshot");
+  await harness.commit(async (tx) => {
+    (await tx.doc(Jobs, root.id)).agents[held.id].endedAt = Date.now();
+  }, context);
+  const endedButWorking = (await jobs.snapshot(harness)).agents.find((agent) => agent.id === held.id);
+  assert.ok(endedButWorking.working && endedButWorking.endedAt !== null, "S3 fixture: an ended agent still runs its turn");
+  const activity = await jobs.activity(harness);
+  assert.ok(activity.workingChats.includes(endedButWorking.chat), "S3 an ended agent with a running turn keeps its chat busy");
+  assert.deepEqual(unique(activity.workingChats), unique(await chatsWithWork()), "S3 activity still matches with an ended working agent");
+  await harness.commit(async (tx) => {
+    (await tx.doc(Jobs, root.id)).agents[held.id].endedAt = null;
+  }, context);
   // A project pause: jobs pause, then every chat aborts with its background tasks (the worker's reporter among them).
   await jobs.pause(harness);
   await root.abort(context, { background: true });
@@ -1590,19 +1613,19 @@ assert.deepEqual(await jobs.stallTick(harness, T + 21 * 60_000), [gate.id], "an 
   assert.match(other[3], /not a reviewer of this Job/i, "W2 another Job's reviewer is never continued");
 }
 
-// S1-S2 (jobs-failures.md "Snapshot cost"): one behavior read per snapshot; no prompt status for settled agents.
+// S1-S2 (jobs-failures.md "Snapshot cost"): the saved behavior is read once per snapshot; every agent still gets its prompt status.
 {
   const loadsBefore = behaviorLoads,
     answersBefore = behaviorAnswers;
   const view = await jobs.snapshot(harness);
-  const settled = view.agents.filter((agent) => agent.endedAt !== null && !agent.jobId);
-  assert.ok(settled.length > 0 && view.agents.length > settled.length, "S0 the fixture has settled and other agents");
+  const ended = view.agents.filter((agent) => agent.endedAt !== null && !agent.jobId);
+  assert.ok(ended.length > 0 && view.agents.length > ended.length, "S0 the fixture has ended and other agents");
   assert.equal(behaviorLoads - loadsBefore, 1, "S1 a snapshot reads the saved behavior once, not per agent");
+  assert.equal(behaviorAnswers - answersBefore, view.agents.length, "S2 every agent, ended ones included, is asked for its behavior");
   assert.ok(
-    settled.every((agent) => agent.prompt === null),
-    "S2 a settled agent reports no prompt status",
+    ended.every((agent) => agent.prompt !== null),
+    "S2 an ended agent that can continue keeps its prompt status",
   );
-  assert.ok(behaviorAnswers - answersBefore <= view.agents.length - settled.length, "S2 settled agents are not asked for behavior");
 }
 
 await harness.close(context);

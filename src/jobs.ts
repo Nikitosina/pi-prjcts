@@ -1005,7 +1005,7 @@ export type JobsSnapshot = {
 
 /** What the notifier reads each tick: the Jobs as recorded (no per-Job conversation reads) and the chats that have work. */
 export type JobsActivity = {
-  jobs: (Job & { eta: ReturnType<typeof planEta> })[];
+  jobs: (Job & { eta: ReturnType<typeof planEta> | null })[];
   workingChats: Job["chat"][];
 };
 
@@ -1867,12 +1867,6 @@ export function createJobs(host: JobsHost) {
   const liveAgents = (doc: Readonly<JobsState>) =>
     Object.values(doc.agents).filter((agent) => (agent.jobId ? doc.jobs[agent.jobId]?.status === "running" : agent.endedAt === null));
 
-  /** An ended read-only agent or a worker whose Job was approved or stopped: nothing is left to adopt a behavior, so its prompt status is not shown. */
-  const settledAgent = (doc: Readonly<JobsState>, agent: Readonly<Agent>) => {
-    const job = agent.jobId ? doc.jobs[agent.jobId] : undefined;
-    return agent.endedAt !== null && (!job || job.status === "approved" || job.status === "stopped");
-  };
-
   /** Stop admitting work and abort every live agent, keeping their Jobs running so a resume continues them. */
   async function pause(harness: Harness, plugin?: { name: string; claim: string }): Promise<void> {
     const live = await harness.commit(async (tx) => {
@@ -1963,14 +1957,12 @@ export function createJobs(host: JobsHost) {
         working: await working(harness, agent.conversationId),
         active: reported.has(agent.id),
         model: await agentModel(harness, agent.conversationId),
-        prompt: settledAgent(doc, agent)
-          ? null
-          : await promptStatus(
-              harness,
-              behaviorOf,
-              agent as Agent,
-              agent.jobId ? ((doc.jobs[agent.jobId] as Job | undefined) ?? null) : null,
-            ),
+        prompt: await promptStatus(
+          harness,
+          behaviorOf,
+          agent as Agent,
+          agent.jobId ? ((doc.jobs[agent.jobId] as Job | undefined) ?? null) : null,
+        ),
       })),
     );
     return {
@@ -1987,14 +1979,17 @@ export function createJobs(host: JobsHost) {
     const doc = await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context);
     if (!doc) return { jobs: [], workingChats: [] };
     const running = Object.values(doc.jobs).filter((job) => job.status === "running");
-    const unended = Object.values(doc.agents).filter((agent) => agent.endedAt === null);
-    const workingAgents = await Promise.all(unended.map(async (agent) => ((await working(harness, agent.conversationId)) ? agent : null)));
+    const agents = Object.values(doc.agents);
+    const workingAgents = await Promise.all(agents.map(async (agent) => ((await working(harness, agent.conversationId)) ? agent : null)));
     return {
-      jobs: Object.values(doc.jobs).map((job) => ({ ...(job as Job), eta: planEta(job.plan, clock()) })),
+      jobs: Object.values(doc.jobs).map((job) => ({
+        ...job,
+        eta: job.status === "running" && job.plan.length ? planEta(job.plan, clock()) : null,
+      })),
       workingChats: [
         ...running.map((job) => job.chat),
         ...workingAgents.flatMap((agent) => (agent ? [agent.chat] : [])),
-        ...unended.filter((agent) => !agent.jobId).map((agent) => agent.chat),
+        ...agents.filter((agent) => agent.endedAt === null && !agent.jobId).map((agent) => agent.chat),
       ],
     };
   }

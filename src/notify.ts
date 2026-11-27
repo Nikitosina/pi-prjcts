@@ -114,7 +114,7 @@ export function startNotifier(options: {
         jobId: job.id,
         title: job.title,
         steps: job.plan.map((step) => ({ title: step.title, status: step.status, estimateMin: step.estimateMin ?? 0 })),
-        etaMin: job.eta.etaMin,
+        etaMin: job.eta?.etaMin,
       };
       const fingerprint = JSON.stringify(view);
       if (progressSeen.get(job.id) === fingerprint) continue;

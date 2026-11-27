@@ -283,6 +283,12 @@ await kit.run(async () => {
   // P9 + P10: one source per target.
   await set("scout", null);
   check("P9 null restores the built-ins and stores nothing", !stored().promptBlocks?.scout && !(await get("scout")).customized);
+  const endedScout = (await rpc({ action: "jobs-snapshot", id })).agents.find((item) => item.role === "scout" && item.endedAt !== null);
+  check(
+    "P5 an ended scout that can be continued still shows pending after a behavior edit",
+    endedScout?.prompt?.state === "pending",
+    endedScout,
+  );
   await kit.updateSettings(id, { prompts: { reviewer: "LEGACY-REVIEWER text" } });
   const legacyReviewer = await get("reviewer");
   check("P10 a legacy override shows as legacy", legacyReviewer.legacy && legacyReviewer.text === "LEGACY-REVIEWER text", legacyReviewer);

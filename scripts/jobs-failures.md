@@ -98,5 +98,5 @@ PR #60 repair: scripts/reviewer-recheck-failures.md (X1-X10), driven by scripts/
 ## Snapshot cost (owner 2026-11-27: the host idles at 100% CPU; jobs-snapshot took 3.5 s with 370 agents)
 
 - S1 A jobs snapshot reads project.json and the saved behavior once per agent instead of once per snapshot (`promptBehaviors`, memoized per role and helper variant).
-- S2 A settled agent (ended read-only agent, or a worker whose Job is approved or stopped) is still asked for its prompt status. A worker whose Job is Ready, checkpointed or failed keeps it: its next continued or retried turn adopts the behavior (prompt-blocks P5).
-- S3 The notification scanner builds the full per-agent snapshot (prompt, model, working of every agent) each tick instead of `activity()`; progress notices of running Jobs must still fire with unchanged content, and a chat with a running Job or a working agent stays quiet (browser-notify-e2e, telegram-jobs-unit).
+- S2 An agent that can still take a turn (an ended scout or reviewer, a Ready, stopped or approved worker whose Job a send can reopen) loses its prompt status, so a pending behavior edit is no longer shown.
+- S3 The notification scanner builds the full per-agent snapshot (prompt, model, working of every agent) each tick instead of `activity()`; progress notices of running Jobs must still fire with unchanged content, and a chat with a running Job, a working agent (ended or not) or an unended agent without a Job stays quiet (browser-notify-e2e, telegram-jobs-unit).
