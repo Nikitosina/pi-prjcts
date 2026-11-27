@@ -146,7 +146,9 @@ await client.run(async () => {
       assert.ok(await page.evaluate(`!!document.querySelector('#composer-input')`));
       const inGroup = (key) => `document.querySelector('[data-host-group="${key}"]').innerText`;
       assert.ok(await page.evaluate(`${inGroup("local")}.includes('Only at work') && !${inGroup("local")}.includes('Only at home')`));
-      assert.ok(await page.evaluate(`${inGroup(status.hostId)}.includes('Only at home') && !${inGroup(status.hostId)}.includes('Only at work')`));
+      assert.ok(
+        await page.evaluate(`${inGroup(status.hostId)}.includes('Only at home') && !${inGroup(status.hostId)}.includes('Only at work')`),
+      );
       await page.evaluate(`document.querySelector('[data-host-group="${status.hostId}"] [data-project]').click()`);
       await page.waitFor(`document.querySelector('#crumbs').innerText.includes('Only at home')`, "remote project selected");
       await typeAndSend(page, "#composer-input", "Remote journey");
@@ -201,7 +203,10 @@ await client.run(async () => {
       await addLink((await other.rpc({ action: "remote-pair-start" })).link);
       await page.waitFor(`document.body.innerText.includes('Only at home')`, "paired again");
       await other.stopHost();
-      await page.waitFor(`document.querySelector('[data-host-group]:not([data-host-group=local])')?.dataset.state === 'offline'`, "remote offline");
+      await page.waitFor(
+        `document.querySelector('[data-host-group]:not([data-host-group=local])')?.dataset.state === 'offline'`,
+        "remote offline",
+      );
       await page.shot("remote-offline", { force: true });
       const peer = fork(new URL("./lib/inbox-version-peer.mjs", import.meta.url), {
         env: { ...other.hostEnv, INBOX_TEST_ROOT: other.root },
@@ -218,7 +223,8 @@ await client.run(async () => {
           assert.equal(data.error, undefined);
           return data;
         }
-        const statusIs = (s) => `document.querySelector('[data-host-group]:not([data-host-group=local])')?.dataset.state === ${JSON.stringify(s)}`;
+        const statusIs = (s) =>
+          `document.querySelector('[data-host-group]:not([data-host-group=local])')?.dataset.state === ${JSON.stringify(s)}`;
         await page.waitFor(statusIs("needs update"), "incompatible host");
         await page.shot("needs-update", { force: true });
         assert.deepEqual((await control("status")).requests, ["api-version"]);
@@ -261,12 +267,18 @@ await client.run(async () => {
       }
       other.startHost();
       await other.waitHost();
-      await page.waitFor(`document.querySelector('[data-host-group]:not([data-host-group=local])')?.dataset.state === 'online'`, "real host reconnected");
+      await page.waitFor(
+        `document.querySelector('[data-host-group]:not([data-host-group=local])')?.dataset.state === 'online'`,
+        "real host reconnected",
+      );
       const deviceId = await page.evaluate(
         `(async()=> (await (await import('/inbox-wire/store.js')).get('inbox-device:${status.hostId}')).id)()`,
       );
       await other.rpc({ action: "remote-revoke", deviceId, confirm: deviceId });
-      await page.waitFor(`document.querySelector('[data-host-group]:not([data-host-group=local])')?.dataset.state === 'revoked'`, "revoked device stopped");
+      await page.waitFor(
+        `document.querySelector('[data-host-group]:not([data-host-group=local])')?.dataset.state === 'revoked'`,
+        "revoked device stopped",
+      );
       await page.shot("revoked", { force: true });
     });
     assert.equal(other.result.status, "passed", other.result.failure);

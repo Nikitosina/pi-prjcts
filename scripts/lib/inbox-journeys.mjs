@@ -88,7 +88,9 @@ export async function forgetAcrossViews(page, id) {
   try {
     await sibling.waitFor(`document.querySelector('[data-host-group="${id}"]')?.dataset.state === 'online'`, "second active view");
     await sibling.evaluate(`window.confirm=()=>true; document.querySelector('[data-host-menu="${id}"]').click()`);
-    await sibling.evaluate(`[...document.querySelectorAll('.host-menu button')].find((b) => b.textContent.startsWith('Forget host')).click()`);
+    await sibling.evaluate(
+      `[...document.querySelectorAll('.host-menu button')].find((b) => b.textContent.startsWith('Forget host')).click()`,
+    );
     const local = `!new URL(location).searchParams.has('host') && document.body?.dataset.ready==='1'`;
     await sibling.waitFor(local, "Forget returned to local inbox");
   } finally {

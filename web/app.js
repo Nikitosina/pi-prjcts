@@ -568,8 +568,12 @@ async function start() {
   const url = new URL(location.href);
   const wanted = url.searchParams.get("project");
   // A bookmarked remote project waits for its host's first connection, a bounded time; the local group is already drawn.
-  if (wanted && !hostOf(wanted) && remoteGroups()) await Promise.race([remotes, new Promise((done) => setTimeout(done, 8000))]);
-  const first = hostOf(wanted) ? wanted : state.projects[0]?.id;
+  if (((wanted && !hostOf(wanted)) || !admin.local) && remoteGroups())
+    await Promise.race([remotes, new Promise((done) => setTimeout(done, 8000))]);
+  // Settings and the Host agent of a remote host open with that host's project selected, so project sections match the header.
+  const adminGroup = groupOf(admin);
+  const first =
+    hostOf(wanted) && (admin.local || hostOf(wanted) === admin) ? wanted : (adminGroup?.projects[0]?.id ?? state.projects[0]?.id);
   if (first) await select(first, first === wanted ? (url.searchParams.get("chat") ?? "main") : "main");
   else document.body.dataset.ready = "1";
   const panel = url.searchParams.get("panel");
