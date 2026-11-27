@@ -1,8 +1,7 @@
 // notes: the example plugin of docs/plugins. Short notes per project, kept in the plugin's state directory.
-// The owner's browser (the panel in Settings → Plugins) and the Host agent use the RPC methods; coordinators and workers use the tools.
+// The owner sees them in two declarative sections, the Host agent uses the RPC methods, and coordinators and workers use the tools.
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 const PROJECT_ID = /^[a-f0-9-]{36}$/;
 
@@ -25,6 +24,8 @@ export default {
       return notes;
     };
     const text = (value) => ({ output: [{ type: "text", text: JSON.stringify(value) }] });
+    const latest = (projectId, count) => read(projectId).slice(-count).reverse();
+    const noteRow = (note) => ({ text: note.text, detail: [note.at] });
     const AddParams = Type.Object({ text: Type.String({ minLength: 1, maxLength: 500 }) }, { additionalProperties: false });
 
     api.provide({
@@ -41,10 +42,32 @@ export default {
       },
       // Clearing loses data, so the Host agent needs the owner's approval for it.
       rpcPolicy: { list: "read", add: "write", clear: "dangerous" },
-      web: {
-        script: fileURLToPath(new URL("ui.js", import.meta.url)),
-        style: fileURLToPath(new URL("ui.css", import.meta.url)),
-        sidebar: { title: "Notes" },
+      // Core draws both views as text; the Clear button calls the plugin's own `clear`, and core asks first because it is dangerous.
+      sections: {
+        notes: {
+          title: "Notes",
+          place: "settings",
+          read: async ({ projectId }) => {
+            if (!projectId) return { rows: [], empty: "Select a project to see its notes." };
+            const notes = read(projectId);
+            const summary = {
+              label: "Saved",
+              text: String(notes.length),
+              buttons: notes.length ? [{ label: "Clear notes", method: "clear", confirm: "Delete every note of this project?" }] : [],
+            };
+            return { rows: [summary, ...latest(projectId, 49).map(noteRow)] };
+          },
+        },
+        latest: {
+          title: "Notes",
+          place: "chat",
+          refreshMs: 5000,
+          read: async ({ projectId, chatId }) => ({
+            rows: latest(projectId, 3).map(noteRow),
+            empty: "No notes yet.",
+            footer: `Chat: ${chatId}`,
+          }),
+        },
       },
 
       coordinatorTools: {

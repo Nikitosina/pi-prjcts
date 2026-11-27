@@ -23,8 +23,8 @@ node .agents/skills/verify-pi-prjcts/scripts/verify.mjs cleanup --run <scratch>
 ```
 
 - `launch` starts a host with a scratch home, a fake model provider and the plugins through `PI_PROJECTS_PLUGINS`. The scratch home has no `plugins.json`. Several `--plugin` flags load several plugins, which shows conflicts between them.
-- `drive ... plugins` opens the inbox in headless Chrome, screenshots the Plugins section and saves the host's `plugins` status next to it. It fails when a launched plugin's row does not show its name, version, state and error. It then opens Settings → Plugins and fails when a launched plugin's panel does not mount.
-- Open Settings → Plugins (⌘, then X) on the private host to use your panel yourself. A panel error shows in red in the plugin's card; the browser console has the stack.
+- `drive ... plugins` opens the inbox in headless Chrome, screenshots the Plugins section and saves the host's `plugins` status next to it. It fails when a launched plugin's row does not show its name, version, state and error. It then opens Settings → Plugins and fails when a settings section of a launched plugin does not draw.
+- Open Settings → Plugins (⌘, then X) on the private host to use your sections yourself. A section error shows in red in the section, with the message your `read` threw.
 - `rpc --run <scratch> plugins` prints the same status. The skill's `rpc` command only allows read-only core actions, so call your own methods over the socket as shown in [Getting started](getting-started.md#4-try-it-on-a-private-host).
 - Coordinator tools: `profile-tools` over the same socket, with `{"action":"profile-tools","projectId":"<id>","profile":"coordinator"}`, lists them in the `plugin` group. `prompt-render` with the same fields shows a `prompt` block's text.
 - The fake model does not call your tools. Prove tool behavior in tests; on the private host, prove that the tools are offered.
@@ -36,8 +36,8 @@ The full verification procedure, including proof for a change to core, is the [`
 Every host shows what it loaded at its start, in five places:
 
 - Settings → Plugins: name, version, state and capabilities, or the source and error of a failure;
-- Settings → Plugins: the same rows, each with the plugin's panel or the panel's error;
-- the `plugins` RPC: `{ plugins: PluginStatus[], labels, web }`;
+- Settings → Plugins: the same rows, each with the plugin's settings sections or their errors;
+- the `plugins` RPC: `{ plugins: PluginStatus[], labels, sections }`, where `sections` lists the sections of plugins that are on for the project;
 - `/health`;
 - the host log: `plugin-loaded` and `plugin-failed` lines.
 
@@ -89,17 +89,18 @@ To deactivate, remove the entry and restart. The plugin's files in `api.stateDir
 | `a plugin named "<name>" is already loaded`, `... is already provided by another plugin` | two plugins with one name, or one provider id or checkout kind |
 | `plugins.json is unreadable: ...` | the file is not `{ "plugins": ["/path", ...] }` |
 
-Panel errors show in the plugin's card in Settings → Plugins:
+Section errors show in the section itself:
 
-| panel error | cause |
+| section error | cause |
 | --- | --- |
-| `ui.js did not register a panel ...` | the script never called `window.piProjects.register` while it first ran |
-| `ui.js registered as "<other>"; ...` | `name` is not the plugin's own name |
-| `ui.js uses the retired context-panel hooks ...` | a card written for the classic inbox; port it to `mount(slot, panel)` |
-| `piProjects.register must be called while its ui.js runs` | `register` was called later, for example after an `await` |
-| `ui.js could not be loaded from ...` | the host could not read the file at its start (it answers 404) |
-| `ui.css could not be loaded from ...` | the same for the stylesheet; the panel still mounts |
-| any other message | what your script, `mount` or `action` threw |
+| `sections.<id>.<field> ...` (load) | a declaration breaks a rule; the plugin is `failed` |
+| `Section <plugin>.<id> returned an invalid view: <field> ...` | `read` returned a view that breaks a limit; the message names the field |
+| `Section <plugin>.<id> did not answer within 15 s` | `read` took too long |
+| `Could not refresh: ...` | a later read failed; the last rows stay |
+| `<label>: result unknown, check after reconnecting` | a button's answer was lost; the call is not sent again |
+| any other message | what your `read` or the button's RPC method threw |
+
+A plugin that still provides `web` loads without it; the host log says `web (browser script, style and routes) is removed and ignored`.
 
 ## Compatibility
 
@@ -113,6 +114,6 @@ Panel errors show in the plugin's card in Settings → Plugins:
 - No hot reload. Every change waits for a host restart.
 - No per-project installation. `plugins.json` is per host home, and a loaded plugin is loaded for every project on that host. Limit it with `coordinatorTools.applies`, `workerTools.offered` and your own checks of `projectId`.
 - No sandbox. A plugin is trusted code in the host process (see [Trust](README.md#trust)).
-- A browser panel lives only in Settings → Plugins. A plugin cannot add UI anywhere else in the inbox. The simulator plugin's panel is a fuller example: polling, screenshots through a route and inline confirmations.
+- A plugin has no browser code. It shows data only through [sections](reference.md#sections), in Settings → Plugins and in the chat's right panel. The simulator plugin's sections are a fuller example: polling, request ids and inline confirmations.
 - No published type package (see Compatibility).
 - `plugin check` does not run your RPC methods or tools, and the private host's fake model does not call your tools.

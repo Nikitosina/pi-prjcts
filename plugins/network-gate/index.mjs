@@ -1,6 +1,5 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { fileURLToPath } from "node:url";
 import { createWatcher, settings } from "./watcher.mjs";
 const execute = promisify(execFile);
 const system = {
@@ -17,6 +16,31 @@ const system = {
     }
   },
 };
+const PHASES = { ready: "good", repairing: "work", waiting: "needs" };
+/** Up to 500 characters of ids, then how many more; a row's text holds 500. */
+function listed(ids) {
+  let text = "";
+  for (const [index, id] of ids.entries()) {
+    const next = text ? `${text}, ${id}` : id;
+    const rest = ids.length - index - 1;
+    if (next.length + (rest ? ` and ${rest} more`.length : 0) > 500) return `${text} and ${ids.length - index} more`;
+    text = next;
+  }
+  return text || "none";
+}
+/** The VPN gate section in Settings → Plugins: the watcher's status as key/value rows. */
+export function gateView(s) {
+  const clip = (text) => (text.length > 500 ? `${text.slice(0, 499)}…` : text);
+  const rows = [
+    { label: "VPN gate", text: clip(String(s.vpn)), status: { label: s.phase, tone: PHASES[s.phase] ?? "neutral" } },
+    { label: "Failed samples", text: String(s.failures) },
+    { label: "Repair attempts", text: `${s.attempts}/3` },
+    { label: "Last repair", text: s.lastRepair ?? "none" },
+    { label: "Paused projects", text: listed(s.paused) },
+  ];
+  if (s.error) rows.push({ label: "Error", text: clip(String(s.error)), status: { label: "error", tone: "bad" } });
+  return { rows };
+}
 export function networkGate(deps = system) {
   return {
     name: "network-gate",
@@ -43,7 +67,7 @@ export function networkGate(deps = system) {
             await pending;
           },
         },
-        web: { script: fileURLToPath(new URL("./ui.js", import.meta.url)) },
+        sections: { status: { title: "VPN gate", place: "settings", refreshMs: 3000, read: async () => gateView(await watcher.status()) } },
       });
       if (api.projects.control) timer = setTimeout(poll, 0).unref();
     },

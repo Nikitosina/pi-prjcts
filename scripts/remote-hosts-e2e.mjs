@@ -27,7 +27,7 @@ await client.run(async () => {
     assert.equal(reply.ok, true, reply.error);
     return reply.data;
   };
-  assert.deepEqual(await call("api-version"), { version: 1 });
+  assert.deepEqual(await call("api-version"), { version: 2 });
   assert.deepEqual(await call("inbox-hosts"), []);
   const entry = { hostId: "A".repeat(43), name: "Test host", relayOrigin: "https://127.0.0.1:33443" };
   await call("inbox-host-add", entry);
@@ -219,7 +219,7 @@ await client.run(async () => {
         await page.reload();
         await page.waitFor(statusIs("needs update"), "missing version");
         assert.deepEqual((await control("status")).requests, ["api-version", "api-version"]);
-        await control("restart", 1);
+        await control("restart", 2);
         await page.reload();
         await page.waitFor(statusIs("online"), "compatible host");
         await page.evaluate(
@@ -232,14 +232,14 @@ await client.run(async () => {
         await control("stop");
         await page.waitFor(statusIs("offline"), "lost replies");
         assert.match(await page.evaluate("writeResult"), /result unknown, check after reconnecting/i);
-        await control("restart", 1);
+        await control("restart", 2);
         await other.waitFor(
           async () => (await control("status")).requests.filter((r) => r === "search").length === 2,
           "first replay in flight",
         );
         await control("stop");
         await page.waitFor(statusIs("offline"), "lost replay");
-        await control("restart", 1);
+        await control("restart", 2);
         assert.equal(await page.evaluate("readResult"), "retry probe");
         const requests = (await control("status")).requests;
         assert.equal(requests.filter((r) => r === "message").length, 1);

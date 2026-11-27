@@ -279,7 +279,7 @@ The local inbox (`web/` served by the local host on `127.0.0.1`) shows and contr
 Each stage is its own PR, with its failure modes written in `scripts/<name>-failures.md` before the code.
 
 1. **Host-aware client.** Tunnel client in `web/`, host-aware `web/api.js`, fixed inbox port, API version check, the remote host list in the local home, Add host and Forget host, the host switcher in Settings and the Host agent, the CSP change.
-2. **Declarative plugin sections.** New contract in `src/plugin-types.ts`, `PLUGINS.md` and `docs/plugins/`; removal of `web.script` and `web.style`; Tasks and network-gate as declarative sections; the simulator panel deleted.
+2. **Declarative plugin sections.** New contract in `src/plugin-types.ts`, `PLUGINS.md` and `docs/plugins/`; removal of `web.script` and `web.style`; Tasks and network-gate as declarative sections; the simulator panel deleted. As built: `web.sidebar`, `web.routes` and `window.piProjects` are removed too; sections are read with the `plugin-section` action and drawn by `web/sections.js`; the simulator keeps two small settings sections (management and clones, slimming) for the controls no agent tool covers; the API version is 2, because the `plugins` answer and plugin routes changed. Proof: `scripts/plugin-sections-e2e.mjs` (local host and a remote host through a local relay) and `scripts/simulator-section-e2e.mjs`.
 3. **Shared sidebar and Decision inbox.** Projects grouped by host, online state, shared Decision inbox.
 4. **Offline read cache.** IndexedDB cache, "data from HH:MM", disabled writes while offline, clearing on Forget host and revocation.
 

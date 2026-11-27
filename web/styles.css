@@ -1944,35 +1944,111 @@ a.pr-link:hover .pr-title {
   background: var(--accent-ink);
   color: var(--bg);
 }
-/* Settings → Plugins: one card per plugin; a panel's slot belongs to the plugin. */
+/* Settings → Plugins: one card per plugin, with the plugin's settings sections under its status row. */
 .plugin-card {
   margin-bottom: 12px;
   padding: 8px 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
 }
-.plugin-panel {
+.plugin-card .plugin-section {
   margin-top: 8px;
   padding-top: 8px;
   border-top: 1px solid var(--line);
 }
-.plugin-panel[data-state="loading"] .plugin-slot:empty::before {
-  content: "Loading…";
-  color: var(--muted);
+.plugin-card .section-title {
+  margin: 0 0 4px;
+  font: 600 12.5px/1.5 var(--font);
 }
-.plugin-panel .plugin-error,
-.plugin-section .plugin-error {
-  margin: 0 0 6px;
-  overflow-wrap: anywhere;
-}
-/* Right panel: one .ctx-section per plugin that opted in; the slot belongs to the plugin and its width is the panel's. */
+/* Declarative plugin sections (web/sections.js), in a plugin card or the right panel; all text is the plugin's, drawn as text. */
 .plugin-section {
   min-width: 0;
+  overflow-wrap: anywhere;
+}
+.plugin-section .plugin-error {
+  margin: 0 0 6px;
   overflow-wrap: anywhere;
 }
 .plugin-section[data-state="loading"] .plugin-slot:empty::before {
   content: "Loading…";
   color: var(--muted);
+}
+.section-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.section-row {
+  padding: 6px 0;
+  border-top: 1px solid var(--line);
+  font-size: 12.5px;
+}
+.section-row:first-child {
+  border-top: 0;
+}
+.section-head {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+.section-label {
+  flex: none;
+  color: var(--muted);
+}
+.section-text {
+  flex: 1;
+  min-width: 0;
+}
+.section-status {
+  flex: none;
+  margin-left: auto;
+}
+.section-status[data-tone="good"] {
+  background: color-mix(in srgb, var(--ready) 18%, transparent);
+  color: var(--ready);
+}
+.section-status[data-tone="work"] {
+  background: color-mix(in srgb, var(--work) 20%, transparent);
+  color: var(--work);
+}
+.section-status[data-tone="needs"] {
+  background: color-mix(in srgb, var(--needs) 20%, transparent);
+  color: var(--needs);
+}
+.section-status[data-tone="bad"] {
+  background: color-mix(in srgb, var(--bad) 18%, transparent);
+  color: var(--bad);
+}
+.section-detail,
+.section-links,
+.section-empty,
+.section-foot {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.section-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+.section-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.section-confirm {
+  margin-top: 8px;
+  padding: 10px;
+  border-radius: var(--r-s);
+  background: var(--raised);
+}
+.section-confirm p {
+  margin: 0;
+}
+.section-confirm .confirm-actions {
+  margin-top: 8px;
 }
 
 /* ------------------------------------------------------------------------------------------------ focus views */

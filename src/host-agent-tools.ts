@@ -182,6 +182,7 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
   "plugin-activate": exclude(
     "Adds a bundled plugin to the host's plugins.json; the owner does it in Settings → Plugins, and a separate restart loads it.",
   ),
+  "plugin-section": allow("Read a plugin section as the owner sees it in Settings or the chat's right panel."),
   plugin: allow("Call a plugin method; methods the plugin does not declare as reads or safe writes need the owner's approval."),
   "work-submit": exclude("Worker-scoped admission path; the Host agent sends with message."),
   notes: allow("A project's notes."),

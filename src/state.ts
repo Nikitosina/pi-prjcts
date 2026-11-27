@@ -1526,6 +1526,16 @@ export const Request = Type.Union([
     { additionalProperties: false },
   ),
   Type.Object(
+    {
+      action: Type.Literal("plugin-section"),
+      plugin: Type.String({ pattern: "^[a-z][a-z0-9-]{0,39}$" }),
+      section: Type.String({ pattern: "^[a-z][a-z0-9-]{0,39}$" }),
+      id: Type.Optional(Id),
+      chatId: Type.Optional(ChatId),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
     { action: Type.Literal("work-submit"), id: Id, threadId: Id, requestId: Id, workspaceScopeId: Id, text },
     { additionalProperties: false },
   ),

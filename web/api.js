@@ -26,11 +26,15 @@ export function setToken(value) {
 }
 
 export class HostError extends Error {
-  /** `refused` is true only when the host itself said it changed nothing; any other failure, a gateway's JSON included, leaves the request possibly acted on. */
-  constructor(message, status, refused = false) {
+  /**
+   * `refused` is true only when the host itself said it changed nothing; any other failure, a gateway's JSON included, leaves the request possibly acted on.
+   * `answered` is false when no readable answer came back, so the outcome of a write is unknown.
+   */
+  constructor(message, status, refused = false, answered = true) {
     super(message);
     this.status = status;
     this.refused = refused;
+    this.answered = answered;
   }
 }
 async function requestAction(fetch, action, input = {}, signal) {
@@ -44,9 +48,10 @@ async function requestAction(fetch, action, input = {}, signal) {
   try {
     body = await response.json();
   } catch {
-    throw new HostError(`Host answered HTTP ${response.status}`, response.status);
+    throw new HostError(`Host answered HTTP ${response.status}`, response.status, false, false);
   }
-  if (!body.ok) throw new HostError(String(body.error ?? "Request failed"), response.status, body.refused === true);
+  if (!body.ok)
+    throw new HostError(String(body.error ?? "Request failed"), response.status, body.refused === true, typeof body.error === "string");
   return body.data;
 }
 
@@ -122,7 +127,7 @@ function openStream(host, path, onFrame, onState = () => {}) {
 }
 
 const reads = new Set(
-  `approvals-list automation-snapshot chat-history coordinator-skills deploy-snapshot host-agent-history jobs-snapshot knowledge-read limits-snapshot list machine-status memory-index memory-recent memory-writes plugin-catalog plugins profile-tools profiles-get prompt-blocks-get prompt-render prs remote-devices remote-status schedule-history schedule-snapshot search settings-snapshot show storage-status storage-summary telegram-snapshot thread-history tiers-get tool-summaries-usage transcript-image ui-get usage-snapshot worker-contexts pr-review-files pr-review-file pr-review-lines pr-review-tour-status`.split(
+  `approvals-list automation-snapshot chat-history coordinator-skills deploy-snapshot host-agent-history jobs-snapshot knowledge-read limits-snapshot list machine-status memory-index memory-recent memory-writes plugin-catalog plugin-section plugins profile-tools profiles-get prompt-blocks-get prompt-render prs remote-devices remote-status schedule-history schedule-snapshot search settings-snapshot show storage-status storage-summary telegram-snapshot thread-history tiers-get tool-summaries-usage transcript-image ui-get usage-snapshot worker-contexts pr-review-files pr-review-file pr-review-lines pr-review-tour-status`.split(
     " ",
   ),
 );

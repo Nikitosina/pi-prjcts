@@ -90,33 +90,14 @@ Written before the code (retro 2026-11-09). Owner decision: the worker that hold
 - The tool waits for the outcome and stops waiting when the call is aborted; the operation itself continues and stays recorded.
 - Known limit: a holder that releases its lease while its boot runs lets another worker take the clone mid-boot; the pending operation still blocks other lifecycle calls.
 
-## Settings panel
+## Settings section
 
-Written before the port. The browser card moves from the classic context-panel hooks (`render`, `tick`, `projectChanged`, `hide`) and page helpers (`state`, dialogs, toasts) to the Settings → Plugins panel contract, `mount(slot, panel)` and `action(name, node, panel)` (`docs/plugins/reference.md#settings-panel`). RPC methods, request schemas, ownership and the screenshot route do not change. Proof: `scripts/simulator-panel-e2e.mjs` (S1-S11, private HOME, fake model, a fake simslim and a fake XcodeBuildMCP that answer from a JSON device list; no real simulator).
+Written before the change. The browser panel (`web/ui.js`, `mount(slot, panel)`) and the `/plugins/simulator/frame` route are removed with plugin browser code (REMOTE_SPEC.md decision 16). The plugin declares two settings sections instead (`section.ts`), drawn by core. RPC methods, request schemas, policies, ownership, tools, leases, lifecycle, cleanup and usage do not change; boot, shut down, create, reset and delete stay with the Coordinator and worker tools. The panel cases S1-S19 are retired with the panel. Proof: `scripts/simulator-section-e2e.mjs` (private HOME, fake model, a fake simslim that answers from a JSON device list; no real simulator).
 
-- S1 The panel is refused for the retired hooks, or needs a page helper the panel API does not hand out. It mounts as `ready` through `mount(slot, panel)` and renders only into its slot.
-- S2 The listing hides what the old card showed: status, one tab per owned clone with its state, the source it was cloned from, its UDID, slimming and the clone limit. Device and source names from simslim are inserted as HTML.
-- S3 Boot or shut down does not reach the host, reaches another project, or reuses a request id. Each click sends one `action` with a fresh request id for the panel's project, simslim runs the effect, and the panel shows the new state from the next snapshot.
-- S4 Reset, delete and turning management off run without a confirmation, or the confirmation opens outside the slot. The confirmation is inline; Cancel sends nothing; confirming sends exactly one request for the named clone.
-- S5 Creating a clone offers a source that is running, or the new clone is not listed. Only shut-down sources can be chosen; the clone appears as owned after the operation.
-- S6 A failed snapshot (simslim missing or failing) leaves the panel loading or blank. It says the simulator is unavailable, shows the reason and offers Retry, which recovers once simslim answers.
-- S7 An operation with an unknown outcome hides the acknowledgement, or acknowledging retries the effect. The panel shows Needs inspection with an inline acknowledgement that calls `recover` with the project id and nothing else.
-- S8 A request whose answer never arrives is dropped or retried with a new id. The panel says the outcome is unconfirmed and offers Retry exact request, which resends the same request id, also after Settings is reopened.
-- S9 A booted clone shows no screenshot, or the screenshot uses a request without the token. The panel polls `panel.fetch("frame", { udid })` and shows the image; a shut-down clone shows none.
-- S10 Closing Settings, leaving the section or selecting another project leaves polling or captures running, or a late answer renders into the next mount. After the signal aborts, no snapshot or frame request is sent and object URLs are revoked.
-- S11 A project change shows the previous project's clones, or reopening stacks timers and handlers. Each mount shows only its own project's state, and one click sends one request after several reopenings.
-
-Found in review (red before the fix):
-
-- S12 A request still waiting for its answer when the panel goes away keeps the next mount locked until that answer arrives. The next mount offers Retry exact request at once; the retry resends the same request id, and the host's receipt makes it run once.
-- S13 A slow screenshot blocks the next capture: selecting another clone waits for the old answer, and a capture that never answers freezes the screenshot. Selecting another clone captures it at once, and a capture gives up after 60 seconds. The e2e covers the first; the timeout is not scripted, since it would hold the run for a minute.
-
-Layout refresh (written before the change; the e2e covers each):
-
-- S14 The primary view repeats the device name and status, or shows technical metadata. It shows the device (a tab per clone, or its name), one status badge, the screenshot and Boot or Shut down. UDID, source, slimming, the clone limit and the view-only note sit in a closed Details disclosure that opens by click or keyboard.
-- S15 Reset, delete and turning management off sit in a menu that opens only on hover, loses its open state on a polled render, stays open after a choice, or skips the confirmation. The More actions menu opens by click or Enter, stays open across polls, closes after a choice and on a press outside; each item still opens the inline confirmation. Escape keeps its app-wide meaning and closes Settings.
-- S16 An icon-only button has no accessible name, or its name is only a hover tooltip. Every icon-only button has an `aria-label` and a matching `title`; clone tabs say their state in text, not only by a colour dot.
-- S17 Errors, an unknown outcome or Retry exact request end up inside the Details disclosure or the menu. They stay visible in the primary view.
-- S18 At 390 px the panel overflows sideways or pushes its controls out of view. The toolbar wraps inside the card and every control stays on screen.
-
-- S19 A project's saved simslim categories are ignored at create, boot or reset, or a successful boot with the 0.15.0 `partially slim` verdict is recorded as uncertain. The panel saves photos and search, shows the saved setting and the fake CLI records the exact arguments for each operation. Without exclusions boot still requests and confirms full slimming.
+- C1 The section hides management, or offers a switch that skips a confirmation when it turns management off. It shows On or Off with one button; Turn off asks inline and says the clones are kept, Cancel sends nothing, and each confirmed switch sends one `configure`.
+- C2 A clone is missing, shows another project's clone, or hides who holds it. There is one row per owned clone with its name, state and lease holder, and another project shows only its own state.
+- C3 An unknown outcome is hidden, its reason is drawn as markup, or acknowledging it retries the operation. The section shows the reason as text with one dangerous acknowledgement, which asks first and sends one `recover` with the project id; the switch is hidden meanwhile.
+- C4 The saved simslim categories can no longer be changed by the owner, since no tool sets them. A second section, Simulator slimming, lists every category as kept or slimmed with one toggle; each press sends one `configure` with the whole new list, and the next create, boot or reset uses it.
+- C5 Every read carries new request ids, so an unchanged state redraws on each poll; or an id repeats after a change, so the receipt replays a stale answer and the press does nothing. Ids stay the same while nothing changed and differ after each `configure` or `recover`, also after a host restart.
+- C6 The frame route still answers, or an agent screenshot breaks with it. `/plugins/simulator/frame` answers 404; the screenshot tools keep using the plugin's capture, which this change does not touch.
+- C7 At 390 px the sections overflow sideways. They fit the screen.
