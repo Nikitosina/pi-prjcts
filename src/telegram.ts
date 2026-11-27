@@ -1348,6 +1348,7 @@ export function startTelegram(options: {
           }
           // Any other 400 means the message is gone: fall through and send a new one.
         }
+        if (state.owner?.chatId !== chat_id) return;
       }
       let thread = wanted;
       const sent = await inTopic(

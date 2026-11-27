@@ -44,6 +44,11 @@ const server = createServer(async (req, res) => {
       Number(fault),
     );
   }
+  if (gate?.method === method) {
+    const { run } = gate;
+    gate = null;
+    await run();
+  }
   if (method === "editMessageText" && editFault === "network") {
     editFault = null;
     return req.socket.destroy();
@@ -52,11 +57,6 @@ const server = createServer(async (req, res) => {
     const description = editFault;
     editFault = null;
     return reply({ ok: false, error_code: 400, description }, 400);
-  }
-  if (gate?.method === method) {
-    const { run } = gate;
-    gate = null;
-    await run();
   }
   if (method === "getMe") return reply({ ok: true, result: { id: 1, username: "b", has_topics_enabled: topicsFlag } });
   if (method === "createForumTopic") return reply({ ok: true, result: { message_thread_id: ++nextThread } });
@@ -260,6 +260,17 @@ try {
   const staleId = calls.find((c) => c.method === "sendMessage" && c.input.text.includes("Stale job"));
   assert.equal(staleId.input.chat_id, 77);
   assert.equal(afterStale.messages[String(staleId.id)], undefined, "its message id is not routed for the new account");
+  // 69: the owner changes while an edit is in flight and the answer is "not found": the replacement is not sent to the former owner.
+  await bridge.progress(progressFor("j3", "Edited job"));
+  gate = { method: "editMessageText", run: () => repair(OWNER, "Owner") };
+  editFault = "Bad Request: message to edit not found";
+  calls = [];
+  await bridge.progress({ ...progressFor("j3", "Edited job"), title: "Edited job again" });
+  assert.equal(
+    calls.filter((c) => c.method === "sendMessage" && c.input.chat_id === 88 && String(c.input.text).includes("Edited job again")).length,
+    0,
+    "no replacement progress message reaches the former owner",
+  );
   await repair(OWNER, "Owner");
   calls = [];
   // Mixed-origin batches keep a Telegram reply even when an event is the last input sharing its answer.
