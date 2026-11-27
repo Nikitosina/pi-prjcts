@@ -399,8 +399,12 @@ export function mountHostagent(client, chat, media) {
   // This page's Host agent belongs to one host: its unsent text is kept under that host's storage prefix.
   const draftKey = hostAgentDraftKey(client);
   input.value = loadDraft(draftKey)?.text ?? "";
-  input.addEventListener("input", () => saveDraft(draftKey, input.value, input.selectionStart));
-  addEventListener("pagehide", () => saveDraft(draftKey, input.value, input.selectionStart));
+  let edited = false; // only a draft this tab changed is written: another tab may own the stored one
+  input.addEventListener("input", () => {
+    edited = true;
+    saveDraft(draftKey, input.value, input.selectionStart);
+  });
+  addEventListener("pagehide", () => edited && saveDraft(draftKey, input.value, input.selectionStart));
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();

@@ -1,5 +1,5 @@
 import { esc } from "./format.js";
-import { state } from "./state.js";
+import { clean, state } from "./state.js";
 import { renderDiff, contextRows } from "./diff.js";
 import { context, header, fileHeader, fileTree } from "./review-parts.js";
 import { reviewTour } from "./review-tour.js";
@@ -35,6 +35,7 @@ export function mountReview(client) {
   }
   async function renderReview(root, focus, afterWrite = "", { mark = true } = {}) {
     closeReview();
+    clean(root);
     const room = document.createElement("section"),
       panel = document.createElement("div");
     room.className = "rv-room";

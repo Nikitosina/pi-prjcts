@@ -127,3 +127,16 @@ Third review of stage 4: reads are no longer replayed (REMOTE_SPEC.md decision 1
 75. A recovery handle of an unsent message without a host ID is treated as local although it may belong to a remote host. It is quarantined and never routed.
 76. A host that was already revoked, not paired or needs update when the page starts still opens its Settings or Host agent. The page redirects to the local host as it does for a later revocation.
 77. Two reads of one host that start in the same millisecond tie and an older answer replaces a newer one. Reads, saves and the tombstone use one monotonic sequence.
+
+## Fourth review of stage 4 (input loss; checked by `input-loss-e2e`, red on fa82619 before the fixes)
+
+78. Rule A: an idle tab erases another tab's draft. Two tabs show the same empty composer; the one that never edited it saved its empty field on chat switch, reload or `pagehide`, deleting the stored draft. A tab now writes a draft only after it changed it in this tab (an `input` event or an authoritative restore), for the chat composer and the Host agent composer.
+79. An offline chat snapshot deletes a newer chat's draft. The cached `show` chat list lacks a later sibling, which was treated as archived and emitted `chat-gone`. Only a live list or a confirmed archive removes a draft; a copy neither deletes nor replaces the remembered list.
+80. A late Memory read replaces a worker editor. Only Memory renders claimed the focus root. Every focus switch (`renderFocus`, `showChat`) now claims it, so an earlier render is discarded whatever the view.
+81. A focus switch to a review or worker view while a read of the previous view is pending shows the old answer (same token as 80).
+82. An interrupted read is replayed. A call interrupted while waiting for the cache (a drop and reconnect inside the wait) was still sent after the host returned. It now settles at once with the copy or an offline error; only the view's new read reaches the host.
+83. A PR review opened online has no offline copy. The online open uses `seen: true`, which bypassed the cache, and the offline open asks `seen: false`, which had no entry. The answer of an online open is now saved under the read-only key.
+84. Rule B: a reconnect discards unsaved Settings fields. Only tier edits were tracked. Every Settings section now marks its body dirty on `input`; a dirty body is never redrawn, and a late read only unlocks the panel. The focus view works the same way.
+85. Controls unlock before the view's own live refresh. A chat shown when the connection dropped kept `live: true` from the previous connection. An answer counts as fresh only for the connection period (`epoch`) it was read in.
+86. A save that began before another tab's wipe lands after it. The tab-local counter cannot order across tabs. The order is a per-host counter in IndexedDB, advanced in the same transaction that begins a read, saves or wipes (with a wipe generation).
+87. Two tabs tie on the same stamp and the strict comparison accepted it. The shared counter gives each read a distinct order, so the older read never replaces the newer.

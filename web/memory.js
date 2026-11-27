@@ -1,7 +1,7 @@
 // Memory (knowledge reimagined): the project's Preferences, Decisions and Procedures from `memory-index`, with the archive behind a
 // toggle and broken links listed. Entries open and save through knowledge-read/-write; chat rows undo a write with `memory-undo`.
 import { ago, esc, markdown } from "./format.js";
-import { claim, emit, fail, newest, on, stale, state, toast } from "./state.js";
+import { claim, clean, emit, fail, newest, on, stale, state, toast } from "./state.js";
 
 export function mountMemory(client) {
   const KINDS = [
@@ -168,6 +168,7 @@ export function mountMemory(client) {
       if (memory && newest(root, token)) state.focus.data = memory.index;
       return;
     }
+    clean(root);
     root.innerHTML = `<div class="focus-head"><button type="button" class="back" data-cmd="leave-focus" aria-label="Back to chat">← <kbd>Esc</kbd></button><h1>Memory</h1><span class="scope">Project</span><button type="button" class="info" data-info="What agents remember about this project. Preferences go into every prompt; decisions and procedures are read on demand. Edits keep revision history." aria-label="About memory">ⓘ</button></div><p class="loading-line">Loading memory…</p>`;
     const gen = state.generation;
     let memory;
@@ -230,6 +231,7 @@ export function mountMemory(client) {
       if (fresh && !stale(gen) && newest(root, token)) state.focus.data = fresh;
       return;
     }
+    clean(root);
     root.innerHTML = `<div class="focus-head"><button type="button" class="back" data-cmd="leave-focus" aria-label="Back">← <kbd>Esc</kbd></button><h1>${esc(memoryTitle(path))}</h1></div><p class="loading-line">Loading…</p>`;
     let doc;
     try {

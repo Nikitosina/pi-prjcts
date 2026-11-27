@@ -3,7 +3,7 @@
 import { localHost, setToken, token } from "./api.js";
 import { clip, esc } from "./format.js";
 import { register, paintHints, onBindingsChange, typing } from "./hotkeys.js";
-import { emit, fail, on, project, stale, state, toast } from "./state.js";
+import { claim, clean, emit, fail, isDirty, isFilter, markDirty, on, project, stale, state, toast } from "./state.js";
 import { closeLimitDetail, limitDetailOpen } from "./limit-detail.js";
 import { mountUi } from "./ui.js";
 import { mountLimits } from "./limits.js";
@@ -156,8 +156,7 @@ on("host-online", (group) => {
   if (state.focus.kind === "chat") return;
   // One path: every open view reads again. A view with unsaved input (a Memory edit, a review comment, a message to a worker) is never replaced;
   // its data is renewed in the background so its controls unlock after its own live read.
-  if (focusView.querySelector("textarea:not(:placeholder-shown), .mem-edit")) return void rereadFocus();
-  renderFocus({ mark: false });
+  renderFocus({ mark: false, auto: true });
 });
 function rereadFocus() {
   const focus = state.focus;
@@ -203,14 +202,14 @@ function onTopic(change) {
   }
   if (change.topic === "knowledge") {
     void refreshRecentMemory({ again: true });
-    if (state.focus.kind === "memory" && !state.focus.path) renderFocus();
+    if (state.focus.kind === "memory" && !state.focus.path) renderFocus({ auto: true });
   }
   clearTimeout(listTimer);
   const group = groupOf(state.host);
   listTimer = setTimeout(() => group && void loadProjects(group), 400);
 }
 on("view", (view) => {
-  rememberChats(state.projectId, view.chats ?? []);
+  rememberChats(state.projectId, view.chats ?? [], state.host?.provenance?.(view)?.live !== false);
   renderTree();
   paintCrumbs();
   paintStatusLine();
@@ -231,6 +230,8 @@ on("projects", () => {
 
 function showChat() {
   closeReview();
+  claim(focusView);
+  clean(focusView);
   state.focus = { kind: "chat" };
   center.dataset.focus = "chat";
   focusView.hidden = true;
@@ -238,9 +239,13 @@ function showChat() {
   chatView.hidden = false;
   renderTree();
 }
-function renderFocus({ mark = true } = {}) {
-  closeReview();
+function renderFocus({ mark = true, auto = false } = {}) {
   const focus = state.focus;
+  // A background redraw never replaces a form with unsaved input: its data is renewed behind it.
+  if (auto && isDirty(focusView)) return void rereadFocus();
+  closeReview();
+  clean(focusView);
+  claim(focusView);
   center.dataset.focus = focus.kind;
   chatView.hidden = true;
   focusView.hidden = false;
@@ -268,6 +273,7 @@ function leaveFocus() {
   paintCrumbs();
   return true;
 }
+focusView.addEventListener("input", (event) => isFilter(event.target) || markDirty(focusView));
 focusView.addEventListener("click", (event) => {
   const source = event.target.closest("[data-source-chat]");
   if (source) void select(state.projectId, source.dataset.sourceChat);

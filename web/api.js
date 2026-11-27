@@ -1,6 +1,6 @@
 // The only module that talks to the host. Requests go through `call`.
 import { dropHostStorage } from "./drafts.js";
-import { hostCache, stamp, wipeHost } from "./host-cache.js";
+import { hostCache, wipeHost } from "./host-cache.js";
 
 const key = `pi-projects-token:${location.origin}`;
 const supplied = new URLSearchParams(location.hash.slice(1)).get("token");
@@ -204,17 +204,21 @@ const SAVING = new Set(["online", "offline"]);
 export function hostClient(transport) {
   const run = transport.run ?? ((_read, _signal, work) => work(transport.authorizedFetch));
   const cache = transport.local ? null : hostCache(transport.hostId);
-  /** Where each answer handed out came from: `{ at, live }`, the time it was read and whether that read was live or a copy from the cache.
-   * Keyed by the answer object itself, so a view knows about exactly the data it rendered and no other read can change that. */
+  /** Where each answer handed out came from: `{ at, live, epoch }`, the time it was read, whether that read was live or a copy from the cache, and
+   * the connection period (`epoch`) of a live one. Keyed by the answer object itself, so a view knows about exactly the data it rendered and no
+   * other read can change that. */
   const provenance = new WeakMap();
   const note = (data, at, live) => {
-    if (data && typeof data === "object") provenance.set(data, { at, live });
+    if (data && typeof data === "object") provenance.set(data, { at, live, epoch: transport.epoch });
     return data;
   };
   let served = false; // a copy was shown at some point, so a live answer may have to take its place on screen
   const offlineError = () => new HostError(`${transport.name} is offline. Changes are disabled until it is back.`, 0, true, false);
   const plain = (read, action, input, signal) => run(read, signal, (fetch) => requestAction(fetch, action, input, signal));
   const host = Object.assign(transport, {
+    get epoch() {
+      return transport.epoch;
+    },
     provenance: (data) => (data && typeof data === "object" ? (provenance.get(data) ?? null) : null),
     storagePrefix: transport.local ? "" : `pi-host:${transport.hostId}:`,
     /** A flow that reads and then writes (Archive's idle check, a revision lookup before a save): its reads never answer from a copy, and once the
@@ -228,47 +232,50 @@ export function hostClient(transport) {
      * `epoch` is the guard's count of connection losses. */
     async call(action, input, signal, { fresh = false, epoch = null } = {}) {
       const read = isRead(action, input);
-      const serve = async () => {
+      const copy = async () => {
         const saved = uncached.has(action) ? null : await cache.get(action, input);
-        // The host may have come back or been revoked while the cache answered: that answer is then not for this moment.
-        if (transport.state !== "offline") return undefined;
         served = true;
         if (saved) note(saved.data, saved.savedAt, false);
         transport.dispatchEvent?.(new Event("copy"));
-        return saved;
+        if (!saved) throw new NeverLoadedError(transport.name);
+        return saved.data;
       };
-      for (;;) {
-        if (cache && epoch !== null && transport.epoch !== epoch) throw offlineError();
-        if (cache && transport.state === "offline") {
-          if (!read || fresh) throw offlineError();
-          const saved = await serve();
-          if (saved === undefined) continue;
-          if (!saved) throw new NeverLoadedError(transport.name);
-          return saved.data;
+      if (cache && epoch !== null && transport.epoch !== epoch) throw offlineError();
+      if (cache && transport.state === "offline") {
+        if (!read || fresh) throw offlineError();
+        return copy();
+      }
+      if (!cache || !read) {
+        const data = await plain(read, action, input, signal);
+        // The review opened for reading is saved under its read-only key, so the offline open (which never marks it seen) finds it.
+        if (cache && action === "pr-review-open" && SAVING.has(transport.state))
+          void cache.begin().then((token) => cache.put(action, { ...input, seen: false }, data, token));
+        return data;
+      }
+      const began = transport.epoch;
+      const token = await cache.begin();
+      if (transport.epoch !== began || transport.state === "offline") return fresh ? Promise.reject(offlineError()) : copy();
+      const attempt = new AbortController(),
+        forward = () => attempt.abort(signal.reason),
+        drop = () => transport.state === "offline" && attempt.abort(offlineError());
+      signal?.addEventListener("abort", forward, { once: true });
+      transport.addEventListener("statechange", drop);
+      try {
+        const data = await plain(read, action, input, attempt.signal);
+        if (!uncached.has(action)) {
+          note(data, Date.now(), true);
+          if (SAVING.has(transport.state)) void cache.put(action, input, data, token);
         }
-        if (!cache || !read) return plain(read, action, input, signal);
-        const started = stamp();
-        const attempt = new AbortController(),
-          forward = () => attempt.abort(signal.reason),
-          drop = () => transport.state === "offline" && attempt.abort(offlineError());
-        signal?.addEventListener("abort", forward, { once: true });
-        transport.addEventListener("statechange", drop);
-        try {
-          const data = await plain(read, action, input, attempt.signal);
-          if (!uncached.has(action)) {
-            note(data, Date.now(), true);
-            if (SAVING.has(transport.state)) void cache.put(action, input, data, started);
-          }
-          if (served) transport.dispatchEvent?.(new Event("copy"));
-          return data;
-        } catch (error) {
-          if (signal?.aborted || !attempt.signal.aborted) throw error;
-          // The host dropped while this read was in flight: the loop answers it from the copy, or refuses it, right now.
-          if (fresh) throw attempt.signal.reason;
-        } finally {
-          signal?.removeEventListener("abort", forward);
-          transport.removeEventListener("statechange", drop);
-        }
+        if (served) transport.dispatchEvent?.(new Event("copy"));
+        return data;
+      } catch (error) {
+        if (signal?.aborted || !attempt.signal.aborted) throw error;
+        // The host dropped while this read was in flight: it settles now with the copy or an error, whatever the host does next. Nothing is sent again.
+        if (fresh) throw attempt.signal.reason;
+        return copy();
+      } finally {
+        signal?.removeEventListener("abort", forward);
+        transport.removeEventListener("statechange", drop);
       }
     },
     stream(path, onFrame, onState) {

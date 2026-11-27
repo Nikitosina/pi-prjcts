@@ -2,7 +2,7 @@
 // and the worker transcript in the center.
 import { uuid } from "./api.js";
 import { clip, dur, esc, oneLine, shortModel, tokens } from "./format.js";
-import { emit, fail, on, project, stale, state, toast } from "./state.js";
+import { clean, emit, fail, on, project, stale, state, toast } from "./state.js";
 import { follower } from "./follow.js";
 
 export function mountWorkers(client, chat, media) {
@@ -523,6 +523,7 @@ export function mountWorkers(client, chat, media) {
   }
   async function renderWorker(root, id, { steer = false } = {}) {
     const gen = state.generation;
+    clean(root);
     const find = () =>
       findSubagent(id) ??
       chatWorkers().find((item) => item.id === id) ??

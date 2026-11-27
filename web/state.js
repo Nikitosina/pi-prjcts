@@ -48,6 +48,13 @@ export const claim = (root) => {
   return token;
 };
 export const newest = (root, token) => renders.get(root) === token;
+/** A form with unsaved input marks its root dirty (`input` events); an automatic redraw (a reconnect, a background refresh) never replaces a dirty
+ * root, while a render the owner asked for starts clean. */
+export const markDirty = (root) => void (root.dataset.dirty = "1");
+export const clean = (root) => void delete root.dataset.dirty;
+export const isDirty = (root) => root.dataset.dirty === "1";
+/** An input that is not work to lose: a search or filter field, or a switch that saves the moment it is toggled. */
+export const isFilter = (target) => target.matches?.("input[type=search], input[type=checkbox], input[type=radio], [data-filter]");
 export const project = () => state.projects.find((item) => item.id === state.projectId) ?? null;
 export const chatArgs = () => (state.chatId && state.chatId !== "main" ? { chatId: state.chatId } : {});
 

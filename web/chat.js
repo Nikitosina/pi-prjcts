@@ -217,6 +217,7 @@ export function mountChat(client, media, slash, memory) {
     if (send?.restored) send.restored = false;
   };
   input.addEventListener("input", () => {
+    composerEdited = true;
     persistComposer();
     const held = drafts.get(draftKey());
     if (!held) return;
@@ -226,14 +227,16 @@ export function mountChat(client, media, slash, memory) {
       renderFeed();
     }
   });
-  let composerStore = null; // the storage key of the draft the composer shows
+  let composerStore = null, // the storage key of the draft the composer shows
+    composerEdited = false; // this tab changed that draft: until then it only shows the stored one and never writes or deletes it (another tab may own it)
   function persistComposer() {
-    if (composerStore) saveDraft(composerStore, input.value, input.selectionStart);
+    if (composerStore && composerEdited) saveDraft(composerStore, input.value, input.selectionStart);
   }
   /** Puts `text` in the composer and keeps it as this chat's draft. */
   function setComposer(text) {
     input.value = text;
     grow();
+    composerEdited = true;
     persistComposer();
   }
   addEventListener("pagehide", persistComposer);
@@ -255,6 +258,7 @@ export function mountChat(client, media, slash, memory) {
     } else persistComposer();
     composerKey = now;
     composerStore = chatDraftKey(state.host, state.projectId, state.chatId);
+    composerEdited = false;
     const saved = loadDraft(composerStore),
       held = drafts.get(now);
     input.value = held?.text ?? saved?.text ?? "";

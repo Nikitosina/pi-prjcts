@@ -186,10 +186,14 @@ try {
         host.state = 'offline';
         const read = host.call('show', { id: ${JSON.stringify(garden)} });
         host.state = 'online';
-        const data = await read;
-        return { live: host.provenance(data)?.live, messages: data.messages.length > 0 };
+        const data = await read.catch(() => null);
+        return { live: data ? host.provenance(data)?.live : false };
       })()`);
-      assert.deepEqual(raced, { live: true, messages: true }, "54: the copy was not returned as live data");
+      assert.notEqual(
+        raced.live,
+        true,
+        "54: a read interrupted by the host coming back was answered as live data (it is never sent again)",
+      );
       // 56: reads in flight when the host drops fall back to the cache instead of waiting for the host
       await q(`(async () => {
         const host = await ${remoteClient};
@@ -347,14 +351,14 @@ try {
         const keep = limits.hostBytes;
         limits.hostBytes = 500;
         const a = hostCache('evict-A'), b = hostCache('evict-B');
-        const before = Date.now();
-        await b.put('read', { n: 1 }, 'b'.repeat(100), Date.now());
-        for (const n of [1, 2, 3, 4]) { await a.put('read', { n }, 'a'.repeat(100), Date.now()); await wait(); }
+        const before = await a.begin();
+        await b.put('read', { n: 1 }, 'b'.repeat(100), await b.begin());
+        for (const n of [1, 2, 3, 4]) { await a.put('read', { n }, 'a'.repeat(100), await a.begin()); await wait(); }
         await a.put('read', { n: 5 }, 'x'.repeat(1000));
         const c = hostCache('bytes-C');
-        await c.put('read', { n: 1 }, '€'.repeat(100), Date.now());
+        await c.put('read', { n: 1 }, '€'.repeat(100), await c.begin());
         await wait();
-        await c.put('read', { n: 2 }, '€'.repeat(100), Date.now());
+        await c.put('read', { n: 2 }, '€'.repeat(100), await c.begin());
         const result = {
           oldestGone: (await a.get('read', { n: 1 })) === null,
           rest: (await Promise.all([2, 3, 4].map((n) => a.get('read', { n })))).every((item) => item?.data.length === 100),
@@ -369,9 +373,9 @@ try {
         result.wiped = (await a.get('read', { n: 4 })) === null;
         await a.put('read', { n: 6 }, 'late', before);
         result.noRefill = (await a.get('read', { n: 6 })) === null;
-        const tombstone = await new Promise((ok) => { const r = indexedDB.open('pi-host-cache'); r.onsuccess = () => { const g = r.result.transaction('wiped').objectStore('wiped').get('evict-A'); g.onsuccess = () => { r.result.close(); ok(g.result > 0); }; }; });
+        const tombstone = await new Promise((ok) => { const r = indexedDB.open('pi-host-cache'); r.onsuccess = () => { const g = r.result.transaction('wiped').objectStore('wiped').get('evict-A'); g.onsuccess = () => { r.result.close(); ok(g.result?.wipes > 0); }; }; });
         await wait();
-        await a.put('read', { n: 7 }, 'after', Date.now());
+        await a.put('read', { n: 7 }, 'after', await a.begin());
         result.tombstone = tombstone;
         result.freshSaveAfterWipe = (await a.get('read', { n: 7 }))?.data === 'after';
         await wipeHost('bytes-C');
@@ -407,14 +411,14 @@ try {
       const firstSave = await q(`(async () => {
         const { hostCache, wipeHost } = await import('/host-cache.js');
         await new Promise((ok, fail) => { const r = indexedDB.deleteDatabase('pi-host-cache'); r.onsuccess = ok; r.onerror = fail; r.onblocked = fail; });
-        const before = Date.now() - 5;
+        const before = await hostCache('first-E').begin();
         await wipeHost('first-E');
         await hostCache('first-E').put('read', {}, 'late first save of another tab', before);
         const saved = await hostCache('first-E').get('read', {});
         await new Promise((ok) => setTimeout(ok, 5));
-        const t = Date.now();
-        await hostCache('first-E').put('read', {}, 'newer', t + 10);
-        await hostCache('first-E').put('read', {}, 'older read arriving late', t + 5);
+        const older = await hostCache('first-E').begin(), newer = await hostCache('first-E').begin();
+        await hostCache('first-E').put('read', {}, 'newer', newer);
+        await hostCache('first-E').put('read', {}, 'older read arriving late', older);
         return { dropped: saved === null, newestKept: (await hostCache('first-E').get('read', {}))?.data === 'newer' };
       })()`);
       assert.deepEqual(firstSave, { dropped: true, newestKept: true });

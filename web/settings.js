@@ -3,7 +3,7 @@
 import { addHostControl, hostSwitcher } from "./host-switcher.js";
 import { ago, clip, esc, oneLine, shortModel, size, tokens, usd } from "./format.js";
 import { bindings, captureNext, conflicts, display, paintHints, DEFAULTS } from "./hotkeys.js";
-import { emit, inline, on, stale, state, toast } from "./state.js";
+import { clean, emit, inline, isDirty, isFilter, markDirty, on, stale, state, toast } from "./state.js";
 
 // `client` is the host chosen in the header (host sections); `project` sends project sections to the host of the selected project.
 export function mountSettings(client, project, ui, statusline, promptView, limits, pluginView) {
@@ -75,13 +75,17 @@ export function mountSettings(client, project, ui, statusline, promptView, limit
   // A reconnect reads the open section again; unsaved prompt text is kept in localStorage (prompts.js), so repainting never loses it.
   client.addEventListener?.("statechange", () => {
     if (client.state !== "online" || !dialog.open) return;
-    // Unsaved tier edits are not replaced: a live read of the same data only unlocks the panel.
-    if (dialog.querySelector("[data-unsaved]"))
+    // A section with unsaved input is not redrawn: a live read behind it only unlocks the panel.
+    if (isDirty(dialog.querySelector(".settings-body")))
       void client.call("tiers-get").then(
         () => emit("panel-live", "settings"),
         () => {},
       );
     else paint(true);
+  });
+  dialog.addEventListener("input", (event) => {
+    const body = event.target.closest?.(".settings-body");
+    if (body && !isFilter(event.target)) markDirty(body);
   });
   dialog.addEventListener("cancel", (event) => event.preventDefault()); // Esc goes through the hotkey registry (leave-focus)
   // The close event is queued: a dialog reopened since then keeps the section it just painted.
@@ -900,7 +904,8 @@ ${live.compactionFailure && !live.compacting ? `<details class="compaction-failu
     };
     const draw = () => {
       const changed = dirty();
-      body.toggleAttribute("data-unsaved", changed);
+      if (changed) markDirty(body);
+      else clean(body);
       body.innerHTML = `${line("Ordered models per tier; the first is preferred, the rest are the fallback order.", "Drag a model or use the arrows. On a quota or rate limit, work moves down the list and never back. A model without credentials shows struck through. A tier a project uses cannot be removed.")}${tiers
         .map((tier, t) => {
           const found = search.t === t ? matches(tier) : [];

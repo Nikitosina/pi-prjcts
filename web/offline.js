@@ -120,8 +120,10 @@ export function mountOffline(admin) {
   function paint() {
     install();
     const group = groupOf(state.host);
-    // A host that is back stays frozen until the displayed data came from a live read: the text on screen may still be the copy.
-    const stale = group && !offlineCopy(group) && group.client?.provenance(displayed())?.live === false;
+    // A host that is back stays frozen until the displayed data came from a live read of this connection: the text on screen may still be the copy.
+    const read = group && !offlineCopy(group) ? group.client?.provenance(displayed()) : null;
+    // Only an answer read live in the current connection period counts: one from before the last drop may be out of date.
+    const stale = !!read && (read.live === false || read.epoch !== group.client.epoch);
     const frozen = group && (offlineCopy(group) || stale) ? group : null;
     document.body.dataset.hostOffline = frozen ? "1" : "0";
     paintBanner(frozen);

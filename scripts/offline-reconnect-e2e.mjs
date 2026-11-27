@@ -75,23 +75,20 @@ try {
       await page.waitFor(`document.querySelector('#feed').innerText.includes('Remote reply')`, "live reply");
       await spy();
 
-      // 77: reads of one millisecond never tie
+      // 77: reads begun in one millisecond never tie
       assert.deepEqual(
         await q(`(async () => {
-          const { hostCache, stamp } = await import('/host-cache.js');
-          const now = Date.now;
-          Date.now = () => 1000;
-          const older = stamp(), newer = stamp();
-          Date.now = now;
+          const { hostCache, wipeHost } = await import('/host-cache.js');
           const cache = hostCache('tie-A');
+          const older = await cache.begin(), newer = await cache.begin();
           await cache.put('read', {}, 'newer', newer);
           await cache.put('read', {}, 'older answer arriving late', older);
           const kept = (await cache.get('read', {}))?.data;
-          await (await import('/host-cache.js')).wipeHost('tie-A');
-          return { ordered: older < newer, kept };
+          await wipeHost('tie-A');
+          return { ordered: older.order < newer.order, kept };
         })()`),
         { ordered: true, kept: "newer" },
-        "77: a monotonic sequence orders reads of one millisecond",
+        "77: a shared counter orders reads begun in one millisecond",
       );
 
       // 69: a read in flight when the host drops answers at once and is never replayed
@@ -106,7 +103,8 @@ try {
       // 73: a PR review opened offline shows its copy and never marks it seen, nor does the reconnect
       await q(`(async () => {
         const { hostCache } = await import('/host-cache.js');
-        await hostCache(${JSON.stringify(hostId)}).put('pr-review-open', { id: ${JSON.stringify(garden)}, provider: 'github', pr: 7, seen: false }, { head: 'abc', files: [], threads: [], iterations: [] }, Date.now());
+        const cache = hostCache(${JSON.stringify(hostId)});
+        await cache.put('pr-review-open', { id: ${JSON.stringify(garden)}, provider: 'github', pr: 7, seen: false }, { head: 'abc', files: [], threads: [], iterations: [] }, await cache.begin());
         window.sent.length = 0;
         (await import('/state.js')).emit('open', { kind: 'pr', id: 7, provider: 'github' });
       })()`);

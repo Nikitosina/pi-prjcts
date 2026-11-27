@@ -32,17 +32,19 @@ export function mountTree(client) {
   on("projects", () => renderTree());
   on("hosts", () => renderTree());
 
-  function rememberChats(projectId, chats) {
-    storeChats(
-      projectId,
-      state.host,
-      chats.filter((chat) => !chat.archived).map((chat) => ({ id: chat.id, title: chat.title })),
-    );
+  /** `live`: the list came from a live read of the host. Only that can say a chat is gone; a copy from the offline cache may predate newer chats. */
+  function rememberChats(projectId, chats, live = true) {
+    const kept = chats.filter((chat) => !chat.archived).map((chat) => ({ id: chat.id, title: chat.title }));
+    if (live) dropGone(projectId, state.host, kept);
+    else if (chatsByProject.has(chatKey(projectId, state.host))) return;
+    storeChats(projectId, state.host, kept);
   }
-  function storeChats(projectId, host, chats) {
-    // A chat that left the list (archived here or elsewhere) takes its unsent draft with it.
+  /** A chat that left the list takes its unsent draft with it. */
+  function dropGone(projectId, host, chats) {
     for (const gone of chatsByProject.get(chatKey(projectId, host)) ?? [])
       if (!chats.some((chat) => chat.id === gone.id)) emit("chat-gone", { host: host ?? state.host, projectId, chatId: gone.id });
+  }
+  function storeChats(projectId, host, chats) {
     chatsByProject.set(chatKey(projectId, host), chats);
     try {
       localStorage.setItem("pi-ui2-chats-by-host", JSON.stringify(Object.fromEntries(chatsByProject)));
@@ -208,6 +210,7 @@ export function mountTree(client) {
       const rest = (chatsByProject.get(chatKey(projectId, host)) ?? []).filter((item) => item.id !== chat.id),
         left = (id) => rest.some((item) => item.id === id),
         next = [...before.slice(index + 1), ...before.slice(0, Math.max(0, index)).reverse()].find((item) => left(item.id));
+      dropGone(projectId, host, rest);
       storeChats(projectId, host, rest);
       if (state.projectId === projectId && state.host === host && state.chatId === chat.id)
         emit("select-request", { projectId, chatId: next?.id ?? "main", host });
