@@ -142,6 +142,10 @@ function hostClient(transport) {
         (fetch) => requestAction(fetch, action, input, signal),
       );
     },
+    /** An action the host itself classed as a read (a plugin button with a read policy); replayed after a lost connection like other reads. */
+    read(action, input, signal) {
+      return run(true, signal, (fetch) => requestAction(fetch, action, input, signal));
+    },
     stream(path, onFrame, onState) {
       return openStream(transport, path, onFrame, onState);
     },
