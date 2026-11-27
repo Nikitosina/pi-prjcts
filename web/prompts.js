@@ -6,7 +6,8 @@
 import { esc, tokens } from "./format.js";
 import { state } from "./state.js";
 
-export function mountPrompts(client) {
+// The Host agent's own prompt lives on the host chosen in Settings (`admin`); every other profile belongs to the selected project's host.
+export function mountPrompts(client, admin) {
   const estimate = (text) => Math.ceil(text.length / 4);
   const narrow = matchMedia("(max-width: 760px)");
   const OBJECTIVE = "objective"; // the Project instructions row; never a block id (built-ins are named, customs are `custom:<slug>`)
@@ -14,10 +15,11 @@ export function mountPrompts(client) {
 
   // ---------------------------------------------------------------------------------------------------------------- host
 
+  const clientFor = (target) => (target === "host" ? admin : client);
   const where = (target) => (target === "host" ? {} : { projectId: state.projectId });
   /** The whole ordered list with the revision it was read at. A built-in sends text only when it differs from its default. */
   const saveBlocks = (target, revision, blocks) =>
-    client.call("prompt-blocks-set", {
+    clientFor(target).call("prompt-blocks-set", {
       ...where(target),
       target,
       revision,
@@ -29,7 +31,7 @@ export function mountPrompts(client) {
     });
   /** The assembled prompt for the next use; `active` only says whether a running conversation already has it. */
   const render = (profile) =>
-    client.call("prompt-render", {
+    clientFor(profile).call("prompt-render", {
       ...where(profile),
       profile,
       ...(profile === "worker" ? { workerMode: workerMode === "task" ? "task" : "job" } : {}),
@@ -62,7 +64,7 @@ export function mountPrompts(client) {
 
   // Project instructions are one text for every role, so their draft is per project, not per target.
   const draftKey = (target, id) =>
-    `${client.storagePrefix}pi-ui2-prompt-draft:${target === "host" ? "host" : state.projectId}:${id === OBJECTIVE ? "project" : target}:${id}`;
+    `${clientFor(target).storagePrefix}pi-ui2-prompt-draft:${target === "host" ? "host" : state.projectId}:${id === OBJECTIVE ? "project" : target}:${id}`;
   function readDraft(target, id) {
     try {
       return JSON.parse(localStorage.getItem(draftKey(target, id)) ?? "null");
@@ -100,10 +102,10 @@ export function mountPrompts(client) {
         next = profile,
         sides = SIDES[next] ?? [];
       const result = await Promise.all([
-        client.call("prompt-blocks-get", { ...where(next), target: next }),
+        clientFor(next).call("prompt-blocks-get", { ...where(next), target: next }),
         render(profile),
         next === "host" ? null : client.call("settings-snapshot", { id: state.projectId }),
-        ...sides.map((side) => client.call("prompt-blocks-get", { ...where(side), target: side })),
+        ...sides.map((side) => clientFor(side).call("prompt-blocks-get", { ...where(side), target: side })),
       ]);
       if (mine !== reads) return;
       target = next;

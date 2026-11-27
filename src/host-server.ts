@@ -611,17 +611,19 @@ async function dispatchRequest(input: RequestData, literalMessage = false): Prom
       }
       return entry;
     }
-    // `notice` is read from disk only (no runtime is opened per project): unanswered questions in the inbox.
+    // `notice` is read from disk only (no runtime is opened per project): unanswered questions in the inbox, with their titles for the Decision inbox.
     case "list":
       return Promise.all(
         listProjects()
           .filter((project) => !project.deleted)
           .map(async (project) => {
-            let questions = 0;
+            let items: { id: string; title: string }[] = [];
             try {
-              questions = inbox(projectDir(project.id)).filter((item) => item.kind === "question" && !item.result).length;
+              items = inbox(projectDir(project.id))
+                .filter((item) => item.kind === "question" && !item.result)
+                .map((item) => ({ id: item.id, title: item.title }));
             } catch {}
-            return { ...project, notice: { questions }, activity: await projectActivity(project.id) };
+            return { ...project, notice: { questions: items.length, items }, activity: await projectActivity(project.id) };
           }),
       );
     case "create": {

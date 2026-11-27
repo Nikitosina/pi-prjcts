@@ -6,6 +6,7 @@ import { createRemote } from "../../src/remote.ts";
 if (!process.send || !process.env.PI_PROJECTS_HOME?.startsWith(process.env.INBOX_TEST_ROOT + "/"))
   throw Error("Private inbox fixture required");
 let version = 1; // an inbox of API version 2 refuses a version-1 host
+let projects = []; // the `list` answer, set by the `projects` operation
 const requests = [];
 const server = createServer(async (req, res) => {
   const parts = [];
@@ -21,7 +22,7 @@ const server = createServer(async (req, res) => {
   if (input.action === "message") return; // The host received the write, but its reply is lost.
   if (req.url === "/large") return res.writeHead(200, { "content-type": "application/octet-stream" }).end(Buffer.alloc(8 << 20, 7));
   if (req.url.startsWith("/changes")) return res.writeHead(200, { "content-type": "text/event-stream" }).end('data: {"t":"sync"}\n\n');
-  json([]);
+  json(input.action === "list" ? projects : []);
 });
 server.listen(0, "127.0.0.1");
 await once(server, "listening");
@@ -35,6 +36,7 @@ process.on("message", async ({ id, op, value }) => {
       await peer.reload();
     }
     if (op === "stop") await peer.close();
+    if (op === "projects") projects = value;
     process.send({ id, requests, status: peer.status().connection });
   } catch (error) {
     process.send({ id, error: error.message });

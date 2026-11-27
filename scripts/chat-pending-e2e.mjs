@@ -10,6 +10,10 @@ import { createKit, call, say } from "./lib/e2e-kit.mjs";
 const kit = await createKit("chat-pending", {
   handler: ({ role, user, results }) => {
     if (role !== "coordinator" || user.startsWith("[Durable work")) return undefined;
+    if (user.includes("MARK-R38MANY"))
+      return results.length < 45
+        ? call("projects_knowledge_write", { path: `decisions/none-${results.length}.md`, text: "# None\n\nbody", expectedRevision: null })
+        : say("ACK MARK-R38MANY");
     const remember = /MARK-REMEMBER(\w*)/.exec(user);
     if (remember && !results.length)
       return call("projects_knowledge_write", {
@@ -62,11 +66,12 @@ const wrapFetch = `(() => {
   window.fetch = async (url, init) => {
     if (url !== "/api" || !init?.body) return real(url, init);
     const body = JSON.parse(init.body);
-    const entry = { size: body.writes?.length, action: body.action, project: body.projectId ?? body.id, chat: body.chatId ?? "main", text: body.text, requestId: body.requestId, start: performance.now() };
+    const entry = { size: body.writes?.length, paths: body.writes?.map((write) => write.path), action: body.action, project: body.projectId ?? body.id, chat: body.chatId ?? "main", text: body.text, requestId: body.requestId, start: performance.now() };
     window.__calls.push(entry);
     const rule = window.__rules[body.action] ?? {};
     if (rule.delay) await sleep(rule.delay);
     if (rule.gate) await rule.gate;
+    if (rule.reply) return new Response(JSON.stringify({ ok: true, data: rule.reply }), { headers: { "content-type": "application/json" } });
     if (rule.fail === "json") {
       // A real refusal: the host answers the same message addressed to a chat it does not know, through the browser endpoint.
       delete rule.fail;
@@ -835,7 +840,7 @@ await kit.run(async () => {
 
   const viaEndpoint = (action, input) =>
     ev(
-      `(async () => { const api = await import("/api.js"); try { const data = await api.call(${JSON.stringify(action)}, ${JSON.stringify(input)}); return { ok: true, data }; } catch (error) { return { ok: false, refused: error.refused, message: error.message }; } })()`,
+      `(async () => { const api = await import("/api.js"); try { const data = await api.localHost.call(${JSON.stringify(action)}, ${JSON.stringify(input)}); return { ok: true, data }; } catch (error) { return { ok: false, refused: error.refused, message: error.message }; } })()`,
     );
   // R30: the page's own request to the browser endpoint tells a proven refusal from an unknown error.
   await section("R30", async () => {
@@ -992,15 +997,27 @@ await kit.run(async () => {
   // R38: more writes outside the recent list than one question holds are all asked about, in several questions.
   await section("R38", async () => {
     await reset();
-    await ev(
-      `(async () => { const memory = await import("/memory.js"); for (let index = 0; index < 25; index++) memory.wantMemoryWrite(\`decisions/none-\${index}.md\`, "f".repeat(64)); })()`,
-    );
+    await clearComposer();
+    await typeAndSend("MARK-R38MANY write");
+    await page.waitFor(`document.querySelector('#feed').innerText.includes("ACK MARK-R38MANY")`, "R38 25 writes done", 60000);
+    await ev(`__rule("memory-recent", { reply: { writes: [] } })`);
+    await select(inTree(B));
+    await page.waitFor(`document.querySelector('#feed').innerText.includes("seed B MARK-SEED-B")`, "R38 B shown");
+    await reset();
+    await select(chatButton(A, "main"));
     await kit.delay(1200);
+    await ev(`__rule("memory-recent", { reply: undefined })`);
+    await ev(`document.querySelector('#feed [data-earlier]').click()`);
+    await kit.delay(1200);
+    const rows = await ev(
+      `[...new Set([...document.querySelectorAll('#feed .memory-row[data-tool="projects_knowledge_write"][data-status="ok"] [data-memory]')].map((n) => n.dataset.memory))].sort()`,
+    );
     const asks = await calls("memory-writes");
+    const asked = asks.flatMap((item) => item.paths).sort();
     check(
-      "R38 25 unknown writes are asked about in two questions, none left out",
-      asks.length === 2 && asks.reduce((sum, item) => sum + item.size, 0) === 25,
-      asks,
+      "R38 more unknown writes on screen than one question holds are asked about in several questions, none left out",
+      rows.length > 20 && asks.length >= 2 && asks.every((item) => item.size <= 20) && JSON.stringify(asked) === JSON.stringify(rows),
+      { rows, asks },
     );
   });
   // R35: only a write the host proves is offered Undo; an old, still current write keeps its Undo.

@@ -267,6 +267,12 @@ The local inbox (`web/` served by the local host on `127.0.0.1`) shows and contr
 18. The CSP of `src/web.ts` adds `wss://<relay host>` to `connect-src` for each configured relay origin.
 19. The PWA is not changed. The client module in `web/` is written so the PWA can reuse it later.
 
+### Layout (stage 3, approved by the owner on 2026-11-27)
+
+- **Group header.** Small upper-case host name with a fold arrow, a state badge and a ⋯ menu. The local group is "This machine" and has no badge. The badge reads online, offline, needs update, revoked or not paired. A host that is not online shows only its header row. With no remote hosts there are no headers and the sidebar is as before.
+- **Decision inbox.** A "Needs you N" block above the groups, shown only while remote hosts exist. Each item shows its title, its project and a host chip. A question opens its chat on its own host with the answer field focused. An approval has Approve and Deny in the card and is decided on its own host only.
+- **Group menu.** New project on that host, Settings, Host agent and, for a remote host, Forget host. With remote hosts the top "New project" button is hidden, because it does not say which host it creates on; with none it stays as it was. The global top-bar switcher is removed; Settings and the Host agent keep a switcher in their own header.
+
 ### Architecture
 
 - `web/api.js` stays the only module that talks to a host. Each view receives a host client object when it opens and uses `host.call(action, input)`, `host.stream(...)`, `host.authorizedFetch(...)` and `host.url(...)` for that host's requests and resources. A client owns its bearer token (local) or tunnel (remote), its online state and, in stage 4, its read cache. The local host is a client like any other: there is no sentinel string and no implicit current host. Switching views never redirects a pending request.
