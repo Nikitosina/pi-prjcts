@@ -468,8 +468,8 @@ export type JobsHost = {
   /** For a reader of another agent's worktree: why its report does not match that worktree now, or null when it still does. */
   reviewMapReport?(agent: Agent, report: string): Promise<string>;
   readDrift?(agent: Agent): Promise<string | null>;
-  /** The behavior text this agent would get now, or null when its prompt is not built from blocks. */
-  promptBehavior?(agent: Agent, job: Job | null): string | null;
+  /** Reads the saved behavior once and answers for each agent: the text it would get now, or null when its prompt is not built from blocks. */
+  promptBehaviors?(): (agent: Agent, job: Job | null) => string | null;
   /** Stops the background processes and releases the leases of these conversations. */
   killProcesses?(conversationIds: readonly ConversationId[]): Promise<void>;
   /** Longest silence in ms of a live background process of these conversations; null without one. */
@@ -1001,6 +1001,12 @@ export type JobsSnapshot = {
   })[];
   /** `working`: its conversation runs now; `active`: a runnable reporter task still delivers to it (preparing, running or reporting). */
   agents: (Agent & { working: boolean; active: boolean; model: string | null; prompt: AgentPromptStatus | null })[];
+};
+
+/** What the notifier reads each tick: the Jobs as recorded (no per-Job conversation reads) and the chats that have work. */
+export type JobsActivity = {
+  jobs: (Job & { eta: ReturnType<typeof planEta> })[];
+  workingChats: Job["chat"][];
 };
 
 export type SpawnArgs = {
@@ -1861,6 +1867,12 @@ export function createJobs(host: JobsHost) {
   const liveAgents = (doc: Readonly<JobsState>) =>
     Object.values(doc.agents).filter((agent) => (agent.jobId ? doc.jobs[agent.jobId]?.status === "running" : agent.endedAt === null));
 
+  /** An ended read-only agent or a worker whose Job was approved or stopped: nothing is left to adopt a behavior, so its prompt status is not shown. */
+  const settledAgent = (doc: Readonly<JobsState>, agent: Readonly<Agent>) => {
+    const job = agent.jobId ? doc.jobs[agent.jobId] : undefined;
+    return agent.endedAt !== null && (!job || job.status === "approved" || job.status === "stopped");
+  };
+
   /** Stop admitting work and abort every live agent, keeping their Jobs running so a resume continues them. */
   async function pause(harness: Harness, plugin?: { name: string; claim: string }): Promise<void> {
     const live = await harness.commit(async (tx) => {
@@ -1944,13 +1956,21 @@ export function createJobs(host: JobsHost) {
       }),
     );
     const reported = reportedAgents(await harness.inspect(context));
+    const behaviorOf = host.promptBehaviors?.();
     const agents = await Promise.all(
       Object.values(doc.agents).map(async (agent) => ({
         ...agent,
         working: await working(harness, agent.conversationId),
         active: reported.has(agent.id),
         model: await agentModel(harness, agent.conversationId),
-        prompt: await promptStatus(harness, agent as Agent, agent.jobId ? ((doc.jobs[agent.jobId] as Job | undefined) ?? null) : null),
+        prompt: settledAgent(doc, agent)
+          ? null
+          : await promptStatus(
+              harness,
+              behaviorOf,
+              agent as Agent,
+              agent.jobId ? ((doc.jobs[agent.jobId] as Job | undefined) ?? null) : null,
+            ),
       })),
     );
     return {
@@ -1962,8 +1982,30 @@ export function createJobs(host: JobsHost) {
     };
   }
 
-  async function promptStatus(harness: Harness, agent: Agent, job: Job | null): Promise<AgentPromptStatus | null> {
-    const behavior = host.promptBehavior?.(agent, job);
+  /** Running work for the notifier: what it needs of `snapshot`, without per-agent prompt and model reads. */
+  async function activity(harness: Harness): Promise<JobsActivity> {
+    const doc = await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context);
+    if (!doc) return { jobs: [], workingChats: [] };
+    const running = Object.values(doc.jobs).filter((job) => job.status === "running");
+    const unended = Object.values(doc.agents).filter((agent) => agent.endedAt === null);
+    const workingAgents = await Promise.all(unended.map(async (agent) => ((await working(harness, agent.conversationId)) ? agent : null)));
+    return {
+      jobs: Object.values(doc.jobs).map((job) => ({ ...(job as Job), eta: planEta(job.plan, clock()) })),
+      workingChats: [
+        ...running.map((job) => job.chat),
+        ...workingAgents.flatMap((agent) => (agent ? [agent.chat] : [])),
+        ...unended.filter((agent) => !agent.jobId).map((agent) => agent.chat),
+      ],
+    };
+  }
+
+  async function promptStatus(
+    harness: Harness,
+    behaviorOf: ReturnType<NonNullable<JobsHost["promptBehaviors"]>> | undefined,
+    agent: Agent,
+    job: Job | null,
+  ): Promise<AgentPromptStatus | null> {
+    const behavior = behaviorOf?.(agent, job);
     if (behavior == null) return null;
     // An agent not prepared yet starts with the saved behavior.
     if (!agent.prepared) return { state: "current", reason: null };
@@ -2218,6 +2260,7 @@ export function createJobs(host: JobsHost) {
       bound = harness;
     },
     snapshot,
+    activity,
     stop: (harness: Harness, id: string, reason: string) => {
       if (!reason.trim()) throw new Error("Stopping needs a reason");
       return stopAgent(harness, id, reason.trim());

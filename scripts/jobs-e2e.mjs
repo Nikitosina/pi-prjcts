@@ -17,6 +17,8 @@ import { createJobs, Jobs, liveAgentIds, planEta, readRevision } from "../src/jo
 import { guardedStream } from "../src/model-guard.ts";
 import { DEFAULT_ROLE_PROMPTS, TASK_HELPER_PROMPT } from "../src/role-prompts.ts";
 
+let behaviorLoads = 0,
+  behaviorAnswers = 0;
 const dir = mkdtempSync(join(tmpdir(), "jobs-e2e-"));
 const model = { provider: "faux", modelId: "faux-1" };
 const sha = "a".repeat(40);
@@ -436,6 +438,13 @@ async function open() {
   const killed = [];
   const jobs = createJobs({
     boot: bootId,
+    promptBehaviors: () => {
+      behaviorLoads += 1;
+      return (agent) => {
+        behaviorAnswers += 1;
+        return `BEHAVIOR:${agent.role}`;
+      };
+    },
     quotaRetryBaseMs: 60,
     fallbackModel: ({ failure }) =>
       failure === "quota_exceeded" ? { change: { model: { provider: "faux", modelId: "faux-2" } }, label: "faux/faux-2" } : null,
@@ -1579,6 +1588,21 @@ assert.deepEqual(await jobs.stallTick(harness, T + 21 * 60_000), [gate.id], "an 
   await quiet(harness);
   const other = requests.filter((item) => item.role === "worker" && item.tag === "BRIEF-CONTOTHER").map((item) => item.result);
   assert.match(other[3], /not a reviewer of this Job/i, "W2 another Job's reviewer is never continued");
+}
+
+// S1-S2 (jobs-failures.md "Snapshot cost"): one behavior read per snapshot; no prompt status for settled agents.
+{
+  const loadsBefore = behaviorLoads,
+    answersBefore = behaviorAnswers;
+  const view = await jobs.snapshot(harness);
+  const settled = view.agents.filter((agent) => agent.endedAt !== null && !agent.jobId);
+  assert.ok(settled.length > 0 && view.agents.length > settled.length, "S0 the fixture has settled and other agents");
+  assert.equal(behaviorLoads - loadsBefore, 1, "S1 a snapshot reads the saved behavior once, not per agent");
+  assert.ok(
+    settled.every((agent) => agent.prompt === null),
+    "S2 a settled agent reports no prompt status",
+  );
+  assert.ok(behaviorAnswers - answersBefore <= view.agents.length - settled.length, "S2 settled agents are not asked for behavior");
 }
 
 await harness.close(context);
