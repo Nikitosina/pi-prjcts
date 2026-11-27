@@ -452,11 +452,13 @@ export function startTelegram(options: {
       return await run(thread);
     } catch (error) {
       if (thread === undefined || !(error instanceof TelegramError && error.code === 400 && TOPIC_GONE.test(error.message))) throw error;
-      if (state.owner?.chatId !== recipient || state.bot?.id !== bot) throw new Error("Telegram recipient changed during delivery");
+      if (state.owner?.chatId !== recipient || state.bot?.id !== bot)
+        throw new TelegramRequestNotSentError("Telegram recipient changed during delivery");
       state.topics = (state.topics ?? []).filter((topic) => !(sameTopic(topic, ref) && topic.thread === thread));
       persist();
       const fresh = await topicFor(ref, name);
-      if (state.owner?.chatId !== recipient) throw new Error("Telegram recipient changed during delivery");
+      if (state.owner?.chatId !== recipient || state.bot?.id !== bot)
+        throw new TelegramRequestNotSentError("Telegram recipient changed during delivery");
       remember(fresh);
       return run(fresh);
     }

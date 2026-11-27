@@ -1087,6 +1087,7 @@ try {
   };
   start(true);
   await bridge.flush().catch(() => {});
+  assert.equal((await bridge.snapshot()).owner, "Other", "6 the owner was replaced");
   assert(!attempts.some((a) => a.method === "createForumTopic"), "6 no topic is created for a notice of the former owner");
   assert(!attempts.some((a) => a.method === "sendPhoto" && a.input.chat_id === "2"), "6 the notice never reaches the new owner");
 
