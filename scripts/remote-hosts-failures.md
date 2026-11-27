@@ -34,3 +34,33 @@ Settings and Host agent
 
 No remote hosts
 19. A host with no remote hosts configured behaves and looks exactly as before: no tunnel, no relay connection, no new sidebar rows.
+
+# Stage 3: one sidebar grouped by host and a shared Decision inbox
+
+Written before the code. Design: `REMOTE_SPEC.md`, Multi-host inbox, decisions 5 to 7. E2E: `scripts/multi-host-e2e.mjs` (the client host, two remote private hosts in temporary homes, a third paired identity served by `scripts/lib/inbox-version-peer.mjs` for "needs update", a local relay from `relay/`, the fake provider, headless Chrome on the client host's inbox).
+
+Selection and routing
+21. A project or chat listed under one host opens bound to another host's client: a read or write for a remote project reaches the local host, or the reverse. Every project read and write goes to the host that listed the project, chosen by the project, never by whichever host was selected last.
+22. Selecting a project of another host keeps the previous host's `/changes` or `/live` stream feeding the view, redirects a request already in flight, or renders a late answer from the previous host. The old streams stop, an in-flight request finishes on its own host, and the selection generation drops its answer.
+23. Settings or the Host agent act on the selected project's host instead of the host chosen in their own header, or project sections of Settings act on the Settings host instead of the project's host.
+
+Sidebar groups
+24. Groups come in the wrong order, mix projects of two hosts, or one host's failing list hides another host's group. The local host comes first, remote hosts follow in their saved order, and each group loads and fails on its own.
+25. A slow or offline remote host delays the local group or the first selection. The local group draws at once; a remote group shows "connecting" until its first tunnel attempt ends.
+26. An offline, revoked, "not paired" or "needs update" host shows its last projects as usable, or blocks the page. It collapses to one row with its state; its projects and Decision inbox items leave the page until it is online again (stage 4 adds the read cache).
+27. A host going offline or coming back shows only after a page reload. Its state change redraws its group; when it comes back, its projects, approvals and questions reload, its host stream reopens, and a selected project of that host reloads its view.
+28. Remote names, project names or chat titles render as markup in a group header, a row or a menu. They are escaped text.
+
+Decision inbox
+29. A question or approval of host B is answered or decided on host A, or an approval decision is sent twice. Each item carries its host; its answer or decision goes to that host only, once.
+30. Items show without their host, so two hosts with the same project name cannot be told apart.
+31. A new question or approval on a remote host appears only after a reload or the 15 s list poll. The `notices`, `approvals` and `projects` frames of each host's own change stream reload that host's items.
+32. Items or counts of an offline host still show in the Decision inbox or the status pill.
+33. A remote host whose `list` answer has no question titles (an older host of the same API version) breaks the Decision inbox. Its questions show as a count for the project.
+
+Switchers and Forget
+34. The global top-bar switcher stays, or Forget host overlaps the host selector. Settings and the Host agent have a switcher in their own header; Forget host lives in that host's group menu.
+35. Forget host leaves its group, its items or the selection on the forgotten host in this tab or another open tab. The group and its items go without a reload, and a selected project of that host gives way to the first local project.
+
+No remote hosts
+36. With no remote hosts the sidebar shows group headers or a Decision inbox, the top bar changes, or a tunnel opens. It looks the same as before (the stored pre-stage screenshot) and opens no relay connection.
