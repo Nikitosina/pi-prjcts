@@ -154,7 +154,10 @@ on("host-online", (group) => {
 // A forgotten host leaves the page: its selected project gives way to the first project still listed.
 on("hosts", () => {
   document.querySelector(".list-head").hidden = remoteGroups();
-  if (state.projectId && !hostOf(state.projectId, state.host)) {
+  if (
+    state.projectId &&
+    !groups.some((group) => group.client === state.host && group.projects.some((item) => item.id === state.projectId))
+  ) {
     if (state.projects[0]) void select(state.projects[0].id, "main");
     else {
       const url = new URL(location.href);
