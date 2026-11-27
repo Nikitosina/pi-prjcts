@@ -370,6 +370,7 @@ try {
         await a.put('read', { n: 6 }, 'late', before);
         result.noRefill = (await a.get('read', { n: 6 })) === null;
         const tombstone = await new Promise((ok) => { const r = indexedDB.open('pi-host-cache'); r.onsuccess = () => { const g = r.result.transaction('wiped').objectStore('wiped').get('evict-A'); g.onsuccess = () => { r.result.close(); ok(g.result > 0); }; }; });
+        await wait();
         await a.put('read', { n: 7 }, 'after', Date.now());
         result.tombstone = tombstone;
         result.freshSaveAfterWipe = (await a.get('read', { n: 7 }))?.data === 'after';
@@ -435,6 +436,8 @@ try {
       await remote.rpc({ action: "remote-revoke", deviceId, confirm: deviceId });
       await page.waitFor(group("revoked"), "revoked");
       await page.waitFor(`!new URLSearchParams(location.search).has('host')`, "2: Settings and the Host agent leave the revoked host");
+      await page.waitFor(`document.body.dataset.ready === '1'`, "ready after leaving the revoked host");
+      await page.waitFor(group("revoked"), "revoked after the redirect");
       await local.waitFor(async () => (await cached()) === 0, "revocation wiped the cache");
       assert.doesNotMatch(await groupText(), /Garden plan|Offline copy/);
       await page.waitFor(`!document.querySelector('#feed').innerText.includes('Garden reply')`, "52: no view of the revoked host stays");
