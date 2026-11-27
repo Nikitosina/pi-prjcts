@@ -186,7 +186,7 @@ export function mountSection(client, node, entry, { projectId, chatId }) {
     cancel.focus();
   }
 
-  // A write is never sent again: a lost answer only says the result is unknown. A read button is replayed like any read.
+  // A write is never sent again: a lost answer only says the result is unknown.
   // After a write that may have landed, the drawn buttons carry stale params, so they stay disabled until a fresh view is drawn.
   async function run(button) {
     busy = true;
@@ -195,11 +195,7 @@ export function mountSection(client, node, entry, { projectId, chatId }) {
     say();
     let landed = true;
     try {
-      await (button.kind === "read" ? client.read : client.call)("plugin", {
-        ...scope,
-        method: button.method,
-        ...(button.params === undefined ? {} : { params: button.params }),
-      });
+      await client.call("plugin", { ...scope, method: button.method, ...(button.params === undefined ? {} : { params: button.params }) });
     } catch (error) {
       if (signal.aborted) return;
       const answered = error instanceof HostError && error.answered;
