@@ -34,6 +34,14 @@ export const CoordinatorWorkspaceBindings = defineDoc<{ chats: Record<string, Co
   initial: () => ({ chats: {} }),
 });
 
+/** Artifact scopes of the coordinator chats that have a workspace; their binary results land there instead of under the project id. */
+export async function coordinatorArtifactScopes(root: Conversation): Promise<string[]> {
+  return root.commit(
+    async (tx) => Object.values((await tx.doc(CoordinatorWorkspaceBindings, root.id)).chats).map((binding) => binding.scope),
+    BACKGROUND_CONTEXT,
+  );
+}
+
 /** Cleanup consults ownership before any worker/provider probes, even for archived chats. */
 export async function coordinatorWorkspaceOwners(root: Conversation): Promise<Map<string, { chatId: string; threadId: string }>> {
   return root.commit(

@@ -1,8 +1,26 @@
 import { closeSync, readSync } from "node:fs";
 import { basename } from "node:path";
-import { openArtifact } from "./artifacts.ts";
+import { ArtifactError, openArtifact } from "./artifacts.ts";
 
 export const TELEGRAM_FILE_LIMIT = 50_000_000;
+export type AttachmentRefusal = "unauthorized" | "invalid" | "not-found" | "not-a-file" | "empty" | "too-large" | "unreadable";
+/** What the owner reads in place of an attachment that was not sent; never names a path. */
+export const REFUSAL_TEXT: Record<AttachmentRefusal, string> = {
+  unauthorized: "it is not part of this project",
+  invalid: "the link is invalid",
+  "not-found": "file not found",
+  "not-a-file": "it is not a regular file (a folder?)",
+  empty: "the file is empty",
+  "too-large": "over Telegram's 50 MB limit",
+  unreadable: "the file cannot be read",
+};
+export class AttachmentError extends Error {
+  readonly reason: AttachmentRefusal;
+  constructor(reason: AttachmentRefusal) {
+    super(REFUSAL_TEXT[reason]);
+    this.reason = reason;
+  }
+}
 export type MediaRef = { ref: string; caption: string };
 export type TelegramPart =
   { kind: "text"; text: string } | { kind: "media"; ref: string; caption: string } | { kind: "album"; refs: string[]; caption: string };
@@ -34,8 +52,8 @@ export function extractTelegramMedia(markdown: string): { markdown: string; medi
 }
 
 function mediaMetadata(opened: ReturnType<typeof openArtifact>, path: string) {
-  if (opened.size === 0 || opened.size > TELEGRAM_FILE_LIMIT)
-    throw new Error("Attachment is empty or exceeds Telegram's 50 MB upload limit");
+  if (opened.size === 0) throw new AttachmentError("empty");
+  if (opened.size > TELEGRAM_FILE_LIMIT) throw new AttachmentError("too-large");
   const photo = opened.size <= 10_000_000 && (opened.mime === "image/png" || opened.mime === "image/jpeg");
   const method = photo ? "sendPhoto" : opened.mime === "video/mp4" ? "sendVideo" : "sendDocument";
   return { size: opened.size, mime: opened.mime, filename: basename(path), method };
@@ -43,8 +61,13 @@ function mediaMetadata(opened: ReturnType<typeof openArtifact>, path: string) {
 
 function openTelegramMedia(controlRoot: string, ref: string) {
   const match = /^artifact:([a-f0-9-]{36})\/(.+)$/.exec(ref);
-  if (!match) throw new Error("Only authorized artifact attachments are supported");
-  return openArtifact(controlRoot, match[1], match[2]);
+  if (!match) throw new AttachmentError("invalid");
+  try {
+    return openArtifact(controlRoot, match[1], match[2]);
+  } catch (error) {
+    if (!(error instanceof ArtifactError)) throw new AttachmentError("unreadable");
+    throw new AttachmentError(error.code === "refused" ? "unreadable" : error.code);
+  }
 }
 
 export function inspectTelegramMedia(controlRoot: string, ref: string) {

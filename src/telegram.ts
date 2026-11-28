@@ -12,9 +12,12 @@ import {
   extractTelegramMedia,
   inspectTelegramMedia,
   loadTelegramMedia,
+  AttachmentError,
+  REFUSAL_TEXT,
   telegramMediaForm,
   telegramAlbumForm,
   TELEGRAM_FILE_LIMIT,
+  type AttachmentRefusal,
   type TelegramPart,
 } from "./telegram-media.ts";
 import { describeAcceptance, type AcceptanceOutcome } from "./result-acceptance.ts";
@@ -34,7 +37,9 @@ type TopicRef = { projectId: string; chatId: string };
 type Topic = TopicRef & { thread: number };
 type TopicName = () => string | Promise<string>;
 type DeliveryError = { at: number; method: string; description: string } & (
-  { kind: "api"; httpStatus: number; code: number; descriptionProvided: boolean } | { kind: "network" | "not-sent" | "incomplete-response" }
+  | { kind: "api"; httpStatus: number; code: number; descriptionProvided: boolean }
+  | { kind: "network" | "not-sent" | "incomplete-response" }
+  | { kind: "attachment"; reason: AttachmentRefusal; seq: number; part: number }
 );
 export type HeldOutcome = "resend" | "delivered";
 /** `thread`: the topic every part of the notice goes to; absent means the general thread. */
@@ -252,6 +257,8 @@ const updateRequestId = (bot: number, update: number) => {
  */
 export function startTelegram(options: {
   dispatch: (input: Request) => Promise<unknown>;
+  /** Artifact scopes the project owns besides its own id: its agents and Jobs and the workspace scope of each coordinator chat. */
+  artifactScopes: (projectId: string) => Promise<ReadonlySet<string>>;
   chats: (projectId: string) => Promise<DurableChat[]>;
   notifier: Notifier;
   receiveUpdates?: boolean;
@@ -976,12 +983,12 @@ export function startTelegram(options: {
   }
   async function authorizeArtifact(projectId: string, ref: string) {
     const match = /^artifact:([a-f0-9-]{36})\/(.+)$/.exec(ref);
-    if (!match) throw new Error("Invalid attachment");
+    if (!match) throw new AttachmentError("invalid");
     const project = loadProject(projectId);
     if (project.deleted || project.archived) throw new Error("Project is no longer active");
-    // A project-scoped ref (a binary result of the coordinator) needs no agent; any other scope must be one of this project's agents.
+    // A project-scoped ref (a binary result of the coordinator) needs no lookup; any other scope must be one this project owns.
     if (match[1] === projectId) return;
-    await options.dispatch({ action: "thread-history", id: projectId, threadId: match[1], limit: 1 });
+    if (!(await options.artifactScopes(projectId)).has(match[1])) throw new AttachmentError("unauthorized");
   }
   /** Caption-first media/album delivery; only text exceeding caption capacity spills over. Every returned message routes replies. */
   async function sendNotice(notice: Notice) {
@@ -1074,19 +1081,34 @@ export function startTelegram(options: {
       if (part.kind !== "text") {
         const refs = part.kind === "album" ? part.refs : [part.ref];
         let media: ReturnType<typeof loadTelegramMedia>[] = [];
+        let refusal: AttachmentRefusal = "unreadable";
         try {
           let total = 0;
           for (const ref of refs) {
             await authorizeArtifact(notice.projectId, ref);
             if (total + inspectTelegramMedia(projectDir(notice.projectId), ref).size > TELEGRAM_FILE_LIMIT)
-              throw new Error("Upload exceeds memory bound");
+              throw new AttachmentError("too-large");
             const file = loadTelegramMedia(projectDir(notice.projectId), ref);
             total += file.size;
-            if (total > TELEGRAM_FILE_LIMIT) throw new Error("Upload exceeds memory bound");
+            if (total > TELEGRAM_FILE_LIMIT) throw new AttachmentError("too-large");
             media.push(file);
           }
-        } catch {
+        } catch (error) {
           media = [];
+          if (error instanceof AttachmentError) refusal = error.reason;
+          // An album falls back to single files, which record their own refusals.
+          // A retry of a part whose fallback text failed to send must not record the same refusal again.
+          const seen = (state.deliveryErrors ?? []).some((e) => e.kind === "attachment" && e.seq === notice.seq && e.part === index);
+          if (part.kind !== "album" && !seen)
+            recordError({
+              at: Date.now(),
+              method: "attachment",
+              description: REFUSAL_TEXT[refusal],
+              kind: "attachment",
+              reason: refusal,
+              seq: notice.seq,
+              part: index,
+            });
         }
         bound();
         if (!media.length && part.kind === "album") {
@@ -1107,7 +1129,7 @@ export function startTelegram(options: {
               call<{ message_id: number }>("sendMessage", {
                 chat_id: chatId,
                 ...inThread(thread),
-                text: `${htmlToPlain(part.caption)}\n[Attachment unavailable, unauthorized, or exceeds upload limits]`,
+                text: `${htmlToPlain(part.caption)}\n[Attachment not sent: ${REFUSAL_TEXT[refusal]}]`,
                 ...markup,
                 ...reply,
               }),

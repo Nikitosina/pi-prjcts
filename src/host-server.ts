@@ -2135,6 +2135,7 @@ const telegram = startTelegram({
       return result.outcome;
     });
   },
+  artifactScopes: async (id) => (await durable(id)).artifactScopes(),
   chats: async (id) => (await durable(id)).chats(),
   notifier,
   report: (detail) => recordHostEvent("telegram", detail),
