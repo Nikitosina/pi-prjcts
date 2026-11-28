@@ -24,6 +24,12 @@ const tg = {
   revoked: new Set(),
   nextMessage: 1,
   refused: [],
+  // Threaded Mode: `topics` is what getMe reports; `topicList` are the topics of the owner's private chat; `failTopics` fails that many createForumTopic calls.
+  topics: false,
+  topicList: new Map(),
+  topicCalls: [],
+  nextThread: 5000,
+  failTopics: 0,
 };
 // Telegram's HTML parse_mode: only these tags, properly nested, entities limited to &lt; &gt; &amp; &quot; and numeric. `PARSEFAIL` forces a refusal.
 const TAGS = new Set(["b", "strong", "i", "em", "u", "ins", "s", "strike", "del", "code", "pre", "a", "blockquote", "tg-spoiler", "span"]);
@@ -134,7 +140,30 @@ const api = createServer((req, res) => {
       method = match?.[2],
       input = body ? JSON.parse(body) : {};
     if (!bot || tg.revoked.has(token)) return reply(401, { ok: false, error_code: 401, description: "Unauthorized" });
-    if (method === "getMe") return reply(200, { ok: true, result: { id: bot.id, is_bot: true, first_name: "Pi", username: bot.username } });
+    if (method === "getMe")
+      return reply(200, {
+        ok: true,
+        result: { id: bot.id, is_bot: true, first_name: "Pi", username: bot.username, ...(tg.topics ? { has_topics_enabled: true } : {}) },
+      });
+    if (/^(createForumTopic|closeForumTopic|reopenForumTopic|editForumTopic)$/.test(method)) {
+      tg.topicCalls.push({ method, ...input });
+      if (method === "createForumTopic") {
+        if (tg.failTopics > 0) {
+          tg.failTopics--;
+          return reply(500, { ok: false, error_code: 500, description: "Internal Server Error" });
+        }
+        const thread = tg.nextThread++;
+        tg.topicList.set(thread, { name: input.name, closed: false });
+        return reply(200, { ok: true, result: { message_thread_id: thread, name: input.name, icon_color: 7322096 } });
+      }
+      const topic = tg.topicList.get(input.message_thread_id);
+      if (!topic) return reply(400, { ok: false, error_code: 400, description: "Bad Request: message thread not found" });
+      // Private chats refuse these, as the real Bot API does (checked live on 2026-11-27).
+      if (method === "closeForumTopic" || method === "reopenForumTopic")
+        return reply(400, { ok: false, error_code: 400, description: "Bad Request: the chat is not a supergroup forum" });
+      if (method === "editForumTopic") topic.name = input.name;
+      return reply(200, { ok: true, result: true });
+    }
     if (method === "getUpdates") {
       tg.polls.push({ at: Date.now(), token: token === TOKEN ? 1 : 2, offset: input.offset ?? 0, timeout: input.timeout });
       if (tg.failPolls > 0) {
@@ -165,6 +194,11 @@ const api = createServer((req, res) => {
         tg.failSends--;
         return reply(502, { ok: false, error_code: 502, description: "Bad Gateway" });
       }
+      if (input.message_thread_id !== undefined) {
+        const topic = tg.topicList.get(input.message_thread_id);
+        if (!topic) return reply(400, { ok: false, error_code: 400, description: "Bad Request: message thread not found" });
+        if (topic.closed) return reply(400, { ok: false, error_code: 400, description: "Bad Request: TOPIC_CLOSED" });
+      }
       if (String(input.text ?? "").length > 4096)
         return reply(400, { ok: false, error_code: 400, description: "Bad Request: message is too long" });
       if (input.parse_mode === "HTML") {
@@ -177,6 +211,7 @@ const api = createServer((req, res) => {
       const message = {
         message_id: tg.nextMessage++,
         chat: { id: input.chat_id },
+        message_thread_id: input.message_thread_id,
         text: input.text,
         parse_mode: input.parse_mode,
         reply_markup: input.reply_markup,
@@ -857,6 +892,192 @@ try {
   if ((await jobs(a, two.id)).some((j) => j.text.includes("MARK-PAUSED"))) throw Error("Paused project admitted text");
   await rpc({ action: "resume", id: a, confirm: a });
   result.checks.push("T15 text to a paused project is not admitted and the error comes back to Telegram");
+
+  // T61: topics off (the default of this fake bot): nothing so far carried a thread id or touched a topic method.
+  assert.equal(tg.topicCalls.length, 0, "61 no topic method is called while the bot has topics off");
+  assert.ok(
+    tg.sent.every((m) => m.message_thread_id === undefined),
+    "61 no request carries a thread id while the bot has topics off",
+  );
+  assert.equal((await rpc({ action: "telegram-snapshot" })).topics, false);
+  result.checks.push(
+    "T61 with the bot's topics off, no request carries a thread id and no topic method is called; the whole flow above ran that way",
+  );
+
+  // T62-T65: Threaded Mode on. One topic per coordinator chat, created on its first notice; routing out and back by thread id.
+  tg.topics = true;
+  await rpc({ action: "telegram-token", token: TOKEN });
+  assert.equal((await rpc({ action: "telegram-snapshot" })).topics, true, "getMe's has_topics_enabled is read");
+  const topicCreated = () => tg.topicCalls.filter((c) => c.method === "createForumTopic");
+  const threadOf = (name) => [...tg.topicList].find(([, topic]) => topic.name === name)?.[0];
+  const inTopics = (thread) => toOwner().filter((m) => m.message_thread_id === thread);
+  mark = toOwner().length;
+  await k.ask(b, "main", "MARK-TOP1 beta main");
+  await lastTo(/Done MARK-TOP1\./, "notice for Beta Main", mark);
+  const betaThread = threadOf("Beta · Main");
+  assert.ok(betaThread, "62 Beta's Main got a topic named Project · Main");
+  assert.equal(
+    toOwner().findLast((m) => /Done MARK-TOP1\./.test(m.text)).message_thread_id,
+    betaThread,
+    "62 the notice is in Beta's topic",
+  );
+  await k.ask(a, two.id, "MARK-TOP2 alpha two");
+  await lastTo(/Done MARK-TOP2\./, "notice for Alpha Two", mark);
+  let alphaThread = threadOf("Alpha · Two");
+  assert.ok(alphaThread && alphaThread !== betaThread, "62 Alpha's side chat got its own topic");
+  assert.equal(inTopics(alphaThread).filter((m) => /Done MARK-TOP2\./.test(m.text)).length, 1);
+  assert.equal(topicCreated().length, 2, "63 one topic per chat");
+  assert.deepEqual(
+    JSON.parse(readFileSync(file, "utf8"))
+      .topics.map((t) => t.thread)
+      .sort(),
+    [alphaThread, betaThread].sort(),
+    "63 the mapping is persisted",
+  );
+  await k.ask(b, "main", "MARK-TOP1B again");
+  await lastTo(/Done MARK-TOP1B\./, "second notice for Beta Main", mark);
+  assert.equal(topicCreated().length, 2, "63 a later notice reuses the topic");
+
+  // The route is Alpha · Two; a message in Beta's topic goes to Beta Main without /projects, one in the general thread still follows the route.
+  mark = toOwner().length;
+  text(OWNER, "MARK-INTOPIC hello", { message_thread_id: betaThread });
+  const ack = await lastTo(/Sent to Beta · Main/, "ack in the topic", mark);
+  assert.equal(ack.message_thread_id, betaThread, "62 the acknowledgement stays in the topic");
+  const done = await lastTo(/Done MARK-INTOPIC\./, "result of the topic message", mark);
+  assert.equal(done.message_thread_id, betaThread);
+  assert.equal((await jobs(b)).filter((j) => j.text.includes("MARK-INTOPIC")).length, 1, "64 the message reached Beta Main");
+  assert.ok(!(await jobs(a, two.id)).some((j) => j.text.includes("MARK-INTOPIC")), "64 not the picked route");
+  text(OWNER, "MARK-GENERAL hello");
+  const general = await lastTo(/Done MARK-GENERAL\./, "result of the general message", mark);
+  assert.equal((await jobs(a, two.id)).filter((j) => j.text.includes("MARK-GENERAL")).length, 1, "64 the general thread keeps the route");
+  assert.equal(general.message_thread_id, alphaThread, "62 its result is in Alpha Two's topic");
+  text(OWNER, "/status", { message_thread_id: betaThread });
+  const status = await lastTo(/Text goes to/, "status in the topic", mark);
+  assert.equal(status.message_thread_id, betaThread, "62 command replies stay in the topic");
+  assert.match(status.text, /Text goes to Beta · Main/, "64 a command in a topic acts on the topic's chat, not the picked route");
+  text(OWNER, "/models", { message_thread_id: betaThread });
+  assert.equal((await lastTo(/Models for Beta/, "models in the topic", mark)).message_thread_id, betaThread);
+
+  // A question arrives in its chat's topic; a reply to it inside the topic answers it.
+  mark = toOwner().length;
+  text(OWNER, "MARK-ASK in topic", { message_thread_id: alphaThread });
+  const topicQuestion = await lastTo(/MARK-Q Pick a colour/, "question in the topic", mark);
+  assert.equal(topicQuestion.message_thread_id, alphaThread);
+  text(OWNER, "purple", {
+    message_thread_id: alphaThread,
+    reply_to_message: { message_id: topicQuestion.message_id, chat: OWNER, date: 0, text: topicQuestion.text },
+  });
+  const answered = await lastTo(/Answered: purple/, "reply answered the question", mark);
+  assert.equal(answered.message_thread_id, alphaThread);
+  assert.equal(
+    (await rpc({ action: "show", id: a, chatId: two.id })).inbox.find((item) => item.kind === "question" && item.result?.text === "purple")
+      ?.result.text,
+    "purple",
+  );
+  result.checks.push(
+    "T62-T64 with topics on, each chat gets one topic on its first notice (named Project · Chat, persisted); notices, acknowledgements and command replies stay in it; a message in a topic reaches that chat without /projects, the general thread keeps the route, and a reply answers a question inside the topic",
+  );
+
+  // T65: the owner deletes a topic; the next notice recreates it and arrives once.
+  mark = toOwner().length;
+  tg.topicList.delete(alphaThread);
+  await k.ask(a, two.id, "MARK-TOP3 after delete");
+  await lastTo(/Done MARK-TOP3\./, "notice after the topic was deleted", mark);
+  const recreated = threadOf("Alpha · Two");
+  assert.ok(recreated && recreated !== alphaThread, "65 a new topic replaced the deleted one");
+  assert.equal(toOwner().filter((m) => /Done MARK-TOP3\./.test(m.text)).length, 1, "65 delivered once");
+  assert.equal(toOwner().findLast((m) => /Done MARK-TOP3\./.test(m.text)).message_thread_id, recreated);
+  text(OWNER, "MARK-INNEW hello", { message_thread_id: recreated });
+  await lastTo(/Done MARK-INNEW\./, "the new topic routes", mark);
+  assert.equal((await jobs(a, two.id)).filter((j) => j.text.includes("MARK-INNEW")).length, 1);
+  alphaThread = recreated;
+  result.checks.push("T65 a deleted topic is recreated and the notice arrives once, in the new topic, which routes again");
+
+  // T66: createForumTopic fails: the notice goes to the general thread, the queue moves on, and the next notice tries the topic again.
+  const three = await rpc({ action: "chat-create", id: a, title: "Three" });
+  mark = toOwner().length;
+  tg.failTopics = 1;
+  await k.ask(a, three.id, "MARK-TOP4 failing create");
+  const fallback = await lastTo(/Done MARK-TOP4\./, "notice with a failing topic creation", mark);
+  assert.equal(fallback.message_thread_id, undefined, "66 it fell back to the general thread");
+  await k.ask(b, "main", "MARK-TOP5 right behind");
+  assert.equal(
+    (await lastTo(/Done MARK-TOP5\./, "the queue moved on", mark)).message_thread_id,
+    betaThread,
+    "66 the notice behind it went to its topic",
+  );
+  await delay(1500);
+  await k.ask(a, three.id, "MARK-TOP6 retry create");
+  await lastTo(/Done MARK-TOP6\./, "notice once creation works", mark);
+  const threeThread = threadOf("Alpha · Three");
+  assert.ok(threeThread, "66 the topic is created on a later notice");
+  assert.equal(toOwner().findLast((m) => /Done MARK-TOP6\./.test(m.text)).message_thread_id, threeThread);
+  assert.equal(toOwner().filter((m) => /Done MARK-TOP4\./.test(m.text)).length, 1, "66 the fallback notice is not repeated");
+  result.checks.push(
+    "T66 a failing createForumTopic sends the notice to the general thread once, does not hold the notices behind it, and the topic is created on a later notice",
+  );
+
+  // T68: a rename renames the topic; archiving prefixes its name, restoring removes the prefix; close and reopen are never called.
+  const callsBefore = tg.topicCalls.length,
+    errorsBefore = (await rpc({ action: "telegram-snapshot" })).deliveryErrors.length;
+  await rpc({ action: "chat-update", id: a, chatId: three.id, title: "Three renamed" });
+  await eventually(async () => tg.topicList.get(threeThread)?.name === "Alpha · Three renamed", "topic not renamed", 100);
+  await rpc({ action: "chat-update", id: a, chatId: three.id, archived: true });
+  await eventually(async () => tg.topicList.get(threeThread)?.name === "📦 Alpha · Three renamed", "topic not marked archived", 100);
+  await rpc({ action: "chat-update", id: a, chatId: three.id, title: "Three again" });
+  await eventually(async () => tg.topicList.get(threeThread)?.name === "📦 Alpha · Three again", "archived rename lost the prefix", 100);
+  await rpc({ action: "chat-update", id: a, chatId: three.id, archived: false });
+  await eventually(async () => tg.topicList.get(threeThread)?.name === "Alpha · Three again", "prefix not removed on restore", 100);
+  assert.deepEqual(
+    tg.topicCalls.slice(callsBefore).filter((c) => /^(close|reopen)ForumTopic$/.test(c.method)),
+    [],
+    "68 close and reopen are never called in a private chat",
+  );
+  assert.equal(threadOf("Alpha · Three again"), threeThread, "68 the topic is reused after restore");
+  assert.equal((await rpc({ action: "telegram-snapshot" })).deliveryErrors.length, errorsBefore, "68 no archive call fails");
+  result.checks.push(
+    "T68 renaming a chat renames its topic; archiving prefixes it with 📦 (kept on rename), restoring removes it; no close or reopen",
+  );
+
+  // T72: picking another project inside a topic changes the general-thread route only, and the reply says the topic stays bound.
+  mark = toOwner().length;
+  text(OWNER, "/project Alpha", { message_thread_id: betaThread });
+  const picked = await lastTo(/stays bound/, "pick inside a topic", mark);
+  assert.equal(picked.message_thread_id, betaThread, "72 the reply stays in the topic");
+  assert.doesNotMatch(picked.text, /Now talking to/, "72 it does not claim the topic now talks to the pick");
+  text(OWNER, "MARK-STILLBETA hello", { message_thread_id: betaThread });
+  await lastTo(/Done MARK-STILLBETA\./, "topic message after the pick", mark);
+  assert.equal((await jobs(b)).filter((j) => j.text.includes("MARK-STILLBETA")).length, 1, "72 the topic still reaches its own chat");
+  result.checks.push("T72 a pick inside a topic says the topic stays bound and changes only the general-thread route");
+
+  // T67: topics turned off again, or another bot: no thread ids.
+  tg.topics = false;
+  await rpc({ action: "telegram-token", token: TOKEN });
+  mark = toOwner().length;
+  text(OWNER, "MARK-OFFTOPIC hello", { message_thread_id: betaThread });
+  await lastTo(/Done MARK-OFFTOPIC\./, "message in an old topic with topics off", mark);
+  assert.equal(
+    (await jobs(a)).filter((j) => j.text.includes("MARK-OFFTOPIC")).length,
+    1,
+    "73 with topics off the picked route wins over the thread",
+  );
+  assert.ok(!(await jobs(b)).some((j) => j.text.includes("MARK-OFFTOPIC")), "73 not the old topic's chat");
+  text(OWNER, "/status", { message_thread_id: betaThread });
+  assert.equal((await lastTo(/Text goes to/, "status with topics off", mark)).message_thread_id, undefined, "73 no thread id is echoed");
+  assert.ok(
+    toOwner()
+      .slice(mark)
+      .every((m) => m.message_thread_id === undefined),
+    "73 nothing after the switch carries a thread id",
+  );
+  mark = toOwner().length;
+  await k.ask(b, "main", "MARK-TOP7 topics off again");
+  assert.equal(
+    (await lastTo(/Done MARK-TOP7\./, "notice with topics off again", mark)).message_thread_id,
+    undefined,
+    "67 no thread id after topics were turned off",
+  );
+  result.checks.push("T61/T67 a bot whose topics were turned off sends without thread ids again");
 
   // T3/T2: switching bots resets pairing and offset; a revoked token stops polling with an error; removing the token stops polling.
   await evaluate(`window.__old = true`, s);

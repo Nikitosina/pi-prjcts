@@ -90,7 +90,13 @@ let fault = null,
   updates = [],
   sends = [],
   attempts = [],
-  id = 0;
+  id = 0,
+  topicId = 900,
+  chatList = [],
+  dispatchHook = null,
+  chatsHook = null,
+  meTopics = null,
+  topicNames = new Map();
 const server = createServer(async (req, res) => {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
@@ -126,6 +132,10 @@ const server = createServer(async (req, res) => {
     await new Promise((resolve) => setTimeout(resolve, 30));
     return reply({ ok: true, result: updates.splice(0) });
   }
+  if (method === "getMe" && meTopics !== null) {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    return reply({ ok: true, result: { id: 1, has_topics_enabled: meTopics } });
+  }
   attempts.push({ method, input });
   // TDLib check_message_group_message_contents requires uniform placement even on items without captions.
   if (method === "sendMediaGroup" && new Set(input.media.map((item) => item.show_caption_above_media ?? false)).size > 1)
@@ -135,8 +145,9 @@ const server = createServer(async (req, res) => {
       description: "Bad Request: parameter show_caption_above_media must be the same for all messages",
     });
   if (fault?.method === method) {
-    const { code, description = "test rejection", next = null } = fault;
+    const { code, description = "test rejection", next = null, run } = fault;
     fault = next;
+    await run?.();
     if (code === 0) return req.socket.destroy();
     if (code === 200) return reply({ ok: true, result: [] });
     return reply({ ok: false, error_code: code, description });
@@ -145,6 +156,14 @@ const server = createServer(async (req, res) => {
     const { run } = gate;
     gate = null;
     await run();
+  }
+  if (method === "createForumTopic") {
+    topicNames.set(topicId + 1, input.name);
+    return reply({ ok: true, result: { message_thread_id: ++topicId } });
+  }
+  if (method === "editForumTopic") {
+    topicNames.set(input.message_thread_id, input.name);
+    return reply({ ok: true, result: true });
   }
   const message_ids = Array.from({ length: method === "sendMediaGroup" ? input.media.length : 1 }, () => ++id);
   sends.push({ method, input, message_id: message_ids[0], message_ids });
@@ -185,9 +204,13 @@ function start(receiveUpdates = false) {
     dispatch: async (input) => {
       assert.equal(input.id, project);
       if (input.threadId !== thread) throw Error("unauthorized");
+      await dispatchHook?.();
       return {};
     },
-    chats: async () => [],
+    chats: async () => {
+      await chatsHook?.();
+      return chatList.map((chat) => ({ ...chat }));
+    },
     notifier: { seq: () => notices.length, feed: (after) => ({ items: notices.filter((n) => n.seq > after) }) },
     report: () => {},
   });
@@ -211,6 +234,11 @@ const reset = (text) => {
   fault = null;
   gate = null;
   updates = [];
+  chatList = [];
+  dispatchHook = null;
+  chatsHook = null;
+  meTopics = null;
+  topicNames = new Map();
   notices = [notice(1, text)];
 };
 const mapped = (expected = { projectId: project, chatId: "main" }) => {
@@ -863,6 +891,221 @@ try {
   assert.equal(sends.length, 1);
   assert.equal(sends[0].method, "sendMessage");
   assert(!sends[0].input.text.includes("Test · Main"));
+
+  // 62/65: with topics on, one media and an album go to the chat's topic; a topic that is gone is recreated and the upload repeated once.
+  const topicsOn = (topics = []) => {
+    const state = JSON.parse(readFileSync(statePath));
+    writeFileSync(statePath, JSON.stringify({ ...state, bot: { id: 1, username: "b", topics: true }, topics }));
+  };
+  reset(`Before ![Image](${ref("demo.png")}) after`);
+  topicsOn();
+  start();
+  await bridge.flush();
+  assert.deepEqual(
+    attempts.map((a) => a.method),
+    ["createForumTopic", "sendPhoto"],
+  );
+  assert.equal(attempts[0].input.name, "Test · Main");
+  assert.equal(sends[0].input.message_thread_id, String(topicId));
+  mapped();
+  reset(`![One](${ref("demo.png")}) ![Two](${ref("Screenshot (1 (copy)).png")})`);
+  topicsOn();
+  start();
+  await bridge.flush();
+  assert.deepEqual(
+    sends.map((s) => s.method),
+    ["sendMediaGroup"],
+  );
+  assert.equal(sends[0].input.message_thread_id, String(topicId));
+  mapped();
+  reset(`![Image](${ref("demo.png")})`);
+  topicsOn([{ projectId: project, chatId: "main", thread: 500 }]);
+  fault = { method: "sendPhoto", code: 400, description: "Bad Request: message thread not found" };
+  start();
+  await bridge.flush();
+  assert.deepEqual(
+    attempts.map((a) => a.method),
+    ["sendPhoto", "createForumTopic", "sendPhoto"],
+  );
+  assert.equal(sends.length, 1);
+  assert.equal(sends[0].input.message_thread_id, String(topicId));
+  assert.deepEqual(JSON.parse(readFileSync(statePath)).topics, [{ projectId: project, chatId: "main", thread: topicId }]);
+  mapped();
+  reset("A thread kept from before topics were turned off is dropped. ".repeat(2));
+  const stale = JSON.parse(readFileSync(statePath));
+  writeFileSync(statePath, JSON.stringify({ ...stale, sentPart: { seq: 1, chatId: 1, parts: 0, thread: 500 } }));
+  start();
+  await bridge.flush();
+  assert.equal(sends.length, 1);
+  assert.equal(sends[0].input.message_thread_id, undefined);
+  reset(`![Image](${ref("demo.png")})`);
+  topicsOn();
+  fault = { method: "createForumTopic", code: 500 };
+  start();
+  await bridge.flush();
+  assert.equal(sends.length, 1, "a failing topic creation sends the upload to the general thread");
+  assert.equal(sends[0].input.message_thread_id, undefined);
+
+  // 71: the owner is replaced while the artifact is being authorized; the first send of the part must not reach the former owner.
+  reset(`![Image](${ref("demo.png")})`);
+  dispatchHook = async () => bridge.unpair();
+  start();
+  await bridge.flush().catch(() => {});
+  assert(
+    !attempts.some((a) => a.method !== "getUpdates" && a.input.chat_id !== undefined) && sends.length === 0,
+    "71 nothing is sent after the owner changed during authorization",
+  );
+
+  // 74: the topic is created with the archived prefix when the chat is already archived, and when it is archived during the creation.
+  const mainChat = (archived) => ({ id: "main", title: "Main", archived });
+  reset("Archived before its first notice. ".repeat(2));
+  topicsOn();
+  chatList = [mainChat(true)];
+  start();
+  await bridge.flush();
+  assert.equal(attempts[0].input.name, "📦 Test · Main", "74 created with the prefix");
+  reset("Archived while its topic is created. ".repeat(2));
+  topicsOn();
+  chatList = [mainChat(false)];
+  let archivedDuring;
+  gate = {
+    method: "createForumTopic",
+    run: async () => {
+      chatList = [mainChat(true)];
+      archivedDuring = bridge.chatChanged(project, mainChat(true));
+    },
+  };
+  start();
+  await bridge.flush();
+  await archivedDuring;
+  assert.equal(topicNames.get(topicId), "📦 Test · Main", "74 the archive during creation is applied once the topic exists");
+  reset("A topic recreated for an archived chat. ".repeat(2));
+  topicsOn([{ projectId: project, chatId: "main", thread: 500 }]);
+  chatList = [mainChat(true)];
+  fault = { method: "sendMessage", code: 400, description: "Bad Request: message thread not found" };
+  start();
+  await bridge.flush();
+  assert.equal(attempts.find((a) => a.method === "createForumTopic").input.name, "📦 Test · Main", "74 the recreated topic has the prefix");
+
+  // 75: a restore queued behind an archive edit that is still in flight is sent after it, so the last state wins.
+  reset("unused");
+  topicsOn([{ projectId: project, chatId: "main", thread: 500 }]);
+  topicNames.set(500, "Test · Main");
+  chatList = [mainChat(true)];
+  let held, reachedEdit;
+  const reached = new Promise((resolve) => (reachedEdit = resolve));
+  gate = { method: "editForumTopic", run: () => (reachedEdit(), new Promise((resolve) => (held = resolve))) };
+  start();
+  const archiving = bridge.chatChanged(project, mainChat(true));
+  await reached;
+  chatList = [mainChat(false)];
+  const restoring = bridge.chatChanged(project, mainChat(false));
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const edits = () => attempts.filter((a) => a.method === "editForumTopic").map((a) => a.input.name);
+  assert.deepEqual(edits(), ["📦 Test · Main"], "75 the restore waits while the archive edit is in flight");
+  held();
+  await Promise.all([archiving, restoring]);
+  assert.deepEqual(edits(), ["📦 Test · Main", "Test · Main"], "75 both names arrive in order");
+  assert.equal(topicNames.get(500), "Test · Main", "75 the last edit wins");
+
+  // 1: the owner is replaced during the chat-name lookup of a topic creation; the project and chat title never go to the former owner.
+  reset("Owner replaced during the topic name lookup. ".repeat(2));
+  topicsOn();
+  chatsHook = async () => bridge.unpair();
+  start();
+  await bridge.flush().catch(() => {});
+  assert(!attempts.some((a) => a.method === "createForumTopic"), "1 no topic is created for the former owner");
+  assert.equal(sends.length, 0, "1 nothing is sent");
+
+  // 2: the owner is replaced while the photo is rejected; the document fallback never reaches the former owner.
+  reset(`![Image](${ref("demo.png")})`);
+  fault = { method: "sendPhoto", code: 400, description: "Bad Request: wrong file", run: async () => bridge.unpair() };
+  start();
+  await bridge.flush().catch(() => {});
+  assert(!attempts.some((a) => a.method === "sendDocument"), "2 no document fallback after the owner changed");
+  assert.equal(sends.length, 0, "2 nothing is sent");
+
+  // 3: a queued update waits for the startup topics refresh; a topics flag turned off in BotFather is not stale for it.
+  reset("unused");
+  topicsOn([{ projectId: project, chatId: "other", thread: 500 }]);
+  meTopics = false;
+  updates.push({
+    update_id: 1,
+    message: { message_id: 1, chat: { id: 1, type: "private" }, from: { id: 1 }, text: "hello", message_thread_id: 500 },
+  });
+  const reply = () => sends.find((s) => s.method === "sendMessage");
+  start(true);
+  for (let i = 0; i < 100 && !reply(); i++) await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.match(reply()?.input.text ?? "", /Pick a project/, "3 the update is routed with topics off");
+  assert.equal(reply().input.message_thread_id, undefined, "3 the reply carries no thread");
+
+  // 4: the chat lookup fails during an archive edit; the archived state of the edit is kept.
+  reset("unused");
+  topicsOn([{ projectId: project, chatId: "main", thread: 500 }]);
+  topicNames.set(500, "Test · Main");
+  chatsHook = async () => {
+    throw new Error("lookup failed");
+  };
+  start();
+  await bridge.chatChanged(project, mainChat(true));
+  assert.equal(topicNames.get(500), "📦 Test · Main", "4 the archive prefix survives a failed lookup");
+  await bridge.chatChanged(project, mainChat(false));
+  assert.equal(topicNames.get(500), "Test · Main", "4 the restore removes it on a failed lookup");
+
+  // 5: an edit whose result is unknown does not leave a cached name that hides the next needed edit.
+  reset("unused");
+  topicsOn([{ projectId: project, chatId: "main", thread: 500 }]);
+  topicNames.set(500, "Test · Main");
+  chatList = [mainChat(true)];
+  start();
+  await bridge.chatChanged(project, mainChat(true));
+  assert.equal(topicNames.get(500), "📦 Test · Main");
+  chatList = [mainChat(false)];
+  fault = { method: "editForumTopic", code: 0, run: () => topicNames.set(500, "Test · Main") };
+  await bridge.chatChanged(project, mainChat(false));
+  chatList = [mainChat(true)];
+  await bridge.chatChanged(project, mainChat(true));
+  assert.equal(topicNames.get(500), "📦 Test · Main", "5 the archive after an uncertain restore is not skipped");
+
+  // 6: the owner is replaced while Telegram answers "topic gone"; no topic is created in the new owner's chat for the old notice.
+  reset(`![Image](${ref("demo.png")})`);
+  topicsOn([{ projectId: project, chatId: "main", thread: 500 }]);
+  let replacedUpdate = 0;
+  fault = {
+    method: "sendPhoto",
+    code: 400,
+    description: "Bad Request: message thread not found",
+    run: async () => {
+      bridge.unpair();
+      const { code } = (await bridge.pair()).pairing;
+      const pairing = {
+        update_id: ++replacedUpdate,
+        message: { message_id: 1, chat: { id: 2, type: "private", first_name: "Other" }, from: { id: 2 }, text: `/start ${code}` },
+      };
+      // An update pushed while a poll is in flight can be lost, so the pairing is offered again until it lands.
+      for (let i = 0; i < 100 && (await bridge.snapshot()).owner !== "Other"; i++) {
+        if (!updates.length) updates.push(pairing);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      }
+      assert.equal((await bridge.snapshot()).owner, "Other", "6 the owner was replaced before the rejection is released");
+    },
+  };
+  start(true);
+  await bridge.flush().catch(() => {});
+  assert(!attempts.some((a) => a.method === "createForumTopic"), "6 no topic is created for a notice of the former owner");
+  assert(!attempts.some((a) => a.method === "sendPhoto" && a.input.chat_id === "2"), "6 the notice never reaches the new owner");
+
+  // 7: an archive edit during the startup topics refresh waits for it instead of seeing the stale topics flag.
+  reset("unused");
+  topicsOn([{ projectId: project, chatId: "main", thread: 500 }]);
+  const flagOff = JSON.parse(readFileSync(statePath));
+  flagOff.bot.topics = false;
+  writeFileSync(statePath, JSON.stringify(flagOff));
+  topicNames.set(500, "Test · Main");
+  meTopics = true;
+  start(true);
+  await bridge.chatChanged(project, mainChat(true));
+  assert.equal(topicNames.get(500), "📦 Test · Main", "7 the archive edit waits for the topics refresh");
 
   console.log(
     "PASS one-message native caption/envelope/actions/routing; albums/overflow; byte/MIME/security/fallback; retry/order/restart/uncertainty",

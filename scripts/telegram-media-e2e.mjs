@@ -68,6 +68,7 @@ const api = createServer(async (req, res) => {
     rejectPhoto = false;
     return reply({ ok: false, error_code: 429, description: "Fixture rate limit", parameters: { retry_after: 1 } });
   }
+  if (method === "getMe") return reply({ ok: true, result: { id: 1, username: "media_bot" } });
   if (method === "setMyCommands") return (commandCalls.push(input), reply({ ok: true, result: true }));
   assert(["sendMessage", "sendPhoto", "sendVideo", "sendDocument", "sendMediaGroup"].includes(method));
   const message_ids = Array.from({ length: method === "sendMediaGroup" ? input.media.length : 1 }, () => nextMessage++);
