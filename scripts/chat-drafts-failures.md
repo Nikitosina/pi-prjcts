@@ -22,7 +22,7 @@ nothing is evicted for size.
 - D10 Between the send and its ack the sent text shows again as a draft (chat switch or reload while sending).
 
 - D25 Another tab writes a newer draft between A's check ("the stored text equals what I sent") and A's delete, and the delete removes the newer text: the check and the delete are not one step across tabs. Likewise an earlier input write that waited its turn must never overwrite a later one, even when another tab queued a write between them.
-- D27 A second tab's copy of the same pending message settles the same send a second time and deletes a fresh draft that happens to read the same as the sent text.
+- D27 A second tab's copy of the same pending message settles the same send a second time and deletes a fresh draft that happens to read the same as the sent text; or the settle mark cannot be stored and the draft is deleted anyway, so the next copy has nothing to stop it.
 
 ## Refusal
 
@@ -40,19 +40,20 @@ nothing is evicted for size.
 
 ## Size
 
-- D18 The browser refuses to store a draft and the owner is not told; or the older stored text is deleted when the new one cannot be written; or a refused Host agent text is not put back in the composer because it could not be stored.
+- D18 The browser refuses to store a draft and the owner is not told; or the older stored text is deleted when the new one cannot be written; or a refused Host agent text is not put back in the composer because it could not be stored; or a switch away and back replaces the unsaved text with the older stored one.
 
 ## Host agent
 
 - D19 The Host agent composer keeps no draft over a reload, or shares its draft with a chat.
 - D20 A successful Host agent send leaves its text stored, or deletes a newer draft typed meanwhile; a refused send loses the text.
 
-- D26 A Host agent send is refused after the owner typed something new in its composer: the refused text is lost when the new text is sent, or it replaces the new text. The Host agent has no bubble, so the refused text goes back into the composer and the stored draft, below whatever they hold, after a blank line.
-- D29 A Host agent send is refused while another tab stored a newer Host agent draft: the refusal overwrites the newer draft, or the refused text is not stored and a reload loses it. The stored draft is read and merged inside the key's lock, so both texts stay.
+- D26 A Host agent send is refused after the owner typed something new in its composer: the refused text is lost when the new text is sent, or it replaces the new text. The Host agent has no bubble, so the refused text goes back into the composer and the stored draft, below whatever they hold, after a blank line. A text the owner retyped while it was being sent is kept twice, not folded into one.
+- D29 A Host agent send is refused while another tab stored a newer Host agent draft: the refusal overwrites the newer draft, or the refused text is not stored and a reload loses it. The stored draft is read and merged inside the key's lock, so both texts stay. An edit the owner makes while the restore waits for the lock is written after it, and the refused text is not added a second time.
 
 ## Remote hosts
 
 - D21 A remote host's draft is stored under the local key, so a local chat with the same ids shows it.
 - D22 Forget host leaves the remote host's drafts or pending-send handles in this browser, or removes local ones or another host's.
+- D22b An input of the forgotten host still waiting for its lock writes the draft back after Forget host.
 - D23 A revoked device leaves the host's drafts or pending-send handles in this browser.
-- D28 The failed-turn Retry of a remote chat creates a send without the owning host, so the host is whichever one is selected when the send is made or retried, and its draft key follows the selection. A send whose host was forgotten goes to another host instead of failing closed.
+- D28 The failed-turn Retry of a remote chat creates a send without the owning host, so the host is whichever one is selected when the send is made or retried, and its draft key follows the selection. A send whose host was forgotten, or a handle stored before sends named their host, goes to another host instead of failing closed. Two hosts with copied homes share project, chat and failed-turn ids, and their failed-turn Retries share one pending send and request id.

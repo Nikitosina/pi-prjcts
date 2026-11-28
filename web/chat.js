@@ -162,10 +162,12 @@ export function mountChat(client, media, slash, memory) {
     }
   }
   /** The request id of a failed turn's Retry comes from the turn, so another tab's click, or this one after a reload, names the same delivery. */
-  async function retryId(projectId, chatId, failedId) {
+  async function retryId(hostPrefix, projectId, chatId, failedId) {
     if (!crypto.subtle) return uuid();
     const hex = [
-      ...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`retry:${projectId}:${chatId}:${failedId}`))),
+      ...new Uint8Array(
+        await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`retry:${hostPrefix}${projectId}:${chatId}:${failedId}`)),
+      ),
     ]
       .map((byte) => byte.toString(16).padStart(2, "0"))
       .join("");
@@ -216,8 +218,9 @@ export function mountChat(client, media, slash, memory) {
   // The text of a send in flight stays stored until the host admits the message, so a refusal can give it back, but it is not shown as a draft meanwhile.
   const currentKey = () => chatDraftKey(client.storagePrefix, state.projectId, state.chatId);
   const sendKey = (send) => send.draftKey ?? chatDraftKey(send.hostPrefix ?? client.storagePrefix, send.projectId, send.chatId);
-  /** The host that owns the send's project: carried by the send, so the selection at the time of a Retry never decides it. */
-  const sendHost = (send) => (send.hostPrefix === undefined ? client : client.owning(send.hostPrefix));
+  /** The host that owns the send's project: carried by the send, so the selection at the time of a Retry never decides it. A handle stored before
+   * sends named their host has none, and null makes its delivery fail closed. */
+  const sendHost = (send) => (send.hostPrefix === undefined ? null : client.owning(send.hostPrefix));
   const carets = new Map(); // draft key → the composer's text and caret when the owner left that chat, for this page's lifetime
   let composerKey = null; // the draft the composer shows
   /** A refused message whose exact text the composer holds now needs no Retry: sending the composer sends it. */
@@ -405,9 +408,9 @@ export function mountChat(client, media, slash, memory) {
     });
   }
   const NO_HANDLE = "This browser cannot keep a recovery copy of the message, so it was not sent.";
-  const NO_HOST = "This chat's host is no longer in this inbox, so the message was not sent.";
+  const NO_HOST = "This inbox does not know the host of this message any more, so it was not sent.";
   const NO_HOST_AGAIN =
-    "This chat's host is no longer in this inbox, so the message was not sent again. The first attempt may have reached it.";
+    "This inbox does not know the host of this message any more, so it was not sent again. The first attempt may have reached it.";
   const NO_HANDLE_AGAIN =
     "This browser cannot keep a recovery copy of the message, so it was not sent again. The first attempt may have reached the host.";
   const DELIVERY = { sending: "Sending…", sent: "Sent", failed: "Not sent", unconfirmed: "Delivery not confirmed" };
@@ -1144,10 +1147,12 @@ export function mountChat(client, media, slash, memory) {
       const { projectId, chatId } = state, // the recipient is the chat the failed turn is in, whatever the owner opens meanwhile
         hostPrefix = client.storagePrefix;
       // One failed turn is one delivery: a click after a lost ack reuses the pending send, and its request id, instead of starting another.
-      let send = pendingSends.find((item) => item.retryOf === failed.id && item.projectId === projectId && item.chatId === chatId);
+      let send = pendingSends.find(
+        (item) => item.retryOf === failed.id && item.hostPrefix === hostPrefix && item.projectId === projectId && item.chatId === chatId,
+      );
       if (!send) {
         send = {
-          id: await retryId(projectId, chatId, failed.id),
+          id: await retryId(hostPrefix, projectId, chatId, failed.id),
           retryOf: failed.id,
           projectId,
           chatId,

@@ -430,7 +430,7 @@ export function mountHostagent(client, chat, media) {
       // The Host agent has no bubble to keep a refused text: it joins what the composer and the stored draft hold now, replacing neither.
       input.value = joinDraft(input.value, raw);
       grow();
-      await restoreDraft(draftKey, raw);
+      await restoreDraft(draftKey, raw, input.value);
       delete form.dataset.sending;
       // "has no model" / "not in the model catalog": say it where the owner is looking and open the model picker.
       if (/model/i.test(reason.message ?? "")) {

@@ -52,7 +52,7 @@ const logWrites = `(() => {
     }
     return value;
   };
-  Storage.prototype.setItem = function (key, value) { if (window.__deny && String(key).includes("pi-draft:")) throw new DOMException("quota", "QuotaExceededError"); note("set", key); return set.call(this, key, value); };
+  Storage.prototype.setItem = function (key, value) { if (window.__denySettled && String(key).startsWith("pi-send-settled:")) throw new DOMException("quota", "QuotaExceededError"); if (window.__deny && String(key).includes("pi-draft:")) throw new DOMException("quota", "QuotaExceededError"); note("set", key); return set.call(this, key, value); };
   Storage.prototype.removeItem = function (key) { note("remove", key); return remove.call(this, key); };
 })()`;
 
@@ -358,6 +358,39 @@ await kit.run(async () => {
     await tabB7.close();
     await a.empty();
   });
+  // D27: without its settle mark a send does not delete the draft, so no other tab's copy can settle it a second time.
+  await section("settle mark refused", async () => {
+    await a.type("unmarked MARK-UNMARKED");
+    await page.evaluate(`window.__denySettled = true`);
+    await a.send();
+    await a.reply("unmarked MARK-UNMARKED");
+    await kit.delay(300);
+    check(
+      "D27 a send whose settle mark cannot be stored keeps the draft",
+      (await a.stored(key(A, "main"))) === "unmarked MARK-UNMARKED",
+      await a.stored(key(A, "main")),
+    );
+    await page.evaluate(`window.__denySettled = false`);
+    await a.empty();
+  });
+  // D28: a pending handle stored before sends named their host fails closed on Retry instead of going to the selected host.
+  await section("handle without a host", async () => {
+    await page.evaluate(
+      `localStorage.setItem("pi-pending-send:00000000-0000-4000-8000-00000000d028", JSON.stringify({ id: "00000000-0000-4000-8000-00000000d028", projectId: ${JSON.stringify(A)}, chatId: "main", text: "hostless MARK-HOSTLESS" }))`,
+    );
+    await page.reload();
+    await open(page);
+    await page.waitFor(`!!document.querySelector('#feed [data-pending-retry]')`, "hostless bubble");
+    await page.evaluate(`document.querySelector('#feed [data-pending-retry]').click()`);
+    await page.waitFor(`document.body.innerText.includes("does not know the host")`, "fail-closed toast");
+    check(
+      "D28 a handle without its host is never sent",
+      (await page.evaluate(`window.__calls.filter((c) => c.action === "message").length`)) === 0 &&
+        (await a.owners("MARK-HOSTLESS")).length === 1,
+      await page.evaluate(`window.__calls`),
+    );
+    await page.evaluate(`document.querySelector('#feed [data-pending-dismiss]').click()`);
+  });
   // D12, D14: a refusal gives the text back to an empty composer, and it survives a reload; Dismiss takes the unedited draft.
   await section("refusal", async () => {
     await page.evaluate(`__rule("message", { fail: "json" })`);
@@ -519,6 +552,9 @@ await kit.run(async () => {
     await page.waitFor(`document.body.innerText.includes("Draft not saved")`, "the owner is told");
     check("D18 the older stored text is not deleted", (await a.stored(key(A, "main"))) === "keepme", await a.stored(key(A, "main")));
     check("D18 the typed text stays in the box", (await a.composer()) === "keepme and more", await a.composer());
+    await a.chat(A, other);
+    await a.chat(A, "main");
+    check("D18 the unsaved text is still in the box after a switch", (await a.composer()) === "keepme and more", await a.composer());
     await page.evaluate(`window.__deny = false`);
     await a.empty();
   });
@@ -670,6 +706,42 @@ await kit.run(async () => {
       "D29 the stored draft keeps the other tab's newer text and adds the refused one",
       (await a.stored(HOST_KEY)) === "beta MARK-HAN\n\nalpha MARK-HAR",
       await a.stored(HOST_KEY),
+    );
+    await emptyAgent(page);
+
+    // D29: the restore waits for its turn; an edit the owner makes meanwhile is written after it and is what stays.
+    await a.type("gamma MARK-HAG", "#ha-composer textarea");
+    await page.evaluate(
+      `void navigator.locks.request(${JSON.stringify(`pi-draft-lock:${HOST_KEY}`)}, () => new Promise((end) => { window.__unlockAgent = end; }))`,
+    );
+    await page.waitFor(`!!window.__unlockAgent`, "Host agent draft lock held");
+    await page.evaluate(`__rule("host-agent-send", { fail: "refuse" })`);
+    await submitAgent(page);
+    await page.waitFor(`document.querySelector('#ha-composer textarea').value === "gamma MARK-HAG"`, "refused text back in the box");
+    await a.type("!", "#ha-composer textarea");
+    await page.evaluate(`window.__unlockAgent(); delete window.__unlockAgent`);
+    await settled(page);
+    await kit.delay(300);
+    check(
+      "D29 an edit made while the restore waited is the stored draft, with nothing added twice",
+      (await a.stored(HOST_KEY)) === "gamma MARK-HAG!" && (await box(page)) === "gamma MARK-HAG!",
+      { stored: await a.stored(HOST_KEY), box: await box(page) },
+    );
+    await emptyAgent(page);
+
+    // D26: the owner typed the same text again while it was being sent: the refusal adds it, it does not fold into the new copy.
+    await a.type("twice MARK-HAT", "#ha-composer textarea");
+    await page.evaluate(`__hold("host-agent-send"); __rule("host-agent-send", { fail: "refuse" })`);
+    await submitAgent(page);
+    await page.waitFor(`document.querySelector('#ha-composer').dataset.sending === "1"`, "host agent sending twice");
+    await a.type("twice MARK-HAT", "#ha-composer textarea");
+    await page.evaluate(`__release("host-agent-send")`);
+    await settled(page);
+    await kit.delay(150);
+    check(
+      "D26 a refused text the owner retyped meanwhile is kept twice",
+      (await box(page)) === "twice MARK-HAT\n\ntwice MARK-HAT" && (await a.stored(HOST_KEY)) === "twice MARK-HAT\n\ntwice MARK-HAT",
+      { box: await box(page), stored: await a.stored(HOST_KEY) },
     );
     await emptyAgent(page);
 

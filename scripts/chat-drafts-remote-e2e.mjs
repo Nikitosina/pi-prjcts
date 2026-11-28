@@ -123,10 +123,18 @@ try {
       // D22: Forget host removes that host's drafts only.
       await guarded("forget", async () => {
         await plantHandles();
+        // An input still waiting for its turn when the host is forgotten must not bring the draft back.
+        await q(
+          `void navigator.locks.request(${JSON.stringify(`pi-draft-lock:${remoteKey}`)}, () => new Promise((end) => { window.__unlockRemote = end; }))`,
+        );
+        await page.waitFor(`!!window.__unlockRemote`, "remote draft lock held");
+        await type(" queued MARK-Q");
         await q(`window.confirm = () => true; document.querySelector('[data-host-menu="${hostId}"]').click()`);
         await page.waitFor(`!!document.querySelector('.host-menu')`, "host menu");
         await q(`[...document.querySelectorAll('.host-menu button')].find((b) => b.textContent.startsWith("Forget host")).click()`);
         await page.waitFor(`!document.querySelector('[data-host-group="${hostId}"]')`, "group gone");
+        await q(`window.__unlockRemote()`);
+        await local.delay(300);
         check(
           "D22 Forget host removes the host's drafts and keeps the local one",
           (await hostDrafts()).length === 0 && (await stored(localKey)) === "local draft MARK-L",

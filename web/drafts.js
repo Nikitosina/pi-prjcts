@@ -19,6 +19,7 @@ export function withDraft(key, work) {
 }
 
 const typed = new Map(); // key → the latest text this tab typed and has not written yet, with the turn that writes it
+const unsaved = new Map(); // key → text the browser refused to store; this tab keeps showing it until a write or a removal of the key succeeds
 let turns = 0;
 
 /** `{ text, caret }`, or null when there is none. */
@@ -27,7 +28,7 @@ export function loadDraft(key) {
     const { text, caret } = typed.get(key);
     return text === "" ? null : { text, caret };
   }
-  return readDraft(key);
+  return unsaved.get(key) ?? readDraft(key);
 }
 function readDraft(key) {
   try {
@@ -40,6 +41,7 @@ function readDraft(key) {
   }
 }
 export function dropDraft(key) {
+  unsaved.delete(key);
   try {
     localStorage.removeItem(key);
   } catch {}
@@ -65,7 +67,9 @@ export const settleDraft = (key, id, text) =>
     try {
       if (localStorage.getItem(SETTLED + id)) return;
       localStorage.setItem(SETTLED + id, String(Date.now()));
-    } catch {}
+    } catch {
+      return; // without its mark, another tab's copy could settle again and delete a fresh draft
+    }
     if (loadDraft(key)?.text === text) dropDraft(key);
   });
 export function forgetOldSettles() {
@@ -87,21 +91,23 @@ export function typeDraft(key, text, caret) {
   });
 }
 /** A text given back after a failed send joins what is already there: alone when there is nothing, else below it after a blank line. */
-export const joinDraft = (current, text) => (current === "" || current === text ? text : `${current}\n\n${text}`);
-/** Gives a refused `text` back to the stored draft of `key` in turn with other tabs: the newest stored text, or this tab's unwritten input, stays
- * and the text joins it, so neither is lost. */
-export const restoreDraft = (key, text) =>
+export const joinDraft = (current, text) => (current === "" ? text : `${current}\n\n${text}`);
+/** Gives a refused `text` back to the stored draft of `key` in turn with other tabs, so a newer draft stays and the text joins it. `shown` is what
+ * the sending tab's composer holds now: a stored draft that is still the sent text itself becomes exactly that. This tab's earlier inputs wrote
+ * before this turn, and a later one writes after it. */
+export const restoreDraft = (key, text, shown) =>
   withDraft(key, () => {
-    const current = typed.get(key)?.text ?? readDraft(key)?.text ?? "";
-    typed.delete(key);
-    saveDraft(key, joinDraft(current, text));
+    const current = (unsaved.get(key) ?? readDraft(key))?.text ?? "";
+    saveDraft(key, current === text ? shown : joinDraft(current, text));
   });
 /** The older stored text is left as it was when the browser refuses the new one, and the owner is told. An empty field is no draft. */
 function saveDraft(key, text, caret = text.length) {
   if (text === "") return dropDraft(key);
   try {
     localStorage.setItem(key, JSON.stringify({ text, caret }));
+    unsaved.delete(key);
   } catch {
+    unsaved.set(key, { text, caret });
     toast("Draft not saved: browser storage is full. The text stays in the box, but a reload would lose it.", { error: true, ms: 8000 });
   }
 }
@@ -116,6 +122,12 @@ export function dropHostDrafts(hostId) {
       return false;
     }
   };
+  // This tab's queued writes of the host find nothing left to write.
+  for (const key of [...typed.keys(), ...unsaved.keys()])
+    if (key.startsWith(prefix + MARK)) {
+      typed.delete(key);
+      unsaved.delete(key);
+    }
   try {
     for (const key of Object.keys(localStorage))
       if (key.startsWith(prefix + MARK) || (key.startsWith(PENDING_PREFIX) && ownHandle(key))) localStorage.removeItem(key);
