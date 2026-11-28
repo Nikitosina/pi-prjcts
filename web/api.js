@@ -1,4 +1,5 @@
 // The only module that talks to the host. Requests go through `call`.
+import { dropHostDrafts } from "./drafts.js";
 
 const key = `pi-projects-token:${location.origin}`;
 const supplied = new URLSearchParams(location.hash.slice(1)).get("token");
@@ -256,6 +257,7 @@ export async function forgetHost(id) {
     await localHost.call("inbox-host-forget", { hostId: id });
     stopViews(id);
     await forgetDevice(id);
+    dropHostDrafts(id);
     clients.delete(id);
   });
 }

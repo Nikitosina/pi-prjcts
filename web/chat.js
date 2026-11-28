@@ -5,6 +5,7 @@ import { clip, clock, dur, esc, imagesHtml, markdown, oneLine } from "./format.j
 import { FILE_ONLY_NOTE, PathSource, insertText, pathsFromTransfer } from "./path-drop.js";
 import { chatArgs, emit, fail, on, stale, state, toast } from "./state.js";
 import { follower } from "./follow.js";
+import { PENDING_PREFIX, chatDraftKey, draftRevision, loadDraft, settleDraft, takeDraftIf, typeDraft, withDraft } from "./drafts.js";
 
 export function mountChat(client, media, slash, memory) {
   const { hydrateMedia } = media;
@@ -26,7 +27,7 @@ export function mountChat(client, media, slash, memory) {
   const pendingSends = []; // owner messages sent from this page that the transcript does not show yet, oldest first
   // The recovery handle of an unsettled send survives a reload: its id, project, chat and exact text, so Retry sends the same message under the same id.
   // One storage key per attempt, so tabs never overwrite each other's handles.
-  const HANDLE_PREFIX = "pi-pending-send:",
+  const HANDLE_PREFIX = PENDING_PREFIX,
     LEGACY_HANDLES = "pi-pending-sends";
   const savedHandles = new Map(); // attempt id → the stored text of its handle
   function loadHandles() {
@@ -53,6 +54,11 @@ export function mountChat(client, media, slash, memory) {
           typeof item.text === "string" &&
           item.text &&
           (item.retryOf === undefined || typeof item.retryOf === "string") &&
+          (item.draft === undefined || typeof item.draft === "string") &&
+          (item.draftKey === undefined || typeof item.draftKey === "string") &&
+          (item.draftRev === undefined || typeof item.draftRev === "string") &&
+          (item.hostPrefix === undefined || typeof item.hostPrefix === "string") &&
+          (item.refused === undefined || item.refused === true) &&
           (item.attachments === undefined || (Array.isArray(item.attachments) && item.attachments.every((id) => typeof id === "string")))
         ) {
           savedHandles.set(item.id, localStorage.getItem(key));
@@ -63,9 +69,12 @@ export function mountChat(client, media, slash, memory) {
             text: item.text,
             ...(item.retryOf ? { retryOf: item.retryOf } : {}),
             ...(item.attachments ? { attachments: item.attachments } : {}),
-            state: "unconfirmed",
-            error: "This page was reloaded before the host confirmed the message.",
-            restored: false,
+            ...(item.draft !== undefined ? { draft: item.draft } : {}),
+            ...(item.draftKey ? { draftKey: item.draftKey } : {}),
+            ...(item.draftRev ? { draftRev: item.draftRev } : {}),
+            ...(item.hostPrefix !== undefined ? { hostPrefix: item.hostPrefix } : {}),
+            state: item.refused ? "failed" : "unconfirmed",
+            error: item.refused ? "The host refused the message." : "This page was reloaded before the host confirmed the message.",
             refused: false,
             failedRead: 0,
           });
@@ -75,7 +84,7 @@ export function mountChat(client, media, slash, memory) {
     return found;
   }
   /** Stores the handle before anything is sent; false when the browser cannot keep it, and then nothing may be sent: a reload would lose the message without a trace. */
-  function rememberSend({ id, projectId, chatId, text, attachments, retryOf }) {
+  function rememberSend({ id, projectId, chatId, text, attachments, retryOf, draft, draftKey, draftRev, hostPrefix }) {
     const stored = JSON.stringify({
       id,
       projectId,
@@ -83,6 +92,10 @@ export function mountChat(client, media, slash, memory) {
       text,
       ...(retryOf ? { retryOf } : {}),
       ...(attachments ? { attachments } : {}),
+      ...(draft !== undefined ? { draft } : {}),
+      ...(draftKey ? { draftKey } : {}),
+      ...(draftRev ? { draftRev } : {}),
+      ...(hostPrefix !== undefined ? { hostPrefix } : {}),
     });
     try {
       localStorage.setItem(HANDLE_PREFIX + id, stored);
@@ -93,9 +106,17 @@ export function mountChat(client, media, slash, memory) {
     savedHandles.set(id, stored);
     return true;
   }
-  // A handle goes once its message is settled: delivered and shown, dismissed, or refused with the text back in the composer.
+  /** A refusal keeps its handle until Dismiss or a later success: another tab may overwrite the restored draft. */
+  function markRefused(send) {
+    try {
+      const stored = JSON.stringify({ ...JSON.parse(savedHandles.get(send.id) ?? "null"), refused: true });
+      localStorage.setItem(HANDLE_PREFIX + send.id, stored);
+      savedHandles.set(send.id, stored);
+    } catch {}
+  }
+  // A handle goes once its message is settled: delivered and shown, or dismissed.
   function saveHandles() {
-    const open = new Set(pendingSends.filter((send) => !(send.state === "failed" && send.restored)).map((send) => send.id));
+    const open = new Set([...pendingSends.map((send) => send.id), ...settling]);
     for (const id of [...savedHandles.keys()])
       if (!open.has(id)) {
         try {
@@ -105,6 +126,17 @@ export function mountChat(client, media, slash, memory) {
       }
   }
   pendingSends.push(...loadHandles());
+  const settling = new Set(); // attempt ids whose draft is still being settled: their handle stays, so a reload settles it again
+  /** Runs `work` on the draft of `send` and keeps its handle until it has run. */
+  async function settleHandle(send, work) {
+    settling.add(send.id);
+    try {
+      return await work(sendKey(send), send.draftRev, send.draft ?? send.text);
+    } finally {
+      settling.delete(send.id);
+      saveHandles();
+    }
+  }
   const expanded = new Set(); // tool callIds and group keys the owner opened
   const revealed = new Set(); // long owner messages opened during this chat visit, keyed by transcript scope; they stay open until the owner navigates away
   const CHAT_SCOPE = "msg:"; // the coordinator chat's keys have no scope prefix
@@ -133,10 +165,12 @@ export function mountChat(client, media, slash, memory) {
     }
   }
   /** The request id of a failed turn's Retry comes from the turn, so another tab's click, or this one after a reload, names the same delivery. */
-  async function retryId(projectId, chatId, failedId) {
+  async function retryId(hostPrefix, projectId, chatId, failedId) {
     if (!crypto.subtle) return uuid();
     const hex = [
-      ...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`retry:${projectId}:${chatId}:${failedId}`))),
+      ...new Uint8Array(
+        await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`retry:${hostPrefix}${projectId}:${chatId}:${failedId}`)),
+      ),
     ]
       .map((byte) => byte.toString(16).padStart(2, "0"))
       .join("");
@@ -183,45 +217,49 @@ export function mountChat(client, media, slash, memory) {
     })();
     return run.promise;
   }
-  // A draft restored after a refusal, and whatever the owner makes of it, belongs to the chat it was sent from: the composer gives it up when another
-  // chat opens and takes it back when its chat returns. An edit makes it a different message than the failed bubble's, so that bubble gets its own Retry.
-  const drafts = new Map(); // "project/chat" → { text, original, sendId }: restored drafts, and what the owner made of them
-  const draftKey = (projectId = state.projectId, chatId = state.chatId) => `${projectId}/${chatId}`;
-  let composerKey = null; // the chat whose draft the composer shows
-  const forgetRestored = (sendId) => {
-    const send = pendingSends.find((item) => item.id === sendId);
-    if (send?.restored) send.restored = false;
-  };
+  // The composer shows the draft of the open chat. It is stored on this tab's own input only; switching, reloading and closing never write it.
+  // The text of a send in flight stays stored until the host admits the message, so a refusal can give it back, but it is not shown as a draft meanwhile.
+  const currentKey = () => chatDraftKey(client.storagePrefix, state.projectId, state.chatId);
+  // A handle stored before sends named their host is shown in the local chat only, so it appears once; its host is unknown, so it is never retried.
+  const sendKey = (send) => send.draftKey ?? chatDraftKey(send.hostPrefix ?? "", send.projectId, send.chatId);
+  /** The host that owns the send's project: carried by the send, so the selection at the time of a Retry never decides it. */
+  const sendHost = (send) => (send.hostPrefix === undefined ? null : client.owning(send.hostPrefix));
+  const carets = new Map(); // draft key → the composer's text and caret when the owner left that chat, for this page's lifetime
+  let composerKey = null; // the draft the composer shows
+  /** A refused message whose exact text the composer holds now needs no Retry: sending the composer sends it. */
+  const inComposer = (send) => send.state === "failed" && inCurrentChat(send) && input.value === (send.draft ?? send.text);
+  function visibleDraft(key) {
+    const stored = loadDraft(key);
+    if (!stored) return null;
+    // Only the revision the send took is hidden: the same text typed again is a new draft. Text the browser could not store has no revision.
+    const took = (send) =>
+      send.draftRev !== undefined ? send.draftRev === stored.rev : stored.rev === undefined && send.draft === stored.text;
+    const flying = pendingSends.some(
+      (send) => took(send) && sendKey(send) === key && (send.state === "sending" || send.state === "unconfirmed"),
+    );
+    return flying ? null : stored;
+  }
+  function showDraft(key) {
+    const draft = visibleDraft(key),
+      left = carets.get(key),
+      caret = left && left.text === (draft?.text ?? "") ? left.caret : (draft?.caret ?? 0);
+    input.value = draft?.text ?? "";
+    input.setSelectionRange(caret, caret);
+    grow();
+  }
   input.addEventListener("input", () => {
-    const held = drafts.get(draftKey());
-    if (!held) return;
-    held.text = input.value;
-    if (input.value !== held.original) {
-      forgetRestored(held.sendId);
+    typeDraft(composerKey ?? currentKey(), input.value, input.selectionStart);
+    // An edit makes a restored draft a different message than the failed bubble's, so that bubble gets its own Retry.
+    if (pendingSends.some((send) => send.state === "failed" && inCurrentChat(send) && send.shownInComposer !== inComposer(send)))
       renderFeed();
-    }
   });
   on("select", () => {
-    const now = draftKey(),
-      left = composerKey;
-    composerKey = now;
-    const away = left && left !== now ? drafts.get(left) : undefined;
-    if (away) {
-      if (input.value === away.text) {
-        input.value = "";
-        grow();
-      }
-      // An unedited restored draft goes back to the bubble's own Retry; an edited one waits for its chat.
-      if (away.text === away.original) {
-        forgetRestored(away.sendId);
-        drafts.delete(left);
-      }
-    }
-    const here = drafts.get(now);
-    if (here && !input.value) {
-      input.value = here.text;
-      grow();
-    }
+    const key = currentKey();
+    if (composerKey && composerKey !== key) carets.set(composerKey, { text: input.value, caret: input.selectionStart });
+    composerKey = key;
+    showDraft(key);
+    // The composer stays off until the first chat opens: input without a chat would have no draft to belong to.
+    input.disabled = false;
     older = [];
     olderGroups = null;
     follow.follow();
@@ -337,7 +375,7 @@ export function mountChat(client, media, slash, memory) {
       renderLive();
     });
   }
-  const inCurrentChat = (send) => send.projectId === state.projectId && send.chatId === state.chatId;
+  const inCurrentChat = (send) => send.projectId === state.projectId && send.chatId === state.chatId && sendKey(send) === currentKey();
   /** Settles the pending sends of the open chat against transcript read number `read`. Only the host's own records count: a job it admitted is
    * delivered, and the transcript entry the runtime linked to that job is the message. A record the host never admitted, or a text that merely
    * looks alike, proves nothing, and only a read after a refusal without any record proves the refusal. */
@@ -350,55 +388,72 @@ export function mountChat(client, media, slash, memory) {
         continue;
       }
       if (!job.admitted) continue;
-      send.state = "sent";
+      settleSent(send);
       const placed = job.entry !== undefined && (view.messages ?? []).some((item) => item.kind === "message" && item.entryId === job.entry);
       // A settled job whose message never reached the transcript leaves its outcome in the turn card; the bubble must not outlive it.
       if (placed || ["done", "failed", "interrupted"].includes(job.state)) pendingSends.splice(pendingSends.indexOf(send), 1);
     }
   }
-  /** A refusal the host reported and recorded no job for: the message was not sent, and its text goes back to an empty composer of the same chat. */
+  /** The host admitted the message: its draft is done, unless another tab stored a newer text since (no trimming in the comparison). */
+  function settleSent(send) {
+    if (send.state === "sent") return;
+    send.state = "sent";
+    if (send.draft !== undefined) void settleHandle(send, settleDraft);
+  }
+  /** A refusal the host reported and recorded no job for: the message was not sent. Its text is still the chat's stored draft, shown in the composer
+   * of that chat, unless the owner has written something else there since: then the bubble keeps the text and its Retry. */
   function failSend(send) {
     send.state = "failed";
-    if (inCurrentChat(send) && !input.value) {
-      input.value = send.text;
-      send.restored = true;
-      composerKey = draftKey(send.projectId, send.chatId);
-      drafts.set(composerKey, { text: send.text, original: send.text, sendId: send.id });
-      grow();
-    }
+    const key = sendKey(send),
+      original = send.draft ?? send.text;
+    markRefused(send);
+    void withDraft(key, () => {
+      if (pendingSends.includes(send) && loadDraft(key)?.text === original && inCurrentChat(send) && !input.value) {
+        input.value = original;
+        grow();
+      }
+      renderFeed();
+    });
   }
   const NO_HANDLE = "This browser cannot keep a recovery copy of the message, so it was not sent.";
+  const NO_HOST = "This inbox does not know the host of this message any more, so it was not sent.";
+  const NO_HOST_AGAIN =
+    "This inbox does not know the host of this message any more, so it was not sent again. The first attempt may have reached it.";
   const NO_HANDLE_AGAIN =
     "This browser cannot keep a recovery copy of the message, so it was not sent again. The first attempt may have reached the host.";
   const DELIVERY = { sending: "Sending…", sent: "Sent", failed: "Not sent", unconfirmed: "Delivery not confirmed" };
   function pendingHtml(send) {
+    const back = inComposer(send);
+    send.shownInComposer = back;
     const note =
       send.state === "failed"
-        ? `${esc(clip(oneLine(send.error), 300))}${send.restored ? " The text is back in the composer." : ""}`
+        ? `${esc(clip(oneLine(send.error), 300))}${back ? " The text is back in the composer." : ""}`
         : send.state === "unconfirmed"
           ? `${esc(clip(oneLine(send.error), 200))} The message may or may not have arrived; it is not sent again on its own.`
           : "";
-    const retry = send.state === "unconfirmed" || (send.state === "failed" && !send.restored);
+    const retry = send.state === "unconfirmed" || (send.state === "failed" && !back);
     const actions =
       send.state !== "sending"
         ? `<div class="pending-note" role="status">${note}${retry ? ` <button type="button" class="link-btn" data-pending-retry="${esc(send.id)}">Retry</button>` : ""} <button type="button" class="link-btn" data-pending-dismiss="${esc(send.id)}">Dismiss</button></div>`
         : "";
     const key = `${renderScope}pending:${send.id}`,
       hint = `<button type="button" class="msg-more" data-reveal="${esc(key)}" aria-expanded="${revealed.has(key)}">Show more ▾ · ${send.text.length.toLocaleString("en-US")} chars</button>`;
-    const sig = hash(`${send.state}|${send.error}|${send.restored}`);
+    const sig = hash(`${send.state}|${send.error}|${back}`);
     return `<section class="turn" data-key="p${esc(send.id)}" data-sig="${sig}"><article class="msg owner pending" data-delivery="${send.state}"><div class="msg-meta"><span class="who">You</span><span class="delivery">${DELIVERY[send.state]}</span></div><div class="bubble"><div class="msg-body" tabindex="-1">${markdown(send.text)}</div></div>${hint}${actions}</article></section>`;
   }
   /** Sends one pending message under its own request id (the host returns the job it already holds for a repeated id). A failure never sends again on its own. */
   async function deliver(send) {
-    if (!rememberSend(send)) {
+    // A send whose host was forgotten fails closed: no other host may receive it.
+    const host = sendHost(send);
+    if (!host || !rememberSend(send)) {
       // Only a first attempt is known not to have been sent; an earlier one may have reached the host, so its status stays as it was.
-      const first = send.state === "sending";
+      const first = send.state === "sending",
+        why = host ? (first ? NO_HANDLE : NO_HANDLE_AGAIN) : first ? NO_HOST : NO_HOST_AGAIN;
       if (first) {
         send.state = "failed";
-        send.error = NO_HANDLE;
+        send.error = why;
       }
-      send.restored = false;
-      toast(first ? NO_HANDLE : NO_HANDLE_AGAIN, { error: true, ms: 8000 });
+      toast(why, { error: true, ms: 8000 });
       renderFeed();
       return;
     }
@@ -407,7 +462,7 @@ export function mountChat(client, media, slash, memory) {
     renderFeed();
     let job;
     try {
-      job = await client.call("message", {
+      job = await host.call("message", {
         id: send.projectId,
         text: send.text,
         requestId: send.id,
@@ -431,7 +486,7 @@ export function mountChat(client, media, slash, memory) {
     }
     // Only an ack that says the host admitted the message is delivery; any other answer waits for the ledger.
     if (pendingSends.includes(send) && send.state === "sending") {
-      if (job?.admitted && job.id === send.id) send.state = "sent";
+      if (job?.admitted && job.id === send.id) settleSent(send);
       else {
         send.state = "unconfirmed";
         send.refused = false;
@@ -872,7 +927,10 @@ export function mountChat(client, media, slash, memory) {
   form.addEventListener("dragover", (event) => {
     if (event.dataTransfer?.types.some((type) => type === "Files" || type === "text/uri-list")) event.preventDefault();
   });
-  form.addEventListener("drop", (event) => takePaths(event, event.dataTransfer, false));
+  form.addEventListener("drop", (event) => {
+    if (input.disabled) return event.preventDefault();
+    takePaths(event, event.dataTransfer, false);
+  });
   input.addEventListener("paste", (event) => takePaths(event, event.clipboardData, true));
   /** A dropped or pasted file URL becomes its plain path in the draft; a bare File gets the Copy as Pathname hint; other content takes the browser's way. */
   function takePaths(event, transfer, replaceSelection) {
@@ -898,43 +956,54 @@ export function mountChat(client, media, slash, memory) {
     const text = input.value.trim();
     if (!text || !state.projectId) return;
     const gen = state.generation,
-      ownedDraft = drafts.get(draftKey());
-    drafts.delete(draftKey());
+      { projectId, chatId } = state,
+      hostPrefix = client.storagePrefix,
+      raw = input.value,
+      draftKey = composerKey ?? currentKey();
     input.value = "";
     grow();
     follow.follow();
+    // Asked now, so the answer is the stored draft right after this tab's earlier inputs.
+    const revision = draftRevision(draftKey, raw);
     const slash = slashCommand(text);
     if (slash) {
       try {
         await slash.command.run(slash.argument);
+        void settleDraft(draftKey, await revision, raw);
         if (!stale(gen)) void loadChat();
       } catch (error) {
-        if (!stale(gen) && !input.value) input.value = text;
+        if (!stale(gen) && !input.value) input.value = raw;
         fail(error);
       }
       return;
     }
+    // The handle carries the revision before anything is sent, so a reload can still settle the draft.
+    const draftRev = await revision;
     const send = {
       id: uuid(),
-      projectId: state.projectId,
-      chatId: state.chatId,
+      projectId,
+      chatId,
       text,
+      draft: raw,
+      draftKey,
+      ...(draftRev ? { draftRev } : {}),
+      hostPrefix,
       state: "sending",
       error: "",
-      restored: false,
       refused: false,
       failedRead: 0,
     };
     if (!rememberSend(send)) {
       // Nothing is sent without a handle that survives a reload: the text stays where the owner typed it.
-      if (!input.value) input.value = text;
-      if (ownedDraft) drafts.set(draftKey(), ownedDraft);
+      if (!input.value && (composerKey ?? currentKey()) === draftKey) input.value = raw;
       grow();
       toast(NO_HANDLE, { error: true, ms: 8000 });
       return;
     }
     // Sending the restored text again supersedes the bubble it came from.
-    for (const old of pendingSends.filter((item) => item.restored && item.state === "failed" && item.text === text && inCurrentChat(item)))
+    for (const old of pendingSends.filter(
+      (item) => item.state === "failed" && sendKey(item) === draftKey && (item.draft ?? item.text) === raw,
+    ))
       pendingSends.splice(pendingSends.indexOf(old), 1);
     pendingSends.push(send);
     renderFeed();
@@ -1077,19 +1146,17 @@ export function mountChat(client, media, slash, memory) {
       );
       if (!send) return;
       if (pendingDismiss) {
+        // Only a refused message's untouched draft goes with its bubble; an edited one is a new, unsent message, and an unconfirmed send may still arrive.
+        const original = send.draft ?? send.text,
+          taken = send.state === "failed" ? settleHandle(send, takeDraftIf) : null;
         pendingSends.splice(pendingSends.indexOf(send), 1);
-        const held = drafts.get(draftKey(send.projectId, send.chatId));
-        // Only a draft the owner has not touched goes with its bubble; an edited one is a new, unsent message.
-        if (held?.sendId === send.id && held.text === held.original) {
-          if (input.value === held.text) {
-            input.value = "";
-            grow();
-          }
-          drafts.delete(draftKey(send.projectId, send.chatId));
+        renderFeed();
+        if (taken && (await taken) && inCurrentChat(send) && input.value === original) {
+          input.value = "";
+          grow();
         }
       }
       follow.follow();
-      if (pendingRetry) send.restored = false;
       renderFeed();
       if (pendingRetry) await deliver(send);
       return;
@@ -1099,20 +1166,23 @@ export function mountChat(client, media, slash, memory) {
       const failed = (state.view?.jobs ?? []).find((item) => item.id === retry.dataset.retryJob);
       if (!failed || retry.disabled) return;
       retry.disabled = true; // a second click must not resend
-      const { projectId, chatId } = state; // the recipient is the chat the failed turn is in, whatever the owner opens meanwhile
+      const { projectId, chatId } = state, // the recipient is the chat the failed turn is in, whatever the owner opens meanwhile
+        hostPrefix = client.storagePrefix;
       // One failed turn is one delivery: a click after a lost ack reuses the pending send, and its request id, instead of starting another.
-      let send = pendingSends.find((item) => item.retryOf === failed.id && item.projectId === projectId && item.chatId === chatId);
+      let send = pendingSends.find(
+        (item) => item.retryOf === failed.id && item.hostPrefix === hostPrefix && item.projectId === projectId && item.chatId === chatId,
+      );
       if (!send) {
         send = {
-          id: await retryId(projectId, chatId, failed.id),
+          id: await retryId(hostPrefix, projectId, chatId, failed.id),
           retryOf: failed.id,
           projectId,
           chatId,
+          hostPrefix,
           text: failed.text,
           ...(failed.attachments ? { attachments: failed.attachments } : {}),
           state: "sending",
           error: "",
-          restored: false,
           refused: false,
           failedRead: 0,
         };

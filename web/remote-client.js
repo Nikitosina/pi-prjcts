@@ -1,6 +1,7 @@
 import { openTunnel } from "/inbox-wire/tunnel.js";
 import { get, put, deleteKey } from "/inbox-wire/store.js";
 import { generateSigningKey, keyId } from "/inbox-wire/wire.js";
+import { dropHostDrafts } from "./drafts.js";
 
 const deviceKey = (id) => `inbox-device:${id}`;
 const endpoint = (entry) => `wss://${new URL(entry.relayOrigin).host}/ws`;
@@ -91,7 +92,10 @@ export async function remoteTransport(entry) {
   function lost(error) {
     active = null;
     if (stopped) return;
-    if (error.code === 4403) return close("revoked");
+    if (error.code === 4403) {
+      dropHostDrafts(entry.hostId);
+      return close("revoked");
+    }
     state("offline");
     clearTimeout(timer);
     timer = setTimeout(connect, delay);

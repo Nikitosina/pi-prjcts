@@ -4,6 +4,7 @@
 import { uuid } from "./api.js";
 import { clip, esc, markdown, oneLine, shortModel } from "./format.js";
 import { emit, fail, inline, on, state, toast } from "./state.js";
+import { draftRevision, hostAgentDraftKey, joinDraft, loadDraft, restoreDraft, settleDraft, typeDraft } from "./drafts.js";
 
 export function mountHostagent(client, chat, media) {
   const { forgetReveals, mergeGroups, morph, showThinking, thinkingHtml, transcriptClick, transcriptFocus, transcriptHtml } = chat;
@@ -393,6 +394,22 @@ export function mountHostagent(client, chat, media) {
 
   // ---------------------------------------------------------------------------------------------------------------- composer
 
+  // One draft per host, stored on this tab's own input only; a successful send removes it if it still holds exactly the sent text.
+  const draftKey = hostAgentDraftKey(client.storagePrefix);
+  function grow() {
+    input.style.height = "auto";
+    input.style.height = `${Math.min(input.scrollHeight, 240)}px`;
+  }
+  const stored = loadDraft(draftKey);
+  if (stored) {
+    input.value = stored.text;
+    input.setSelectionRange(stored.caret, stored.caret);
+    requestAnimationFrame(grow);
+  }
+  input.addEventListener("input", () => {
+    typeDraft(draftKey, input.value, input.selectionStart);
+    grow();
+  });
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
@@ -401,22 +418,35 @@ export function mountHostagent(client, chat, media) {
   });
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const text = input.value.trim();
+    const raw = input.value,
+      text = raw.trim();
     if (!text || !available || form.dataset.sending === "1") return;
     form.dataset.sending = "1";
     input.value = "";
+    grow();
+    const rev = await draftRevision(draftKey, raw);
     try {
       await client.call("host-agent-send", { requestId: uuid(), text });
-      error = "";
-      await loadHostAgent();
     } catch (reason) {
-      input.value = text;
+      // The Host agent has no bubble to keep a refused text: it joins what the composer and the stored draft hold now, replacing neither.
+      input.value = joinDraft(input.value, raw);
+      grow();
+      await restoreDraft(draftKey, raw, rev, input.value);
+      delete form.dataset.sending;
       // "has no model" / "not in the model catalog": say it where the owner is looking and open the model picker.
       if (/model/i.test(reason.message ?? "")) {
         error = reason.message;
         paint();
         toggleSettings(true);
       } else fail(reason);
+      return;
+    }
+    try {
+      await settleDraft(draftKey, rev, raw);
+      error = "";
+      await loadHostAgent();
+    } catch (reason) {
+      fail(reason);
     } finally {
       delete form.dataset.sending;
     }

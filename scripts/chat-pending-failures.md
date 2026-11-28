@@ -44,7 +44,7 @@ Written before the code. The saved request is the intent: a restart continues it
 - R6 The saved effective content stays in the record after admission.
 - R7 The attachment block delivered after a restart differs from the one saved (a renamed or deleted upload changes the text).
 - R8 A turn-card Retry whose ack was lost sends under a new request id on the next click, so the chat gets two turns.
-- R9 A browser reload with a message in flight loses the bubble: the owner types it again (a duplicate) or sees nothing about it. A recovery handle must survive the reload, belong to one project and chat, and never leak into another.
+- R9 A browser reload with a message in flight loses the bubble: the owner types it again (a duplicate) or sees nothing about it. A recovery handle must survive the reload, belong to one project and chat, and never leak into another. A delivered send whose handle goes before its draft is deleted leaves that draft behind for good when the page reloads in between; so does a send that goes before its handle knows the draft revision it took.
 - R10 A restored draft that the owner edited stays tied to the old bubble: the old bubble hides Retry, or sending the edit reuses the old request id.
 - R11 A JSON error that did not come from the host's own refusal (a gateway) is taken as proof that nothing was sent, so the draft is restored and a second copy can be sent.
 - R12 A Telegram replay of a record saved before origins were stored is refused as a different message, or a conflicting replay (other text, other chat, a web record) is accepted.
@@ -74,7 +74,7 @@ Written before the code. Each case runs through the page and the private browser
 - R31 A repeat of a record without saved content (legacy, queued or running, no runtime receipt) is rebuilt from the text under its original id when the repeat comes from the owner; only the saved content or a runtime receipt is evidence.
 - R32 A crash between the runtime taking the message and the skill grant loses the grant (the restart finds the receipt and only marks the record admitted), or a restart grants the skill again by resubmitting; a refused send grants a skill.
 - R33 The page cannot store the recovery handle (storage full, denied) and sends anyway, so a reload loses the message with no trace; or the draft is cleared and the message is dropped.
-- R34 Dismissing the failed bubble of a restored draft the owner already edited clears the edited, unsent draft.
+- R34 Dismissing the failed bubble of a restored draft the owner already edited clears the edited, unsent draft. Dismiss drops the handle before the untouched draft is taken, so a reload in between leaves that draft without its bubble.
 - R35 A memory write older than the 50 most recent is offered Undo because it is absent from the recent list; an undone or changed write shows an Undo that fails. A legitimate old Undo must still work, checked only for the writes on screen and never with a send.
 - R36 A repeat of a message the host already admitted, sent after its project went inactive, is answered with the host's refusal marker, so the page may treat a held message as not sent. Only a first send may be called a proven refusal.
 - R37 A recovery handle another tab removed is trusted from the page's cache, so Retry sends without a handle on disk; and when Retry cannot store the handle the bubble drops from "Delivery not confirmed" to "Not sent" although the first attempt may have been admitted.
