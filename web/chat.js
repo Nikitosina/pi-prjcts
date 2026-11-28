@@ -220,11 +220,10 @@ export function mountChat(client, media, slash, memory) {
   // The composer shows the draft of the open chat. It is stored on this tab's own input only; switching, reloading and closing never write it.
   // The text of a send in flight stays stored until the host admits the message, so a refusal can give it back, but it is not shown as a draft meanwhile.
   const currentKey = () => chatDraftKey(client.storagePrefix, state.projectId, state.chatId);
-  // A handle stored before sends named their host comes from an inbox that had no remote hosts yet, so it belongs to the local host.
-  const sendPrefix = (send) => send.hostPrefix ?? "";
-  const sendKey = (send) => send.draftKey ?? chatDraftKey(sendPrefix(send), send.projectId, send.chatId);
+  // A handle stored before sends named their host is shown in the local chat only, so it appears once; its host is unknown, so it is never retried.
+  const sendKey = (send) => send.draftKey ?? chatDraftKey(send.hostPrefix ?? "", send.projectId, send.chatId);
   /** The host that owns the send's project: carried by the send, so the selection at the time of a Retry never decides it. */
-  const sendHost = (send) => client.owning(sendPrefix(send));
+  const sendHost = (send) => (send.hostPrefix === undefined ? null : client.owning(send.hostPrefix));
   const carets = new Map(); // draft key → the composer's text and caret when the owner left that chat, for this page's lifetime
   let composerKey = null; // the draft the composer shows
   /** A refused message whose exact text the composer holds now needs no Retry: sending the composer sends it. */
@@ -928,7 +927,10 @@ export function mountChat(client, media, slash, memory) {
   form.addEventListener("dragover", (event) => {
     if (event.dataTransfer?.types.some((type) => type === "Files" || type === "text/uri-list")) event.preventDefault();
   });
-  form.addEventListener("drop", (event) => takePaths(event, event.dataTransfer, false));
+  form.addEventListener("drop", (event) => {
+    if (input.disabled) return event.preventDefault();
+    takePaths(event, event.dataTransfer, false);
+  });
   input.addEventListener("paste", (event) => takePaths(event, event.clipboardData, true));
   /** A dropped or pasted file URL becomes its plain path in the draft; a bare File gets the Copy as Pathname hint; other content takes the browser's way. */
   function takePaths(event, transfer, replaceSelection) {

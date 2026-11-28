@@ -11,7 +11,7 @@ nothing is evicted for size.
 - D2 Switching back to a chat shows an empty composer, or the text without the caret the owner left.
 - D3 A reload loses the draft, or shows the draft of another chat.
 - D4 A draft of project A / chat X appears in project B / chat X (same chat id, other project).
-- D31 The owner types before the first chat opens (a slow remote host can delay it for seconds): the text belongs to no chat and is replaced when the chat opens.
+- D31 The owner types before the first chat opens (a slow remote host can delay it for seconds): the text, typed or dropped, belongs to no chat and is replaced when the chat opens.
 
 ## Two tabs
 
@@ -58,4 +58,4 @@ nothing is evicted for size.
 - D22 Forget host leaves the remote host's drafts or pending-send handles in this browser, or removes local ones or another host's.
 - D22b An input or a Host agent restore of the forgotten host, in any tab, still waiting for its lock writes the draft back after Forget host.
 - D23 A revoked device leaves the host's drafts or pending-send handles in this browser.
-- D28 The failed-turn Retry of a remote chat creates a send without the owning host, so the host is whichever one is selected when the send is made or retried, and its draft key follows the selection. A send whose host was forgotten goes to another host instead of failing closed. A handle stored before sends named their host is shown or retried on whichever host is selected instead of the local host, the only host such an inbox had. Two hosts with copied homes share project, chat and failed-turn ids, and their failed-turn Retries share one pending send and request id.
+- D28 The failed-turn Retry of a remote chat creates a send without the owning host, so the host is whichever one is selected when the send is made or retried, and its draft key follows the selection. A send whose host was forgotten goes to another host instead of failing closed. A handle stored before sends named their host is retried at all, or shown in every host's chat with the same ids instead of once, in the local chat. Two hosts with copied homes share project, chat and failed-turn ids, and their failed-turn Retries share one pending send and request id.

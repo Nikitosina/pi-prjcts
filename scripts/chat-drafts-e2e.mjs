@@ -370,12 +370,18 @@ await kit.run(async () => {
     await slow.waitFor(`!!document.querySelector('#composer-input') && !!window.__openList`, "slow page");
     await kit.delay(500);
     const before = await slow.evaluate(`document.querySelector('#composer-input').disabled`);
+    const dropped = await slow.evaluate(`(() => {
+      const data = new DataTransfer();
+      data.setData("text/uri-list", "file:///tmp/dropped-before-chat");
+      document.querySelector('#composer').dispatchEvent(new DragEvent("drop", { dataTransfer: data, bubbles: true, cancelable: true }));
+      return document.querySelector('#composer-input').value;
+    })()`);
     await slow.evaluate(`window.__openList()`);
     await slow.waitFor(`document.body.dataset.ready === "1"`, "slow page ready");
     check(
       "D31 the composer is off until a chat opens, and on after",
-      before === true && (await slow.evaluate(`document.querySelector('#composer-input').disabled`)) === false,
-      before,
+      before === true && dropped === "" && (await slow.evaluate(`document.querySelector('#composer-input').disabled`)) === false,
+      { before, dropped },
     );
   });
   // D32: an unconfirmed send hides only the revision it took; the same text typed again is a new draft and stays.
@@ -398,7 +404,7 @@ await kit.run(async () => {
     );
     await a.empty();
   });
-  // D28: a pending handle stored before sends named their host came from an inbox without remote hosts, so it belongs to the local host.
+  // D28: a pending handle stored before sends named their host is shown once, in the local chat, and fails closed on Retry.
   await section("handle without a host", async () => {
     await page.evaluate(
       `localStorage.setItem("pi-pending-send:00000000-0000-4000-8000-00000000d028", JSON.stringify({ id: "00000000-0000-4000-8000-00000000d028", projectId: ${JSON.stringify(A)}, chatId: "main", text: "hostless MARK-HOSTLESS" }))`,
@@ -407,13 +413,14 @@ await kit.run(async () => {
     await open(page);
     await page.waitFor(`!!document.querySelector('#feed [data-pending-retry]')`, "hostless bubble");
     await page.evaluate(`document.querySelector('#feed [data-pending-retry]').click()`);
-    await a.reply("hostless MARK-HOSTLESS");
+    await page.waitFor(`document.body.innerText.includes("does not know the host")`, "fail-closed toast");
     check(
-      "D28 a handle without its host is retried on the local host",
-      (await page.evaluate(`window.__calls.filter((c) => c.action === "message").length`)) === 1 &&
+      "D28 a handle without its host is never sent",
+      (await page.evaluate(`window.__calls.filter((c) => c.action === "message").length`)) === 0 &&
         (await a.owners("MARK-HOSTLESS")).length === 1,
       await page.evaluate(`window.__calls`),
     );
+    await page.evaluate(`document.querySelector('#feed [data-pending-dismiss]').click()`);
   });
   // D12, D14: a refusal gives the text back to an empty composer, and it survives a reload; Dismiss takes the unedited draft.
   await section("refusal", async () => {
