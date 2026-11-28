@@ -21,6 +21,9 @@ nothing is evicted for size.
 - D9 A sends and the host admits the message: the sent text stays stored and comes back as a draft after a reload.
 - D10 Between the send and its ack the sent text shows again as a draft (chat switch or reload while sending).
 
+- D25 Another tab writes a newer draft between A's check ("the stored text equals what I sent") and A's delete, and the delete removes the newer text: the check and the delete are not one step across tabs. Likewise an earlier input write that waited its turn must never overwrite a later one.
+- D27 A second tab's copy of the same pending message settles the same send a second time and deletes a fresh draft that happens to read the same as the sent text.
+
 ## Refusal
 
 - D11 A refused message restored in A overwrites the newer draft B stored for that chat.
@@ -43,8 +46,11 @@ nothing is evicted for size.
 - D19 The Host agent composer keeps no draft over a reload, or shares its draft with a chat.
 - D20 A successful Host agent send leaves its text stored, or deletes a newer draft typed meanwhile; a refused send loses the text.
 
+- D26 A Host agent send is refused while another tab stored a newer Host agent draft: the refused text lives only in the field, so a reload loses it (the Host agent has no bubble). It must be kept under its own key, shown as Retry and Dismiss, and never overwrite the newer draft.
+
 ## Remote hosts
 
 - D21 A remote host's draft is stored under the local key, so a local chat with the same ids shows it.
 - D22 Forget host leaves the remote host's drafts in this browser, or removes local drafts or another host's.
 - D23 A revoked device leaves the host's drafts in this browser.
+- D28 The failed-turn Retry of a remote chat creates a send without the owning host, so the host is whichever one is selected when the send is made or retried, and its draft key follows the selection.

@@ -2,6 +2,7 @@
 // revoked device (chat-drafts-failures.md D21-D23). Two real hosts, a local relay, one Chrome.
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { inboxRelay } from "./lib/inbox-relay.mjs";
 import { createKit, say } from "./lib/e2e-kit.mjs";
@@ -83,6 +84,34 @@ try {
         await openProject(hostId, "Remote drafts", "seed remote");
         check("D21 the remote chat shows its own draft", (await composer()) === "remote draft MARK-R", await composer());
         await page.shot("remote-switch-remote", { force: true });
+      });
+
+      // D28: the failed-turn Retry of a remote chat names the remote host as the send's owner.
+      await guarded("failed-turn retry", async () => {
+        const failedId = randomUUID();
+        mkdirSync(join(remote.home, remoteProject, "inbox"), { recursive: true });
+        writeFileSync(
+          join(remote.home, remoteProject, "inbox", `${failedId}.json`),
+          JSON.stringify({
+            id: failedId,
+            text: "turn card MARK-D28",
+            state: "failed",
+            error: "provider exploded",
+            at: new Date(Date.now() + 60000).toISOString(),
+            admitted: true,
+          }),
+        );
+        await openProject("local", "Local drafts", "seed local");
+        await openProject(hostId, "Remote drafts", "seed remote");
+        await page.waitFor(`!!document.querySelector('[data-retry-job="${failedId}"]')`, "turn card Retry");
+        await q(
+          `(() => { window.__handles = []; const set = Storage.prototype.setItem; Storage.prototype.setItem = function (key, value) { if (key.startsWith("pi-pending-send:")) window.__handles.push(JSON.parse(value)); return set.call(this, key, value); }; })()`,
+        );
+        await q(`document.querySelector('[data-retry-job="${failedId}"]').click()`);
+        await page.waitFor(`window.__handles.length > 0`, "pending handle stored");
+        const handle = await q(`window.__handles[0]`);
+        check("D28 the failed-turn Retry send carries its owning host", handle.hostPrefix === `pi-host:${hostId}:`, handle);
+        await page.waitFor(`document.querySelector('#feed').innerText.includes("ACK turn card MARK-D28")`, "retry answered");
       });
 
       // D22: Forget host removes that host's drafts only.

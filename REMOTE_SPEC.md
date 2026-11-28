@@ -268,6 +268,8 @@ The local inbox (`web/` served by the local host on `127.0.0.1`) shows and contr
     - A tab writes a draft only on an `input` event in that tab, never on a chat switch, reload or `pagehide`; an idle tab never overwrites or deletes another tab's draft.
     - A draft is deleted only by a successful send when the stored text equals the sent text exactly (no trimming), by the owner emptying the field, by Dismiss of a refused message, by a confirmed archive of the chat, and by Forget host or revocation of the device. Nothing is evicted silently; a browser that cannot store a draft tells the owner.
     - A refused or failed send keeps a durable copy until a successful send or Dismiss, across switches and reloads. A refusal never overwrites a newer draft of another tab: the bubble keeps the text with Retry, and the newer draft stays in the composer.
+    - Every read-modify-write of one draft key runs inside a Web Lock named after the key, so tabs take turns and a check followed by a delete never removes another tab's newer text. A tab's input write waits for its turn, and a later input overtakes an earlier one still waiting. A send settles once across tabs (a mark that outlives the pending handle), so a second tab's copy never deletes a fresh draft.
+    - A refused Host agent text, which has no bubble, is kept under its own key and shown as a Retry and Dismiss row until one of them. Every pending send carries its owning host, the failed-turn Retry included.
 18. The CSP of `src/web.ts` adds `wss://<relay host>` to `connect-src` for each configured relay origin.
 19. The PWA is not changed. The client module in `web/` is written so the PWA can reuse it later.
 

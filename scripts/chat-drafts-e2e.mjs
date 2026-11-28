@@ -32,13 +32,26 @@ const wrapFetch = `(() => {
       delete rule.fail;
       return real(url, { ...init, body: JSON.stringify({ ...body, chatId: crypto.randomUUID() }) });
     }
+    if (rule.fail === "refuse") {
+      delete rule.fail;
+      return new Response(JSON.stringify({ ok: false, error: "refused for the test", refused: true }), { status: 409 });
+    }
     return real(url, init);
   };
 })()`;
 // Every draft write and removal of a page, kept in sessionStorage so it survives a reload; a tab's only legitimate cause is its own input event.
 const logWrites = `(() => {
   const note = (kind, key) => { if (String(key).includes("pi-draft:")) sessionStorage.setItem("__draftWrites", JSON.stringify([...JSON.parse(sessionStorage.getItem("__draftWrites") ?? "[]"), kind + " " + key])); };
-  const set = Storage.prototype.setItem, remove = Storage.prototype.removeItem;
+  const set = Storage.prototype.setItem, remove = Storage.prototype.removeItem, get = Storage.prototype.getItem;
+  Storage.prototype.getItem = function (key) {
+    const value = get.call(this, key);
+    if (window.__spin && String(key).includes("pi-draft:")) {
+      window.__spin = false;
+      set.call(this, "__spinning", "1");
+      for (const end = Date.now() + 1500; Date.now() < end; );
+    }
+    return value;
+  };
   Storage.prototype.setItem = function (key, value) { if (window.__deny && String(key).includes("pi-draft:")) throw new DOMException("quota", "QuotaExceededError"); note("set", key); return set.call(this, key, value); };
   Storage.prototype.removeItem = function (key) { note("remove", key); return remove.call(this, key); };
 })()`;
@@ -74,11 +87,14 @@ await kit.run(async () => {
     type: async (text, selector = "#composer-input") => {
       await target.evaluate(`document.querySelector(${JSON.stringify(selector)}).focus()`);
       await target.cdp("Input.insertText", { text });
+      await kit.delay(80);
     },
-    empty: () =>
-      target.evaluate(
+    empty: async () => {
+      await target.evaluate(
         `(() => { const box = document.querySelector('#composer-input'); box.value = ""; box.dispatchEvent(new Event("input")); })()`,
-      ),
+      );
+      await kit.delay(80);
+    },
     send: () => target.evaluate(`document.querySelector('#composer').requestSubmit()`),
     reply: (text) =>
       target.waitFor(`document.querySelector('#feed').innerText.includes(${JSON.stringify(`ACK ${text}`)})`, `reply to ${text}`),
@@ -109,7 +125,7 @@ await kit.run(async () => {
   const section = async (name, body) => {
     for (const created of extra.splice(0)) await created.close().catch(() => {});
     await page.evaluate(
-      `(() => { for (const k of Object.keys(localStorage)) if (k.includes("pi-draft:") || k.startsWith("pi-pending-send")) localStorage.removeItem(k); sessionStorage.removeItem("__draftWrites"); })()`,
+      `(() => { for (const k of Object.keys(localStorage)) if (k.includes("pi-draft:") || k.startsWith("pi-pending-send") || k.startsWith("pi-send-settled") || k === "__spinning") localStorage.removeItem(k); sessionStorage.removeItem("__draftWrites"); })()`,
     );
     await page.reload();
     await open(page);
@@ -267,6 +283,71 @@ await kit.run(async () => {
     await b2.empty();
     await tabB2.close();
     await a.send();
+  });
+  // D25: another tab writes between A's check and A's delete; every read-modify-write of a key takes turns across tabs.
+  await section("atomic cleanup", async () => {
+    await a.type("base");
+    const tabB6 = await newTab();
+    const b6 = tab(tabB6);
+    await open(tabB6);
+    check("D3 tab B shows the draft A typed", (await b6.composer()) === "base", await b6.composer());
+    await page.evaluate(`__hold("message")`);
+    await a.send();
+    await page.waitFor(`document.querySelectorAll('#feed .msg.owner.pending').length === 1`, "pending base for D25");
+    await page.evaluate(`window.__spin = true; __release("message")`);
+    await tabB6.waitFor(`localStorage.getItem("__spinning") === "1"`, "A is between its check and its delete");
+    await b6.type(" more");
+    await a.reply("base");
+    await kit.delay(500);
+    check(
+      "D25 a draft written between the check and the delete survives",
+      (await a.stored(key(A, "main"))) === "base more",
+      await a.stored(key(A, "main")),
+    );
+    await tabB6.close();
+    await a.empty();
+    // The input path takes its turn: while another tab holds the key, typing waits, and the later text is the one written.
+    const holder = await newTab();
+    await open(holder);
+    await holder.evaluate(
+      `void navigator.locks.request(${JSON.stringify(`pi-draft-lock:${key(A, "main")}`)}, () => new Promise((end) => { window.__unlock = end; }))`,
+    );
+    await holder.waitFor(`!!window.__unlock`, "lock held by the other tab");
+    await a.type("x");
+    await a.type("y");
+    check("D25 typing waits while another tab holds the key", (await a.stored(key(A, "main"))) === null, await a.stored(key(A, "main")));
+    await holder.evaluate(`window.__unlock()`);
+    await page.waitFor(`localStorage.getItem(${JSON.stringify(key(A, "main"))}) !== null`, "typed text written");
+    check("D25 the later input is the one stored", (await a.stored(key(A, "main"))) === "xy", await a.stored(key(A, "main")));
+    await holder.close();
+    await a.empty();
+  });
+  // D27: a second tab's copy of a pending send settles it once more only on paper.
+  await section("settled once", async () => {
+    await a.type("same MARK-SAME");
+    await page.evaluate(`__hold("message")`);
+    await a.send();
+    await page.waitFor(`document.querySelectorAll('#feed .msg.owner.pending').length === 1`, "pending same");
+    const tabB7 = await newTab();
+    const b7 = tab(tabB7);
+    await open(tabB7);
+    await tabB7.waitFor(`!!document.querySelector('#feed [data-pending-retry]')`, "B's copy of the pending send");
+    await tabB7.evaluate(`__hold("show")`);
+    await page.evaluate(`__release("message")`);
+    await a.reply("same MARK-SAME");
+    await page.waitFor(`localStorage.getItem(${JSON.stringify(key(A, "main"))}) === null`, "A's draft settled");
+    await a.type("same MARK-SAME");
+    const fresh = await a.stored(key(A, "main"));
+    await tabB7.evaluate(`__release("show")`);
+    await tabB7.waitFor(`!document.querySelector('#feed .msg.owner.pending')`, "B's copy settled");
+    await kit.delay(500);
+    check(
+      "D27 the same send settles once across tabs: the fresh identical draft stays",
+      fresh === "same MARK-SAME" && (await a.stored(key(A, "main"))) === "same MARK-SAME" && (await b7.owners("MARK-SAME")).length === 1,
+      await a.stored(key(A, "main")),
+    );
+    await tabB7.close();
+    await a.empty();
   });
   // D12, D14: a refusal gives the text back to an empty composer, and it survives a reload; Dismiss takes the unedited draft.
   await section("refusal", async () => {
@@ -453,6 +534,7 @@ await kit.run(async () => {
       await tabB4.evaluate(
         `(() => { const box = document.querySelector('#ha-composer textarea'); box.value = ""; box.dispatchEvent(new Event("input")); })()`,
       );
+      await kit.delay(150);
       return a.stored(HOST_KEY);
     };
     check(
@@ -470,6 +552,65 @@ await kit.run(async () => {
       "D20 a successful Host agent send removes its draft",
       typedAsk === "plain ask MARK-HA2" && (await a.stored(HOST_KEY)) === null,
       await a.stored(HOST_KEY),
+    );
+  });
+  // D26: a refused Host agent text keeps a durable home that a newer draft of another tab never overwrites.
+  await section("host agent refusal", async () => {
+    const settings = await rpc({ action: "host-agent-settings" });
+    await rpc({ action: "host-agent-settings", revision: settings.revision, patch: { model: "fake/fake-model" } });
+    const openAgent = async (target) => {
+      await target.evaluate(`document.querySelector('[data-cmd="host-agent"]').click()`);
+      await target.waitFor(
+        `document.querySelector('#host-agent').dataset.open === "1" && getComputedStyle(document.querySelector('#host-agent')).visibility === "visible" && !document.querySelector('#ha-composer textarea').disabled`,
+        "host agent open",
+      );
+    };
+    const closeAgent = (target) => target.evaluate(`document.querySelector('#host-agent [data-cmd="host-agent"]').click()`);
+    const box = (target) => target.evaluate(`document.querySelector('#ha-composer textarea').value`);
+    const row = (target) =>
+      target.evaluate(`document.querySelector('#ha-refused').hidden ? "" : document.querySelector('#ha-refused').innerText`);
+    await openAgent(page);
+    await a.type("refuse me MARK-HAR", "#ha-composer textarea");
+    await closeAgent(page);
+    const tabB8 = await newTab();
+    await open(tabB8);
+    await openAgent(tabB8);
+    await tab(tabB8).type(" NEWER", "#ha-composer textarea");
+    await closeAgent(tabB8);
+    await tabB8.close();
+    await page.evaluate(`__rule("host-agent-send", { fail: "refuse" })`);
+    await page.evaluate(`document.querySelector('#ha-composer').requestSubmit()`);
+    await page.waitFor(`!document.querySelector('#ha-refused').hidden`, "refused row");
+    await page.reload();
+    await open(page);
+    await openAgent(page);
+    check(
+      "D26 the refused text survives a reload on a Retry and Dismiss row, and the newer draft is untouched",
+      (await row(page)).includes("refuse me MARK-HAR") &&
+        (await box(page)) === "refuse me MARK-HAR NEWER" &&
+        (await a.stored(HOST_KEY)) === "refuse me MARK-HAR NEWER",
+      { row: await row(page), box: await box(page), stored: await a.stored(HOST_KEY) },
+    );
+    await page.shot("host-agent-refused-row", { force: true });
+    await page.evaluate(`document.querySelector('[data-ha-refused-retry]').click()`);
+    await page.waitFor(`document.querySelector('#ha-refused').hidden`, "refused row gone after Retry");
+    check(
+      "D26 Retry sends the refused text and leaves the newer draft",
+      (await a.stored(HOST_KEY)) === "refuse me MARK-HAR NEWER" && (await a.stored("pi-draft:host-agent-refused")) === null,
+      await a.stored(HOST_KEY),
+    );
+    await page.evaluate(
+      `(() => { const agent = document.querySelector('#ha-composer textarea'); agent.value = ""; agent.dispatchEvent(new Event("input")); __rule("host-agent-send", { fail: "refuse" }); })()`,
+    );
+    await a.type("second MARK-HAR2", "#ha-composer textarea");
+    await page.evaluate(`document.querySelector('#ha-composer').requestSubmit()`);
+    await page.waitFor(`!document.querySelector('#ha-refused').hidden`, "second refused row");
+    await page.evaluate(`document.querySelector('[data-ha-refused-dismiss]').click()`);
+    await page.waitFor(`document.querySelector('#ha-refused').hidden`, "refused row gone after Dismiss");
+    check(
+      "D26 Dismiss takes the row and the untouched draft",
+      (await a.stored("pi-draft:host-agent-refused")) === null && (await a.stored(HOST_KEY)) === null && (await box(page)) === "",
+      { refused: await a.stored("pi-draft:host-agent-refused"), draft: await a.stored(HOST_KEY), box: await box(page) },
     );
   });
 });

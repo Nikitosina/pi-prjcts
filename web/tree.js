@@ -3,7 +3,7 @@
 // their row's button or Mod+Shift+E after a confirmation, with Undo. With remote hosts the projects sit in one group per host
 // (web/hosts.js): the local host first; a host that is not online collapses to its header row.
 import { esc, clip } from "./format.js";
-import { chatDraftKey, dropDraft } from "./drafts.js";
+import { chatDraftKey, removeDraft } from "./drafts.js";
 import { binding, display, onBindingsChange } from "./hotkeys.js";
 import { emit, fail, on, stale, state, toast } from "./state.js";
 import { groupOf, groups, HostState, online, remoteGroups } from "./hosts.js";
@@ -190,7 +190,7 @@ export function mountTree(client) {
           `“${clip(chat.title, 40)}” is answering. Open it and stop the turn (${display(binding("stop"))}) before archiving.`,
         );
       await (host ?? client).call("chat-update", { id: projectId, chatId: chat.id, archived: true });
-      dropDraft(chatDraftKey((host ?? client).storagePrefix, projectId, chat.id));
+      void removeDraft(chatDraftKey((host ?? client).storagePrefix, projectId, chat.id));
       done();
       const rest = (chatsByProject.get(chatKey(projectId, host)) ?? []).filter((item) => item.id !== chat.id),
         left = (id) => rest.some((item) => item.id === id),
