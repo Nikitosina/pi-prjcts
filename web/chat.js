@@ -5,6 +5,7 @@ import { clip, clock, dur, esc, imagesHtml, markdown, oneLine } from "./format.j
 import { FILE_ONLY_NOTE, PathSource, insertText, pathsFromTransfer } from "./path-drop.js";
 import { chatArgs, emit, fail, on, stale, state, toast } from "./state.js";
 import { follower } from "./follow.js";
+import { chatDraftKey, dropDraft, dropDraftIf, loadDraft, saveDraft } from "./drafts.js";
 
 export function mountChat(client, media, slash, memory) {
   const { hydrateMedia } = media;
@@ -53,6 +54,8 @@ export function mountChat(client, media, slash, memory) {
           typeof item.text === "string" &&
           item.text &&
           (item.retryOf === undefined || typeof item.retryOf === "string") &&
+          (item.draft === undefined || typeof item.draft === "string") &&
+          (item.draftKey === undefined || typeof item.draftKey === "string") &&
           (item.attachments === undefined || (Array.isArray(item.attachments) && item.attachments.every((id) => typeof id === "string")))
         ) {
           savedHandles.set(item.id, localStorage.getItem(key));
@@ -63,6 +66,8 @@ export function mountChat(client, media, slash, memory) {
             text: item.text,
             ...(item.retryOf ? { retryOf: item.retryOf } : {}),
             ...(item.attachments ? { attachments: item.attachments } : {}),
+            ...(item.draft !== undefined ? { draft: item.draft } : {}),
+            ...(item.draftKey ? { draftKey: item.draftKey } : {}),
             state: "unconfirmed",
             error: "This page was reloaded before the host confirmed the message.",
             restored: false,
@@ -75,7 +80,7 @@ export function mountChat(client, media, slash, memory) {
     return found;
   }
   /** Stores the handle before anything is sent; false when the browser cannot keep it, and then nothing may be sent: a reload would lose the message without a trace. */
-  function rememberSend({ id, projectId, chatId, text, attachments, retryOf }) {
+  function rememberSend({ id, projectId, chatId, text, attachments, retryOf, draft, draftKey }) {
     const stored = JSON.stringify({
       id,
       projectId,
@@ -83,6 +88,8 @@ export function mountChat(client, media, slash, memory) {
       text,
       ...(retryOf ? { retryOf } : {}),
       ...(attachments ? { attachments } : {}),
+      ...(draft !== undefined ? { draft } : {}),
+      ...(draftKey ? { draftKey } : {}),
     });
     try {
       localStorage.setItem(HANDLE_PREFIX + id, stored);
@@ -183,45 +190,56 @@ export function mountChat(client, media, slash, memory) {
     })();
     return run.promise;
   }
-  // A draft restored after a refusal, and whatever the owner makes of it, belongs to the chat it was sent from: the composer gives it up when another
-  // chat opens and takes it back when its chat returns. An edit makes it a different message than the failed bubble's, so that bubble gets its own Retry.
-  const drafts = new Map(); // "project/chat" → { text, original, sendId }: restored drafts, and what the owner made of them
-  const draftKey = (projectId = state.projectId, chatId = state.chatId) => `${projectId}/${chatId}`;
-  let composerKey = null; // the chat whose draft the composer shows
-  const forgetRestored = (sendId) => {
-    const send = pendingSends.find((item) => item.id === sendId);
-    if (send?.restored) send.restored = false;
+  // The composer shows the draft of the open chat. It is stored on this tab's own input only; switching, reloading and closing never write it.
+  // The text of a send in flight stays stored until the host admits the message, so a refusal can give it back, but it is not shown as a draft meanwhile.
+  const currentKey = () => chatDraftKey(client.storagePrefix, state.projectId, state.chatId);
+  const sendKey = (send) => send.draftKey ?? chatDraftKey(client.storagePrefix, send.projectId, send.chatId);
+  const carets = new Map(); // draft key → the composer's text and caret when the owner left that chat, for this page's lifetime
+  let composerKey = null; // the draft the composer shows
+  let unkept = false; // the browser refused to store the draft, and the owner was told
+  function visibleDraft(key) {
+    const stored = loadDraft(key);
+    if (!stored) return null;
+    const flying = pendingSends.some(
+      (send) => send.draft === stored.text && sendKey(send) === key && (send.state === "sending" || send.state === "unconfirmed"),
+    );
+    return flying ? null : stored;
+  }
+  function showDraft(key) {
+    const draft = visibleDraft(key),
+      left = carets.get(key),
+      caret = left && left.text === (draft?.text ?? "") ? left.caret : (draft?.caret ?? 0);
+    input.value = draft?.text ?? "";
+    input.setSelectionRange(caret, caret);
+    grow();
+  }
+  const forgetRestored = (key) => {
+    let changed = false;
+    for (const send of pendingSends)
+      if (send.restored && send.state === "failed" && sendKey(send) === key && input.value !== (send.draft ?? send.text)) {
+        send.restored = false;
+        changed = true;
+      }
+    return changed;
   };
   input.addEventListener("input", () => {
-    const held = drafts.get(draftKey());
-    if (!held) return;
-    held.text = input.value;
-    if (input.value !== held.original) {
-      forgetRestored(held.sendId);
-      renderFeed();
+    const key = composerKey ?? currentKey();
+    if (saveDraft(key, input.value, input.selectionStart)) unkept = false;
+    else if (!unkept) {
+      unkept = true;
+      toast("This browser cannot keep that much text as a draft. It stays in the box, but a reload would lose it.", {
+        error: true,
+        ms: 8000,
+      });
     }
+    // An edit makes a restored draft a different message than the failed bubble's, so that bubble gets its own Retry.
+    if (forgetRestored(key)) renderFeed();
   });
   on("select", () => {
-    const now = draftKey(),
-      left = composerKey;
-    composerKey = now;
-    const away = left && left !== now ? drafts.get(left) : undefined;
-    if (away) {
-      if (input.value === away.text) {
-        input.value = "";
-        grow();
-      }
-      // An unedited restored draft goes back to the bubble's own Retry; an edited one waits for its chat.
-      if (away.text === away.original) {
-        forgetRestored(away.sendId);
-        drafts.delete(left);
-      }
-    }
-    const here = drafts.get(now);
-    if (here && !input.value) {
-      input.value = here.text;
-      grow();
-    }
+    const key = currentKey();
+    if (composerKey && composerKey !== key) carets.set(composerKey, { text: input.value, caret: input.selectionStart });
+    composerKey = key;
+    showDraft(key);
     older = [];
     olderGroups = null;
     follow.follow();
@@ -350,20 +368,29 @@ export function mountChat(client, media, slash, memory) {
         continue;
       }
       if (!job.admitted) continue;
-      send.state = "sent";
+      settleSent(send);
       const placed = job.entry !== undefined && (view.messages ?? []).some((item) => item.kind === "message" && item.entryId === job.entry);
       // A settled job whose message never reached the transcript leaves its outcome in the turn card; the bubble must not outlive it.
       if (placed || ["done", "failed", "interrupted"].includes(job.state)) pendingSends.splice(pendingSends.indexOf(send), 1);
     }
   }
-  /** A refusal the host reported and recorded no job for: the message was not sent, and its text goes back to an empty composer of the same chat. */
+  /** The host admitted the message: its draft is done, unless another tab stored a newer text since (no trimming in the comparison). */
+  function settleSent(send) {
+    send.state = "sent";
+    if (send.draft !== undefined) dropDraftIf(sendKey(send), send.draft);
+  }
+  /** A refusal the host reported and recorded no job for: the message was not sent. Its text is still the chat's stored draft, shown in the composer
+   * of that chat, unless the owner has written something else there since: then the bubble keeps the text and its Retry. */
   function failSend(send) {
     send.state = "failed";
+    const key = sendKey(send),
+      original = send.draft ?? send.text,
+      stored = loadDraft(key);
+    if (stored?.text === original) send.restored = true;
+    else if (!stored && inCurrentChat(send) && !input.value && saveDraft(key, original)) send.restored = true;
+    else return;
     if (inCurrentChat(send) && !input.value) {
-      input.value = send.text;
-      send.restored = true;
-      composerKey = draftKey(send.projectId, send.chatId);
-      drafts.set(composerKey, { text: send.text, original: send.text, sendId: send.id });
+      input.value = original;
       grow();
     }
   }
@@ -431,7 +458,7 @@ export function mountChat(client, media, slash, memory) {
     }
     // Only an ack that says the host admitted the message is delivery; any other answer waits for the ledger.
     if (pendingSends.includes(send) && send.state === "sending") {
-      if (job?.admitted && job.id === send.id) send.state = "sent";
+      if (job?.admitted && job.id === send.id) settleSent(send);
       else {
         send.state = "unconfirmed";
         send.refused = false;
@@ -898,8 +925,8 @@ export function mountChat(client, media, slash, memory) {
     const text = input.value.trim();
     if (!text || !state.projectId) return;
     const gen = state.generation,
-      ownedDraft = drafts.get(draftKey());
-    drafts.delete(draftKey());
+      raw = input.value,
+      draftKey = composerKey ?? currentKey();
     input.value = "";
     grow();
     follow.follow();
@@ -907,9 +934,10 @@ export function mountChat(client, media, slash, memory) {
     if (slash) {
       try {
         await slash.command.run(slash.argument);
+        dropDraftIf(draftKey, raw);
         if (!stale(gen)) void loadChat();
       } catch (error) {
-        if (!stale(gen) && !input.value) input.value = text;
+        if (!stale(gen) && !input.value) input.value = raw;
         fail(error);
       }
       return;
@@ -919,6 +947,8 @@ export function mountChat(client, media, slash, memory) {
       projectId: state.projectId,
       chatId: state.chatId,
       text,
+      draft: raw,
+      draftKey,
       state: "sending",
       error: "",
       restored: false,
@@ -927,8 +957,7 @@ export function mountChat(client, media, slash, memory) {
     };
     if (!rememberSend(send)) {
       // Nothing is sent without a handle that survives a reload: the text stays where the owner typed it.
-      if (!input.value) input.value = text;
-      if (ownedDraft) drafts.set(draftKey(), ownedDraft);
+      if (!input.value) input.value = raw;
       grow();
       toast(NO_HANDLE, { error: true, ms: 8000 });
       return;
@@ -1078,14 +1107,14 @@ export function mountChat(client, media, slash, memory) {
       if (!send) return;
       if (pendingDismiss) {
         pendingSends.splice(pendingSends.indexOf(send), 1);
-        const held = drafts.get(draftKey(send.projectId, send.chatId));
         // Only a draft the owner has not touched goes with its bubble; an edited one is a new, unsent message.
-        if (held?.sendId === send.id && held.text === held.original) {
-          if (input.value === held.text) {
+        const original = send.draft ?? send.text;
+        if (loadDraft(sendKey(send))?.text === original) {
+          if (inCurrentChat(send) && input.value === original) {
             input.value = "";
             grow();
           }
-          drafts.delete(draftKey(send.projectId, send.chatId));
+          dropDraft(sendKey(send));
         }
       }
       follow.follow();

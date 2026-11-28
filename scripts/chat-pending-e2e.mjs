@@ -360,8 +360,17 @@ await kit.run(async () => {
   );
   check("P6b the refused draft does not follow the owner into another chat", (await composer()) === "", await composer());
   await select(chatButton(A, "main"));
-  await page.waitFor(`!!document.querySelector('#feed [data-pending-retry]')`, "Retry on the bubble once the draft left the composer");
+  await page.waitFor(
+    `document.querySelectorAll('#feed .msg.owner[data-delivery="failed"]').length === 1`,
+    "failed bubble after coming back",
+  );
+  check(
+    "P6b the refused text is in its own chat's composer, not on the bubble's Retry",
+    (await composer()) === "late refusal MARK-LATEREFUSAL",
+    await composer(),
+  );
   await ev(`document.querySelector('#feed [data-pending-dismiss]').click()`);
+  check("P6b Dismiss takes the unedited draft with its bubble", (await composer()) === "", await composer());
 
   // P7b: the host recorded the message and then reported an error: not "Not sent", no restored draft.
   await reset();

@@ -4,6 +4,7 @@
 import { uuid } from "./api.js";
 import { clip, esc, markdown, oneLine, shortModel } from "./format.js";
 import { emit, fail, inline, on, state, toast } from "./state.js";
+import { dropDraftIf, hostAgentDraftKey, loadDraft, saveDraft } from "./drafts.js";
 
 export function mountHostagent(client, chat, media) {
   const { forgetReveals, mergeGroups, morph, showThinking, thinkingHtml, transcriptClick, transcriptFocus, transcriptHtml } = chat;
@@ -393,6 +394,24 @@ export function mountHostagent(client, chat, media) {
 
   // ---------------------------------------------------------------------------------------------------------------- composer
 
+  // One draft per host, stored on this tab's own input only; a successful send removes it if it still holds exactly the sent text.
+  const draftKey = hostAgentDraftKey(client.storagePrefix);
+  const stored = loadDraft(draftKey);
+  if (stored) {
+    input.value = stored.text;
+    input.setSelectionRange(stored.caret, stored.caret);
+  }
+  let unkept = false;
+  input.addEventListener("input", () => {
+    if (saveDraft(draftKey, input.value, input.selectionStart)) unkept = false;
+    else if (!unkept) {
+      unkept = true;
+      toast("This browser cannot keep that much text as a draft. It stays in the box, but a reload would lose it.", {
+        error: true,
+        ms: 8000,
+      });
+    }
+  });
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
@@ -401,16 +420,22 @@ export function mountHostagent(client, chat, media) {
   });
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const text = input.value.trim();
+    const raw = input.value,
+      text = raw.trim();
     if (!text || !available || form.dataset.sending === "1") return;
     form.dataset.sending = "1";
     input.value = "";
     try {
       await client.call("host-agent-send", { requestId: uuid(), text });
+      dropDraftIf(draftKey, raw);
       error = "";
       await loadHostAgent();
     } catch (reason) {
-      input.value = text;
+      // The stored draft is still the sent text unless the owner typed again meanwhile; then the refused text goes in front of the new one.
+      if (input.value) {
+        input.value = `${raw}\n\n${input.value}`;
+        input.dispatchEvent(new Event("input"));
+      } else input.value = raw;
       // "has no model" / "not in the model catalog": say it where the owner is looking and open the model picker.
       if (/model/i.test(reason.message ?? "")) {
         error = reason.message;
