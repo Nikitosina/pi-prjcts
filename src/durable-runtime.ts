@@ -43,7 +43,17 @@ import { CodemodeSandbox } from "@earendil-works/pi-codemode";
 import { Type } from "typebox";
 import type { Context } from "@earendil-works/chord";
 import { DEFAULT_REVIEW_RECHECKS, DEFAULT_STALL_MINUTES, DEFAULT_VERIFY_ROUNDS } from "./state.ts";
-import { FULL_COMMIT, Jobs, createJobs, readRevision, sharedHandoff, type JobsRuntime, type JobsSnapshot, type SpawnArgs } from "./jobs.ts";
+import {
+  FULL_COMMIT,
+  Jobs,
+  createJobs,
+  readRevision,
+  sharedHandoff,
+  type JobsActivity,
+  type JobsRuntime,
+  type JobsSnapshot,
+  type SpawnArgs,
+} from "./jobs.ts";
 import { readyFiles } from "./ready-files.ts";
 import { changedFiles, confirmCheckout, headCommit } from "./vcs.ts";
 import { checkProofRefs, proofTools } from "./proof.ts";
@@ -395,6 +405,8 @@ export type DurableProjectRuntime = {
   followUp(chatId: string, text: string, requestId: string, exact?: boolean): Promise<void>;
   /** Jobs and their agents with live status: what the UI and Telegram render. */
   jobs(): Promise<JobsSnapshot>;
+  /** Running Jobs with plans and the chats with work: the notifier's per-tick read, without the per-agent snapshot. */
+  activity(): Promise<JobsActivity>;
   /** Start a worker, scout or reviewer for a chat (Main when omitted). The same `requestId` returns the same agent. */
   spawn(chat: number | undefined, args: SpawnArgs & { requestId: string }): Promise<{ text: string; id?: string }>;
   /** Stop an agent and everything it owns; `reason` is required and recorded on the Job. */
@@ -1418,8 +1430,21 @@ export async function openDurableProject(input: {
             : `${head === agent.readHead ? `is still at ${head}` : `moved from ${agent.readHead} to ${head}`}${dirty?.length ? " and has uncommitted changes" : ""}`;
         return `[This report is not valid for the current code: agent ${agent.readRef}'s worktree ${what} since this reader started. Spawn a new reader on its current commit.]`;
       },
-      promptBehavior: (agent, job) =>
-        agent.role === "worker" && job?.workspace ? workerBehavior(loadProject(project.id), "helper") : behaviorOf(agent.role),
+      promptBehaviors: () => {
+        let loaded: Project | undefined;
+        const memo = new Map<string, string>();
+        return (agent, job) => {
+          const helper = agent.role === "worker" && !!job?.workspace;
+          const key = helper ? "helper" : agent.role;
+          let text = memo.get(key);
+          if (text === undefined) {
+            loaded ??= loadProject(project.id);
+            text = helper ? workerBehavior(loaded, "helper") : projectBehavior(loaded, agent.role).text;
+            memo.set(key, text);
+          }
+          return text;
+        };
+      },
       prepare: async ({ agent, seq, job, frame }) => {
         await refreshDelegatedSkills();
         const conversation = Number(agent.conversationId);
@@ -2674,6 +2699,10 @@ export async function openDurableProject(input: {
         assertOpen();
         const view = await jobs.snapshot(openedHarness);
         return { ...view, jobs: view.jobs.map((job) => (job.status === "running" ? { ...job, ...holdsOf(job.id) } : job)) };
+      },
+      activity: async () => {
+        assertOpen();
+        return jobs.activity(openedHarness);
       },
       spawn: (chat, args) => admitting(() => jobs.spawn(root, (chat ?? root.id) as Conversation["id"], args)),
       stopJob: async (id, reason) => {

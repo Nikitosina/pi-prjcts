@@ -105,7 +105,7 @@ export function startNotifier(options: {
         text: clip(item.text),
       });
     }
-    const { jobs, agents } = await owner.jobs();
+    const { jobs, workingChats } = await owner.activity();
     for (const job of jobs) {
       if (job.status !== "running" || !job.plan.length) continue;
       const view: JobProgress = {
@@ -114,7 +114,7 @@ export function startNotifier(options: {
         jobId: job.id,
         title: job.title,
         steps: job.plan.map((step) => ({ title: step.title, status: step.status, estimateMin: step.estimateMin ?? 0 })),
-        etaMin: job.eta.etaMin,
+        etaMin: job.eta?.etaMin,
       };
       const fingerprint = JSON.stringify(view);
       if (progressSeen.get(job.id) === fingerprint) continue;
@@ -124,8 +124,7 @@ export function startNotifier(options: {
     // Failed workers and Ready reports have no notice of their own: the coordinator's settled answer carries the explanation (and Approve).
     entry.workBaselined = true;
     // Background turns stay quiet while work runs; answers to Telegram owner messages do not wait for the workers.
-    const working = new Set(jobs.filter((job) => job.status === "running").map((job) => chatOf(Number(job.chat)).id));
-    for (const agent of agents) if (agent.working || (!agent.jobId && agent.endedAt === null)) working.add(chatOf(Number(agent.chat)).id);
+    const working = new Set(workingChats.map((chat) => chatOf(Number(chat)).id));
     for (const chat of chats) {
       const after = entry.chats[chat.id];
       // Archived chats are skipped, but baselined once so a restored chat does not replay its history.

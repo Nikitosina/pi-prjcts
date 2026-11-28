@@ -303,23 +303,47 @@ try {
   const owner = {
     chats: async () => [{ id: "main", title: "Main", conversationId: 1 }],
     prNotices: async () => [],
-    jobs: async () => ({
+    activity: async () => ({
       jobs: [
         { id: "ready", chat: 1, status: "ready", pr: "https://example.invalid/pr/1", candidate: "a".repeat(40), endedAt: 1 },
-        ...(active ? [{ id: "busy", chat: 1, status: "running", plan: [] }] : []),
+        ...(active
+          ? [
+              { id: "busy", chat: 1, status: "running", plan: [] },
+              {
+                id: "planned",
+                chat: 1,
+                title: "Planned",
+                status: "running",
+                plan: [{ title: "Step", status: "doing", estimateMin: 5 }],
+                eta: { etaMin: 5 },
+              },
+            ]
+          : []),
       ],
-      agents: [],
+      workingChats: active ? [1] : [],
     }),
     chatSubmissions: async (_, after) => submissions.filter((item) => item.id > after),
   };
+  const progress = [];
   const openNotifier = () =>
-    startNotifier({ owner: () => Promise.resolve(owner), tickMs: 25, onNotice() {}, report: (e) => errors.push(e) });
+    startNotifier({
+      owner: () => Promise.resolve(owner),
+      tickMs: 25,
+      onNotice() {},
+      progress: (view) => progress.push(view),
+      report: (e) => errors.push(e),
+    });
   let notifier = openNotifier();
   try {
     await until(() => notifier.feed(0).items.length === 1);
     assert.deepEqual(
       notifier.feed(0).items.map((item) => [item.text, item.jobId]),
       [["Explicit reply", undefined]],
+    );
+    assert.deepEqual(
+      progress.map((view) => [view.jobId, view.title, view.etaMin, view.steps]),
+      [["planned", "Planned", 5, [{ title: "Step", status: "doing", estimateMin: 5 }]]],
+      "a running Job's plan is announced once, unchanged",
     );
     active = false;
     submissions.push(submission(5, "report:final", 13, "Task finished"));
