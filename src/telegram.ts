@@ -39,7 +39,7 @@ type TopicName = () => string | Promise<string>;
 type DeliveryError = { at: number; method: string; description: string } & (
   | { kind: "api"; httpStatus: number; code: number; descriptionProvided: boolean }
   | { kind: "network" | "not-sent" | "incomplete-response" }
-  | { kind: "attachment"; reason: AttachmentRefusal; ref: string }
+  | { kind: "attachment"; reason: AttachmentRefusal; seq: number; part: number }
 );
 export type HeldOutcome = "resend" | "delivered";
 /** `thread`: the topic every part of the notice goes to; absent means the general thread. */
@@ -1097,14 +1097,17 @@ export function startTelegram(options: {
           media = [];
           if (error instanceof AttachmentError) refusal = error.reason;
           // An album falls back to single files, which record their own refusals.
-          if (part.kind !== "album")
+          // A retry of a part whose fallback text failed to send must not record the same refusal again.
+          const seen = (state.deliveryErrors ?? []).some((e) => e.kind === "attachment" && e.seq === notice.seq && e.part === index);
+          if (part.kind !== "album" && !seen)
             recordError({
               at: Date.now(),
               method: "attachment",
               description: REFUSAL_TEXT[refusal],
               kind: "attachment",
               reason: refusal,
-              ref: refs[0],
+              seq: notice.seq,
+              part: index,
             });
         }
         bound();

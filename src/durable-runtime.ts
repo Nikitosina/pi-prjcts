@@ -2593,12 +2593,8 @@ export async function openDurableProject(input: {
       },
       artifactScopes: async () => {
         assertOpen();
-        const view = await jobs.snapshot(openedHarness);
-        return new Set([
-          ...view.jobs.map((job) => job.id),
-          ...view.agents.map((agent) => agent.id),
-          ...(await coordinatorArtifactScopes(root)),
-        ]);
+        const doc = await openedHarness.snapshot(Jobs, ROOT_CONVERSATION_ID, context);
+        return new Set([...Object.keys(doc?.jobs ?? {}), ...Object.keys(doc?.agents ?? {}), ...(await coordinatorArtifactScopes(root))]);
       },
       chatSubmissions: async (id, after = -1) => {
         assertOpen();

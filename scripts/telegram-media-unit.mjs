@@ -212,7 +212,10 @@ function start(receiveUpdates = false) {
   writeFileSync(statePath, JSON.stringify(state));
   bridge = startTelegram({
     receiveUpdates,
-    dispatch: async () => ({}),
+    dispatch: async (input) => {
+      if (input.action === "thread-history" && input.threadId !== thread) throw Error("Unknown agent id");
+      return {};
+    },
     artifactScopes: async (projectId) => {
       assert.equal(projectId, project);
       await dispatchHook?.();
@@ -635,6 +638,13 @@ try {
     ["sendPhoto", "sendMessage"],
   );
   assert.match(sends[1].input.text, /not found/);
+  assert.deepEqual(
+    JSON.parse(readFileSync(statePath))
+      .deliveryErrors.filter((e) => e.kind === "attachment")
+      .map((e) => e.reason),
+    ["not-found"],
+    "89 the saved album plan falls back to singles and the missing item records exactly one refusal",
+  );
   bridge.close();
   start();
   await bridge.flush();
