@@ -334,3 +334,9 @@ Native iOS app; Telegram changes; pairing approval from an existing device; runn
 - A form with unsaved input is never redrawn by a reconnect or a late read: every Settings section and every focus view marks its root dirty on `input` (search fields and switches excluded) until it is saved or left, and the live read only renews the data behind it. Every focus switch invalidates the earlier renders.
 - A read interrupted by a drop settles at once with its copy or an offline error and is never sent again. A PR review opened online is saved under its read-only key, so the offline open finds it. A chat counts as fresh only when it was read live in the current connection period.
 - The order of reads, saves and wipes is one counter per host in IndexedDB, advanced in the transaction that starts a read, saves or wipes, so tabs agree on it.
+
+### Multi-host inbox, stage 4: simplified model (fifth review)
+
+- Drafts are written to storage only from an `input` event of the tab, and removed after a successful send only while the stored text still equals the sent text. Nothing is written on `pagehide`, chat switch or reload.
+- A remote host is read-only as one unit while it is offline or reconnecting. It unlocks only when every open view of that host (chat, focus view, Settings, Host agent) has had a successful live read in the current connection period. Settings and the Host agent follow the host that owns the data they show. There is no per-view unlock.
+- Every write takes the connection epoch at the owner's click and is refused when it has changed by the time it would be sent.

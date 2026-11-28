@@ -4,6 +4,7 @@ import { addHostControl, hostSwitcher } from "./host-switcher.js";
 import { ago, clip, esc, oneLine, shortModel, size, tokens, usd } from "./format.js";
 import { bindings, captureNext, conflicts, display, paintHints, DEFAULTS } from "./hotkeys.js";
 import { clean, emit, inline, isDirty, isFilter, markDirty, on, stale, state, toast } from "./state.js";
+import { setPanel } from "./views.js";
 
 // `client` is the host chosen in the header (host sections); `project` sends project sections to the host of the selected project.
 export function mountSettings(client, project, ui, statusline, promptView, limits, pluginView) {
@@ -73,16 +74,15 @@ export function mountSettings(client, project, ui, statusline, promptView, limit
   }
   on("select", () => dialog.open && paint());
   // A reconnect reads the open section again; unsaved prompt text is kept in localStorage (prompts.js), so repainting never loses it.
-  client.addEventListener?.("statechange", () => {
-    if (client.state !== "online" || !dialog.open) return;
-    // A section with unsaved input is not redrawn: a live read behind it only unlocks the panel.
-    if (isDirty(dialog.querySelector(".settings-body")))
-      void client.call("tiers-get").then(
-        () => emit("panel-live", "settings"),
-        () => {},
-      );
+  const owner = () => (SECTIONS.find((item) => item.id === section)?.scope === "project" ? (state.host ?? client) : client);
+  /** A section with unsaved input is not redrawn after a reconnect: it is read again behind the form, and the host unlocks once that answered. */
+  const reconnected = () => {
+    if (!dialog.open || owner().state !== "online") return;
+    if (isDirty(dialog.querySelector(".settings-body"))) void rereadSection();
     else paint(true);
-  });
+  };
+  client.addEventListener?.("statechange", reconnected);
+  on("host-online", (group) => group.client === state.host && group.client !== client && reconnected());
   dialog.addEventListener("input", (event) => {
     const body = event.target.closest?.(".settings-body");
     if (body && !isFilter(event.target)) markDirty(body);
@@ -92,8 +92,22 @@ export function mountSettings(client, project, ui, statusline, promptView, limit
   dialog.addEventListener("close", () => {
     if (dialog.open) return;
     leaveSection();
+    setPanel("settings", null);
     hostCatalog = null;
   });
+  async function rereadSection() {
+    const read = SECTIONS.find((item) => item.id === section),
+      epoch = owner().epoch,
+      scratch = document.createElement("div"),
+      kept = { prompts, back, unmount };
+    try {
+      await read.render(scratch, () => true);
+      if (!scratch.querySelector(".error-line")) owner().confirmLive?.("panel:settings", epoch);
+    } catch {
+    } finally {
+      ({ prompts, back, unmount } = kept);
+    }
+  }
   function leaveSection() {
     pluginsRefresh = null;
     unmount?.();
@@ -141,13 +155,15 @@ export function mountSettings(client, project, ui, statusline, promptView, limit
     // A status said just before a repaint (a save redraws the section) stays visible in the new header.
     if (said && said.section === section && Date.now() - said.at < 3000) inline(dialog.querySelector(".settings-status"), said.text, said);
     const gen = ++paintGen,
+      epoch = owner().epoch,
       body = dialog.querySelector(".settings-body");
+    setPanel("settings", { client: owner(), key: "panel:settings" });
     const alive = () => gen === paintGen && dialog.open && body.isConnected;
     Promise.resolve(current.render(body, alive))
       .then(() => {
         if (alive()) body.scrollTop = scroll;
       })
-      .finally(() => alive() && emit("panel-live", "settings"))
+      .then(() => alive() && !body.querySelector(":scope > .error-line") && owner().confirmLive?.("panel:settings", epoch))
       .catch((error) => {
         if (alive()) body.innerHTML = `<p class="error-line">${esc(error.message)}</p>`;
       });

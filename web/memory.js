@@ -2,6 +2,7 @@
 // toggle and broken links listed. Entries open and save through knowledge-read/-write; chat rows undo a write with `memory-undo`.
 import { ago, esc, markdown } from "./format.js";
 import { claim, clean, emit, fail, newest, on, stale, state, toast } from "./state.js";
+import { focusViewKey } from "./views.js";
 
 export function mountMemory(client) {
   const KINDS = [
@@ -33,10 +34,10 @@ export function mountMemory(client) {
   let query = "";
 
   let archive = false;
-  async function loadMemory() {
+  async function loadMemory(view = null) {
     const gen = state.generation,
       projectId = state.projectId;
-    const index = await client.call("memory-index", { projectId, ...(archive ? { includeArchive: true } : {}) });
+    const index = await client.call("memory-index", { projectId, ...(archive ? { includeArchive: true } : {}) }, undefined, { view });
     if (stale(gen)) return null;
     cache = { projectId, entries: index.entries, brokenLinks: index.brokenLinks ?? [], index };
     return cache;
@@ -160,11 +161,14 @@ export function mountMemory(client) {
     proven.set(key, undone);
   }
 
+  const LIST_VIEW = focusViewKey({ kind: "memory" });
+  /** The entry the center shows, so a background read can hand its answer to it: `{ root, path, token, latest }`. */
+  let shown = null;
   /** The Memory list in the center. */
   async function renderMemoryList(root, { quiet = false } = {}) {
     const token = claim(root);
     if (quiet) {
-      const memory = await loadMemory().catch(() => null);
+      const memory = await loadMemory(LIST_VIEW).catch(() => null);
       if (memory && newest(root, token)) state.focus.data = memory.index;
       return;
     }
@@ -173,7 +177,7 @@ export function mountMemory(client) {
     const gen = state.generation;
     let memory;
     try {
-      memory = await loadMemory();
+      memory = await loadMemory(LIST_VIEW);
     } catch (error) {
       if (stale(gen) || !root.isConnected || !newest(root, token)) return;
       root.querySelector(".loading-line").outerHTML =
@@ -225,17 +229,23 @@ export function mountMemory(client) {
   /** One entry in the center: rendered, with Edit (revision-checked through knowledge-write). */
   async function renderMemoryEntry(root, path, edit = false, { quiet = false } = {}) {
     const gen = state.generation,
-      token = claim(root);
+      view = focusViewKey({ kind: "memory", path });
     if (quiet) {
-      const fresh = await client.call("knowledge-read", { id: state.projectId, path }).catch(() => null);
-      if (fresh && !stale(gen) && newest(root, token)) state.focus.data = fresh;
+      // A form with unsaved input stays as it is; the answer waits for Cancel or Save, which show it and edit from its revision.
+      const fresh = await client.call("knowledge-read", { id: state.projectId, path }, undefined, { view }).catch(() => null);
+      if (fresh && !stale(gen) && shown?.root === root && shown.path === path && newest(root, shown.token)) {
+        state.focus.data = fresh;
+        shown.latest = fresh;
+      }
       return;
     }
+    const token = claim(root);
+    const mine = (shown = { root, path, token, latest: null });
     clean(root);
     root.innerHTML = `<div class="focus-head"><button type="button" class="back" data-cmd="leave-focus" aria-label="Back">← <kbd>Esc</kbd></button><h1>${esc(memoryTitle(path))}</h1></div><p class="loading-line">Loading…</p>`;
     let doc;
     try {
-      doc = await client.call("knowledge-read", { id: state.projectId, path });
+      doc = await client.call("knowledge-read", { id: state.projectId, path }, undefined, { view });
     } catch (error) {
       if (stale(gen) || !newest(root, token)) return;
       root.querySelector(".loading-line").textContent = error.message;
@@ -246,6 +256,10 @@ export function mountMemory(client) {
     const entry = cache.entries.find((item) => item.path === path);
     const kind = KINDS.find((item) => item.id === (entry?.kind ?? memoryKind(path)));
     const paint = (editing) => {
+      if (!editing) {
+        clean(root);
+        if (mine.latest) doc = mine.latest;
+      }
       root.innerHTML = `<div class="focus-head"><button type="button" class="back" data-cmd="leave-focus" aria-label="Back">← <kbd>Esc</kbd></button><h1>${esc(entry?.title ?? memoryTitle(path))}</h1>${kind ? `<span class="badge">${esc(kind.one)}</span>` : ""}${entry ? `${entry.status ? `<span class="badge st-${esc(entry.status)}">${esc(entry.status)}</span>` : ""}` : ""}<span class="grow"></span>${editing ? "" : `<button type="button" class="ghost-btn small" data-edit-memory>Edit</button>`}</div><p class="mono muted small">${esc(path)} · rev ${esc(doc.revision.slice(0, 8))} · ${esc(ago(doc.updatedAt))} by ${esc(doc.author)}${entry?.supersededBy ? ` · superseded by <button type="button" class="link-btn" data-memory="${esc(entry.supersededBy)}">${esc(memoryTitle(entry.supersededBy))}</button>` : ""}</p>${editing ? `<form class="mem-edit"><textarea aria-label="Memory text" maxlength="32000">${esc(doc.text)}</textarea><div class="row"><button type="submit" class="primary small">Save</button><button type="button" class="ghost-btn small" data-cancel>Cancel</button><span class="muted small">Saves a new revision; history is kept.</span></div></form>` : `${entry?.summary ? `<p class="mem-lede">${esc(entry.summary)}</p>` : ""}<article class="prose doc">${markdown(withoutFrontMatter(doc.text))}</article>`}`;
       root.querySelector("[data-edit-memory]")?.addEventListener("click", () => paint(true));
       root.querySelector("[data-cancel]")?.addEventListener("click", () => paint(false));
@@ -257,9 +271,11 @@ export function mountMemory(client) {
           const text = form.querySelector("textarea").value;
           try {
             const saved = await client.call("knowledge-write", { id: state.projectId, path, text, expectedRevision: doc.revision });
-            if (stale(gen)) return;
-            doc = { ...doc, ...saved, text };
             toast("Memory saved.");
+            // The owner may have left this entry while the write ran: it is saved, but nothing is drawn over the view that replaced it.
+            if (stale(gen) || !newest(root, token)) return;
+            doc = { ...doc, ...saved, text };
+            mine.latest = null;
             paint(false);
           } catch (error) {
             fail(error);

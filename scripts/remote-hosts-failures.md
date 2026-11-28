@@ -140,3 +140,13 @@ Third review of stage 4: reads are no longer replayed (REMOTE_SPEC.md decision 1
 85. Controls unlock before the view's own live refresh. A chat shown when the connection dropped kept `live: true` from the previous connection. An answer counts as fresh only for the connection period (`epoch`) it was read in.
 86. A save that began before another tab's wipe lands after it. The tab-local counter cannot order across tabs. The order is a per-host counter in IndexedDB, advanced in the same transaction that begins a read, saves or wipes (with a wipe generation).
 87. Two tabs tie on the same stamp and the strict comparison accepted it. The shared counter gives each read a distinct order, so the older read never replaces the newer.
+
+## Fifth review of stage 4 (simplified: drafts write on input and send only; the host is read-only as one unit)
+
+88. A tab that sent, then closed, erased a newer draft typed in another tab, and a sent text could come back. Drafts are written only by an `input` event and removed after a send only while the stored text still equals the sent text; nothing is written on `pagehide`, chat switch or reload.
+89. A new worker, review or Memory view of a reconnected host is writable before its own read. The host unlocks as one unit, only when every open view (chat, focus view, Settings, Host agent) has a successful live read in the current connection period; a render or a `finally` proves nothing.
+90. A queued write crosses a disconnect (settings `ui-set`, Host agent settings, review mark-seen). Each write takes the connection epoch at the click and is refused when it changed.
+91. The dirty mark stays after Cancel in Memory, so a quiet read never reaches the displayed entry and its edit revision.
+92. A late Memory save answer repaints the shared focus root over another view. The continuation checks the focus token too.
+93. An event handler that throws is swallowed by the event bus; it now rethrows so page error checks see it.
+94. A PR open that marks seen takes its cache-order token after the response; it now takes it before the request.

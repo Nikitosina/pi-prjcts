@@ -20,6 +20,10 @@ export function dropDraft(key) {
     localStorage.removeItem(key);
   } catch {}
 }
+/** Removes the draft only while it still holds `text`: another tab may have written a newer one since it was sent. */
+export function dropDraftIf(key, text) {
+  if (loadDraft(key)?.text.trim() === text.trim()) dropDraft(key);
+}
 /** An empty draft is not stored. Over the limits the oldest drafts go first. */
 export function saveDraft(key, text, caret = text.length) {
   if (!text.trim()) return dropDraft(key);

@@ -3,6 +3,7 @@
 import { uuid } from "./api.js";
 import { clip, dur, esc, oneLine, shortModel, tokens } from "./format.js";
 import { clean, emit, fail, on, project, stale, state, toast } from "./state.js";
+import { focusViewKey } from "./views.js";
 import { follower } from "./follow.js";
 
 export function mountWorkers(client, chat, media) {
@@ -577,7 +578,9 @@ export function mountWorkers(client, chat, media) {
     const offMemory = on("memory-recent", () => (alive() ? paint() : offMemory()));
     const load = async () => {
       const page = await client
-        .call("thread-history", { id: state.projectId, threadId: id, limit: 200, messageText: "full" })
+        .call("thread-history", { id: state.projectId, threadId: id, limit: 200, messageText: "full" }, undefined, {
+          view: focusViewKey({ kind: "worker", id }),
+        })
         .catch((error) => {
           if (alive()) node.innerHTML = `<p class="muted">${esc(error.message)}</p>`;
           return null;
@@ -673,7 +676,9 @@ export function mountWorkers(client, chat, media) {
     const gen = state.generation,
       focus = state.focus;
     const page = await client
-      .call("thread-history", { id: state.projectId, threadId: id, limit: 200, messageText: "full" })
+      .call("thread-history", { id: state.projectId, threadId: id, limit: 200, messageText: "full" }, undefined, {
+        view: focusViewKey({ kind: "worker", id }),
+      })
       .catch(() => null);
     if (page && !stale(gen) && state.focus === focus) focus.data = page;
   }

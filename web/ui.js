@@ -89,8 +89,10 @@ export function mountUi(client) {
     });
     apply(next);
     queued++;
+    const gate0 = client.guard(); // the connection period of the owner's change: a write queued across a drop is refused
+
     const done = writing.then(async () => {
-      let gate = client;
+      let gate = gate0;
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
           const result = await gate.call("ui-set", { revision: state.uiRevision, patch });
@@ -104,7 +106,6 @@ export function mountUi(client) {
             return false;
           }
           // The revision lookup and the write that follows never run after the host went offline in between.
-          gate = client.guard();
           try {
             state.uiRevision = (await gate.call("ui-get")).revision;
           } catch (lookup) {

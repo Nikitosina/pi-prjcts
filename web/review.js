@@ -1,5 +1,6 @@
 import { esc } from "./format.js";
 import { clean, state } from "./state.js";
+import { focusViewKey } from "./views.js";
 import { renderDiff, contextRows } from "./diff.js";
 import { context, header, fileHeader, fileTree } from "./review-parts.js";
 import { reviewTour } from "./review-tour.js";
@@ -30,7 +31,12 @@ export function mountReview(client) {
   /** Reads the open review again without touching what is drawn (a comment is being written): only the data the banner dates is renewed. */
   async function rereadReview(focus) {
     const gen = state.generation;
-    const fresh = await client.call("pr-review-open", { id: state.projectId, provider: focus.provider, pr: focus.id, seen: false });
+    const fresh = await client.call(
+      "pr-review-open",
+      { id: state.projectId, provider: focus.provider, pr: focus.id, seen: false },
+      undefined,
+      { view: focusViewKey(focus) },
+    );
     if (state.generation === gen && state.focus === focus) focus.data = fresh;
   }
   async function renderReview(root, focus, afterWrite = "", { mark = true } = {}) {
@@ -42,7 +48,14 @@ export function mountReview(client) {
     panel.className = "rv-context";
     root.replaceChildren(room);
     document.querySelector("#context").append(panel);
-    const rpc = (action, extra) => client.call(`pr-review-${action}`, { id: projectId, provider: focus.provider, pr: focus.id, ...extra }),
+    const rpc = (action, extra) =>
+        client.call(
+          `pr-review-${action}`,
+          { id: projectId, provider: focus.provider, pr: focus.id, ...extra },
+          undefined,
+          action === "open" ? { view: focusViewKey(focus), ...(extra?.seen ? { epoch: opened } : {}) } : undefined,
+        ),
+      opened = client.epoch, // marking seen is a write: refused when the connection dropped since the owner opened the review
       projectId = state.projectId;
     const openingChat = state.chatId;
     let tour,

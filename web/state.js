@@ -1,6 +1,14 @@
 // Shared page state and a tiny event bus. `generation` changes with every project/chat selection; any code that awaits must
 // compare it afterwards (`stale(gen)`) before touching the page, so late answers never render into another project.
 
+/** Rethrows outside the event bus, so an uncaught page error reaches the console and tests (a handler failure must never be silent). */
+const reportError = (error) => {
+  console.error(error);
+  queueMicrotask(() => {
+    throw error;
+  });
+};
+
 export const state = {
   projects: [],
   projectId: null,
@@ -22,6 +30,7 @@ export const state = {
   limitsPending: {}, // provider → the choice a toggle shows while its save is queued or in flight
   limitsVisibilityError: null,
   usage: null,
+  panels: { settings: null, agent: null }, // the open Settings section and Host agent: { client, key } of the host data they show
 };
 
 const handlers = new Map();
@@ -35,7 +44,7 @@ export function emit(event, payload) {
     try {
       handler(payload);
     } catch (error) {
-      console.error(`${event} handler failed`, error);
+      reportError(error); // an uncaught error, so a page error check sees what a handler threw
     }
   }
 }

@@ -4,7 +4,8 @@
 import { uuid } from "./api.js";
 import { clip, esc, markdown, oneLine, shortModel } from "./format.js";
 import { emit, fail, inline, on, state, toast } from "./state.js";
-import { dropDraft, hostAgentDraftKey, loadDraft, saveDraft } from "./drafts.js";
+import { setPanel } from "./views.js";
+import { dropDraftIf, hostAgentDraftKey, loadDraft, saveDraft } from "./drafts.js";
 
 export function mountHostagent(client, chat, media) {
   const { forgetReveals, mergeGroups, morph, showThinking, thinkingHtml, transcriptClick, transcriptFocus, transcriptHtml } = chat;
@@ -38,6 +39,7 @@ export function mountHostagent(client, chat, media) {
     const next = force ?? !isOpen(),
       opening = next && !isOpen();
     drawer.dataset.open = next ? "1" : "0";
+    setPanel("agent", next ? { client, key: "panel:agent" } : null);
     drawer.setAttribute("aria-hidden", String(!next));
     drawer.inert = !next;
     if (opening) forgetReveals(HOST_SCOPE, body);
@@ -76,7 +78,8 @@ export function mountHostagent(client, chat, media) {
   client.addEventListener?.("statechange", () => client.state === "online" && isOpen() && void loadHostAgent());
 
   async function loadHostAgent() {
-    const load = ++loads;
+    const load = ++loads,
+      epoch = client.epoch;
     let problem = "";
     const [history, next] = await Promise.all([
       client.call("host-agent-history").catch((reason) => ((problem = reason.message), null)),
@@ -84,7 +87,7 @@ export function mountHostagent(client, chat, media) {
       loadApprovals(),
     ]);
     if (load !== loads) return;
-    emit("panel-live", "agent");
+    if (history) client.confirmLive?.("panel:agent", epoch);
     available = !!history;
     drawer.dataset.available = available ? "1" : "0";
     if (!available) {
@@ -349,15 +352,16 @@ export function mountHostagent(client, chat, media) {
   let settingsWrites = Promise.resolve();
   /** Keep rapid tier/model/tool changes on the revision returned by the preceding write. */
   function saveSettings(patch, label) {
-    const done = settingsWrites.then(() => writeSettings(patch, label));
+    const gate = client.guard();
+    const done = settingsWrites.then(() => writeSettings(patch, label, gate));
     settingsWrites = done.catch(() => {});
     return done;
   }
-  async function writeSettings(patch, label) {
+  async function writeSettings(patch, label, gate) {
     if (!settings) return;
     let problem = null;
     try {
-      const next = await client.call("host-agent-settings", { revision: settings.revision, patch });
+      const next = await gate.call("host-agent-settings", { revision: settings.revision, patch });
       settings = next;
       error = "";
     } catch (reason) {
@@ -399,12 +403,7 @@ export function mountHostagent(client, chat, media) {
   // This page's Host agent belongs to one host: its unsent text is kept under that host's storage prefix.
   const draftKey = hostAgentDraftKey(client);
   input.value = loadDraft(draftKey)?.text ?? "";
-  let edited = false; // only a draft this tab changed is written: another tab may own the stored one
-  input.addEventListener("input", () => {
-    edited = true;
-    saveDraft(draftKey, input.value, input.selectionStart);
-  });
-  addEventListener("pagehide", () => edited && saveDraft(draftKey, input.value, input.selectionStart));
+  input.addEventListener("input", () => saveDraft(draftKey, input.value, input.selectionStart));
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
@@ -417,14 +416,13 @@ export function mountHostagent(client, chat, media) {
     if (!text || !available || form.dataset.sending === "1") return;
     form.dataset.sending = "1";
     input.value = "";
-    dropDraft(draftKey);
     try {
       await client.call("host-agent-send", { requestId: uuid(), text });
+      dropDraftIf(draftKey, text);
       error = "";
       await loadHostAgent();
     } catch (reason) {
       input.value = text;
-      saveDraft(draftKey, text);
       // "has no model" / "not in the model catalog": say it where the owner is looking and open the model picker.
       if (/model/i.test(reason.message ?? "")) {
         error = reason.message;

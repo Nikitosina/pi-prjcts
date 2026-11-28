@@ -196,7 +196,7 @@ const pathProject = (path) =>
   new URL(path, location.origin).searchParams.get("project") ?? /^\/artifacts\/([^/]+)\//.exec(path)?.[1] ?? undefined;
 /** The client of project views. A project id in the input or path picks its host; anything else goes to the selected project's host. */
 export const projectHost = {
-  call: (action, input, signal) => routed(input?.projectId ?? input?.id).call(action, input, signal),
+  call: (action, input, signal, options) => routed(input?.projectId ?? input?.id).call(action, input, signal, options),
   guard: (projectId) => routed(projectId).guard(),
   stream: (path, onFrame, onState) => routed(pathProject(path)).stream(path, onFrame, onState),
   url: (path, options) => routed(pathProject(path)).url(path, options),

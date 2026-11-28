@@ -112,6 +112,31 @@ try {
       });
       await pageB.close();
 
+      // 88: closing the tab that sent never erases the newer draft of another tab
+      await soft("88 closing the tab that sent erases the draft typed in another tab", async () => {
+        const tabB = await pageA.newTab(url.href);
+        await tabB.waitFor(`document.body.dataset.ready === '1'`, "tab ready");
+        await open(pageA, alpha, "main");
+        await open(tabB, alpha, "main");
+        await type(pageA, "text that is sent");
+        await pageA.evaluate(`document.querySelector('#composer-input').form.requestSubmit(); undefined`);
+        await pageA.waitFor(`document.querySelector('#composer-input').value === ''`, "tab A sent", 40);
+        await type(tabB, "newer draft of tab B");
+        await tabB.waitFor(`localStorage.getItem('pi-draft:${alpha}:main') !== null`, "tab B stored", 20);
+        await pageA.navigate("about:blank");
+        await pause(500);
+        assert.equal(
+          await stored(tabB, `pi-draft:${alpha}:main`),
+          "newer draft of tab B",
+          "closing the sending tab changed the stored draft",
+        );
+        await tabB.evaluate(`localStorage.removeItem('pi-draft:${alpha}:main'); undefined`);
+        await tabB.close();
+        await pageA.navigate(url.href);
+        await pageA.waitFor(`document.body.dataset.ready === '1'`, "tab A back", 80);
+        await pageA.waitFor(group("online"), "Home Mac online again", 80);
+      });
+
       // 79: an offline snapshot of a chat never deletes the draft of a newer chat
       await soft("79 an offline chat snapshot deletes a newer chat's draft", async () => {
         await open(pageA, gamma, "main");
@@ -146,15 +171,76 @@ try {
         );
         await pageA.evaluate(`import('/state.js').then(({ emit }) => emit('open', { kind: 'worker', id: 'w-test' })); undefined`);
         await pageA.waitFor(`!!document.querySelector('#focus-view .worker-send textarea')`, "worker form", 40);
+        await pageA.waitFor(
+          `!document.querySelector('#focus-view .worker-send textarea').disabled`,
+          "worker form unlocked by its own read",
+          40,
+        );
         await pageA.evaluate(`document.querySelector('#focus-view .worker-send textarea').focus(); undefined`);
         await pageA.cdp("Input.insertText", { text: "typed to the worker" });
+        const before = await pageA.evaluate(`document.querySelector('#focus-view .worker-send textarea')?.value`);
         await pageA.evaluate(`window.release['knowledge-read:decisions/slow.md'](); undefined`);
         await pause(1000);
         assert.equal(
-          await pageA.evaluate(`document.querySelector('#focus-view .worker-send textarea')?.value ?? null`),
+          before,
           "typed to the worker",
-          "the Memory answer replaced the worker form",
+          "worker form took the input: " +
+            (await pageA.evaluate(
+              `(async () => { const { openViews } = await import('/views.js'); return JSON.stringify(openViews().map((v) => [v.key, v.client.isLive(v.key), v.client.epoch])); })()`,
+            )),
         );
+        const after = await pageA.evaluate(
+          `document.querySelector('#focus-view .worker-send textarea')?.value ?? ('NONE: ' + document.querySelector('#focus-view').innerText.slice(0, 80))`,
+        );
+        assert.equal(after, "typed to the worker", "the Memory answer replaced the worker form: " + after);
+        await pageA.evaluate(`document.querySelector('#focus-view .back')?.click(); undefined`);
+      });
+
+      // 91, 92: the dirty mark clears on Cancel, and a late save answer never repaints over another view
+      await soft("91 Cancel leaves the Memory entry marked dirty", async () => {
+        await pageA.evaluate(
+          `import('/state.js').then(({ emit }) => emit('open', { kind: 'memory', path: 'decisions/slow.md' })); undefined`,
+        );
+        await pageA.waitFor(
+          `!!document.querySelector('#focus-view [data-edit-memory]') && !document.querySelector('#focus-view [data-edit-memory]').disabled`,
+          "entry unlocked",
+          40,
+        );
+        await pageA.evaluate(`document.querySelector('#focus-view [data-edit-memory]').click(); undefined`);
+        await pageA.evaluate(
+          `(() => { const t = document.querySelector('#focus-view .mem-edit textarea'); t.value += ' edited'; t.dispatchEvent(new Event('input', { bubbles: true })); })()`,
+        );
+        assert.equal(await pageA.evaluate(`document.querySelector('#focus-view').dataset.dirty`), "1");
+        await pageA.evaluate(`document.querySelector('#focus-view [data-cancel]').click(); undefined`);
+        assert.equal(await pageA.evaluate(`document.querySelector('#focus-view').dataset.dirty ?? null`), null, "still dirty after Cancel");
+      });
+      await soft("92 a late Memory save answer repaints over a worker form", async () => {
+        await pageA.evaluate(`document.querySelector('#focus-view [data-edit-memory]').click(); undefined`);
+        await hold(pageA, "knowledge-write:decisions/slow.md");
+        await pageA.evaluate(`document.querySelector('#focus-view .mem-edit').requestSubmit(); undefined`);
+        await pageA.evaluate(`import('/state.js').then(({ emit }) => emit('open', { kind: 'worker', id: 'w-test' })); undefined`);
+        await pageA.waitFor(`!!document.querySelector('#focus-view .worker-send textarea')`, "worker form", 40);
+        await pageA.evaluate(`window.release['knowledge-write:decisions/slow.md'](); undefined`);
+        await pause(1000);
+        assert.equal(
+          await pageA.evaluate(`!!document.querySelector('#focus-view .worker-send textarea')`),
+          true,
+          "the save answer replaced the worker view",
+        );
+        await pageA.evaluate(`document.querySelector('#focus-view .back')?.click(); undefined`);
+      });
+      await soft("89 a new worker view is writable before its read", async () => {
+        await hold(pageA, "thread-history");
+        await pageA.evaluate(`import('/state.js').then(({ emit }) => emit('open', { kind: 'worker', id: 'w-held' })); undefined`);
+        await pageA.waitFor(`!!document.querySelector('#focus-view .worker-send textarea')`, "worker form", 40);
+        await pause(300);
+        assert.equal(
+          await pageA.evaluate(`document.querySelector('#focus-view .worker-send textarea').disabled`),
+          true,
+          "writable before its own read",
+        );
+        await pageA.evaluate(`window.release['thread-history'](); undefined`);
+        await pageA.waitFor(`!document.querySelector('#focus-view .worker-send textarea').disabled`, "unlocked by the read", 40);
         await pageA.evaluate(`document.querySelector('#focus-view .back')?.click(); undefined`);
       });
 

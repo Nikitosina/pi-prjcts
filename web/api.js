@@ -204,13 +204,20 @@ const SAVING = new Set(["online", "offline"]);
 export function hostClient(transport) {
   const run = transport.run ?? ((_read, _signal, work) => work(transport.authorizedFetch));
   const cache = transport.local ? null : hostCache(transport.hostId);
-  /** Where each answer handed out came from: `{ at, live, epoch }`, the time it was read, whether that read was live or a copy from the cache, and
-   * the connection period (`epoch`) of a live one. Keyed by the answer object itself, so a view knows about exactly the data it rendered and no
-   * other read can change that. */
+  /** Where each answer handed out came from: `{ at, live }`, the time it was read and whether that read was live or a copy from the cache. Keyed by
+   * the answer object itself, so a view knows about exactly the data it rendered and no other read can change that. */
   const provenance = new WeakMap();
   const note = (data, at, live) => {
-    if (data && typeof data === "object") provenance.set(data, { at, live, epoch: transport.epoch });
+    if (data && typeof data === "object") provenance.set(data, { at, live });
     return data;
+  };
+  /** view key → the connection period (`epoch`) of its last successful live read. A remote host is writable again only when every view
+   * that is open on it has read live in the current period (web/offline.js); nothing else counts, a finished render does not. */
+  const liveViews = new Map();
+  const markLive = (view, epoch) => {
+    if (!view || transport.epoch !== epoch || transport.state !== "online") return;
+    liveViews.set(view, epoch);
+    transport.dispatchEvent?.(new Event("fresh"));
   };
   let served = false; // a copy was shown at some point, so a live answer may have to take its place on screen
   const offlineError = () => new HostError(`${transport.name} is offline. Changes are disabled until it is back.`, 0, true, false);
@@ -219,6 +226,10 @@ export function hostClient(transport) {
     get epoch() {
       return transport.epoch;
     },
+    /** Whether the view read live in the current connection period. */
+    /** A view that reads through several calls (Settings, the Host agent) confirms its read of the connection period `epoch` once they all answered. */
+    confirmLive: (view, epoch) => markLive(view, epoch),
+    isLive: (view) => liveViews.get(view) === transport.epoch,
     provenance: (data) => (data && typeof data === "object" ? (provenance.get(data) ?? null) : null),
     storagePrefix: transport.local ? "" : `pi-host:${transport.hostId}:`,
     /** A flow that reads and then writes (Archive's idle check, a revision lookup before a save): its reads never answer from a copy, and once the
@@ -230,7 +241,7 @@ export function hostClient(transport) {
     /** One call. A read of a remote host answers from its offline copy while the host is offline, and an unfinished one answers the same way the moment
      * the host drops: nothing waits for a reconnect and nothing is replayed (REMOTE_SPEC.md, decision 14). `fresh` reads never answer from a copy;
      * `epoch` is the guard's count of connection losses. */
-    async call(action, input, signal, { fresh = false, epoch = null } = {}) {
+    async call(action, input, signal, { fresh = false, epoch = null, view = null } = {}) {
       const read = isRead(action, input);
       const copy = async () => {
         const saved = uncached.has(action) ? null : await cache.get(action, input);
@@ -245,14 +256,15 @@ export function hostClient(transport) {
         if (!read || fresh) throw offlineError();
         return copy();
       }
+      const began = transport.epoch;
       if (!cache || !read) {
-        const data = await plain(read, action, input, signal);
         // The review opened for reading is saved under its read-only key, so the offline open (which never marks it seen) finds it.
-        if (cache && action === "pr-review-open" && SAVING.has(transport.state))
-          void cache.begin().then((token) => cache.put(action, { ...input, seen: false }, data, token));
+        const keep = cache && action === "pr-review-open" ? await cache.begin() : null;
+        const data = await plain(read, action, input, signal);
+        if (keep && SAVING.has(transport.state)) void cache.put(action, { ...input, seen: false }, data, keep);
+        markLive(view, began);
         return data;
       }
-      const began = transport.epoch;
       const token = await cache.begin();
       if (transport.epoch !== began || transport.state === "offline") return fresh ? Promise.reject(offlineError()) : copy();
       const attempt = new AbortController(),
@@ -266,9 +278,12 @@ export function hostClient(transport) {
           note(data, Date.now(), true);
           if (SAVING.has(transport.state)) void cache.put(action, input, data, token);
         }
+        markLive(view, began);
         if (served) transport.dispatchEvent?.(new Event("copy"));
         return data;
       } catch (error) {
+        // The host itself answered with an error (a missing worker): that is a live answer, so the view does not keep the host read-only.
+        if (error instanceof HostError && error.status > 0 && !attempt.signal.aborted) markLive(view, began);
         if (signal?.aborted || !attempt.signal.aborted) throw error;
         // The host dropped while this read was in flight: it settles now with the copy or an error, whatever the host does next. Nothing is sent again.
         if (fresh) throw attempt.signal.reason;

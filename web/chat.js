@@ -6,7 +6,8 @@ import { clip, clock, dur, esc, imagesHtml, markdown, oneLine } from "./format.j
 import { FILE_ONLY_NOTE, PathSource, insertText, pathsFromTransfer } from "./path-drop.js";
 import { chatArgs, emit, fail, on, stale, state, toast } from "./state.js";
 import { follower } from "./follow.js";
-import { chatDraftKey, dropDraft, loadDraft, saveDraft } from "./drafts.js";
+import { chatViewKey } from "./views.js";
+import { chatDraftKey, dropDraft, dropDraftIf, loadDraft, saveDraft } from "./drafts.js";
 
 export function mountChat(client, media, slash, memory) {
   const { hydrateMedia } = media;
@@ -182,7 +183,7 @@ export function mountChat(client, media, slash, memory) {
             entries = state.live?.entries ?? 0;
           if (!id) return;
           try {
-            const view = await client.call("show", { id, ...chatArgs(), messageText: "full" });
+            const view = await client.call("show", { id, ...chatArgs(), messageText: "full" }, undefined, { view: chatViewKey() });
             // Another chat or project was selected meanwhile: drop this read, but still run the one that selection queued.
             if (stale(gen)) continue;
             state.view = view;
@@ -217,8 +218,7 @@ export function mountChat(client, media, slash, memory) {
     if (send?.restored) send.restored = false;
   };
   input.addEventListener("input", () => {
-    composerEdited = true;
-    persistComposer();
+    if (composerStore) saveDraft(composerStore, input.value, input.selectionStart);
     const held = drafts.get(draftKey());
     if (!held) return;
     held.text = input.value;
@@ -227,19 +227,18 @@ export function mountChat(client, media, slash, memory) {
       renderFeed();
     }
   });
-  let composerStore = null, // the storage key of the draft the composer shows
-    composerEdited = false; // this tab changed that draft: until then it only shows the stored one and never writes or deletes it (another tab may own it)
-  function persistComposer() {
-    if (composerStore && composerEdited) saveDraft(composerStore, input.value, input.selectionStart);
-  }
-  /** Puts `text` in the composer and keeps it as this chat's draft. */
+  // The stored draft is written only by an `input` event of this tab, and removed once its text was sent (`releaseDraft`) or the owner emptied the field.
+  let composerStore = null; // the storage key of the draft the composer shows
+  /** Puts `text` in the composer; the stored draft is not touched. */
   function setComposer(text) {
     input.value = text;
     grow();
-    composerEdited = true;
-    persistComposer();
   }
-  addEventListener("pagehide", persistComposer);
+  /** The message reached the host: its draft goes, unless another tab has written a newer one since. */
+  function releaseDraft(send) {
+    const owner = clientOf(send.hostId);
+    if (owner) dropDraftIf(chatDraftKey(owner, send.projectId, send.chatId), send.text);
+  }
   on("chat-gone", ({ host, projectId, chatId }) => {
     const key = chatDraftKey(host, projectId, chatId);
     if (composerStore === key) composerStore = null;
@@ -252,18 +251,16 @@ export function mountChat(client, media, slash, memory) {
       away = left && left !== now ? drafts.get(left) : undefined;
     // An unedited restored draft goes back to the bubble's own Retry; an edited one waits for its chat.
     if (away && away.text === away.original) {
-      if (composerStore) dropDraft(composerStore);
       forgetRestored(away.sendId);
       drafts.delete(left);
-    } else persistComposer();
+    }
     composerKey = now;
     composerStore = chatDraftKey(state.host, state.projectId, state.chatId);
-    composerEdited = false;
     const saved = loadDraft(composerStore),
-      held = drafts.get(now);
-    input.value = held?.text ?? saved?.text ?? "";
+      restored = drafts.get(now);
+    input.value = restored?.text ?? saved?.text ?? "";
     grow();
-    if (saved && !held) {
+    if (saved && !restored) {
       const caret = Math.min(saved.caret ?? saved.text.length, input.value.length);
       input.setSelectionRange(caret, caret);
     }
@@ -402,6 +399,7 @@ export function mountChat(client, media, slash, memory) {
       }
       if (!job.admitted) continue;
       send.state = "sent";
+      releaseDraft(send);
       const placed = job.entry !== undefined && (view.messages ?? []).some((item) => item.kind === "message" && item.entryId === job.entry);
       // A settled job whose message never reached the transcript leaves its outcome in the turn card; the bubble must not outlive it.
       if (placed || ["done", "failed", "interrupted"].includes(job.state)) pendingSends.splice(pendingSends.indexOf(send), 1);
@@ -483,8 +481,10 @@ export function mountChat(client, media, slash, memory) {
     }
     // Only an ack that says the host admitted the message is delivery; any other answer waits for the ledger.
     if (pendingSends.includes(send) && send.state === "sending") {
-      if (job?.admitted && job.id === send.id) send.state = "sent";
-      else {
+      if (job?.admitted && job.id === send.id) {
+        send.state = "sent";
+        releaseDraft(send);
+      } else {
         send.state = "unconfirmed";
         send.refused = false;
         send.error = "The host did not confirm it took the message.";
@@ -952,12 +952,14 @@ export function mountChat(client, media, slash, memory) {
     const gen = state.generation,
       ownedDraft = drafts.get(draftKey());
     drafts.delete(draftKey());
+    const store = composerStore;
     setComposer("");
     follow.follow();
     const slash = slashCommand(text);
     if (slash) {
       try {
         await slash.command.run(slash.argument);
+        if (store) dropDraftIf(store, text);
         if (!stale(gen)) void loadChat();
       } catch (error) {
         if (!stale(gen) && !input.value) setComposer(text);
