@@ -109,6 +109,14 @@ export function listArtifacts(controlRoot: string, threadId: string): ArtifactLi
   const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
   return { threadId, dir, files, skipped, totalBytes, capBytes: ARTIFACT_CAP_BYTES, overCap: totalBytes > ARTIFACT_CAP_BYTES, truncated };
 }
+export type ArtifactErrorCode = "invalid" | "not-found" | "not-a-file" | "refused";
+export class ArtifactError extends Error {
+  readonly code: ArtifactErrorCode;
+  constructor(code: ArtifactErrorCode, message: string) {
+    super(message);
+    this.code = code;
+  }
+}
 /** Opens one artifact for reading: relative path only, no `..`, no symlink anywhere below the thread folder, regular file, inside the folder after realpath. Caller closes `fd`. */
 export function openArtifact(
   controlRoot: string,
@@ -125,22 +133,22 @@ export function openArtifact(
     path.startsWith("/") ||
     parts.some((part) => !part || part === "." || part === "..")
   )
-    throw new Error("Invalid artifact path");
+    throw new ArtifactError("invalid", "Invalid artifact path");
   if (lstatSync(join(controlRoot, "artifacts"), { throwIfNoEntry: false })?.isSymbolicLink())
-    throw new Error("Artifacts folder cannot be a symlink");
+    throw new ArtifactError("refused", "Artifacts folder cannot be a symlink");
   for (let index = 0; index <= parts.length; index++) {
     const stat = lstatSync(join(dir, ...parts.slice(0, index)), { throwIfNoEntry: false });
-    if (!stat) throw new Error("Artifact not found");
-    if (stat.isSymbolicLink()) throw new Error("Artifact path contains a symlink; refused");
+    if (!stat) throw new ArtifactError("not-found", "Artifact not found");
+    if (stat.isSymbolicLink()) throw new ArtifactError("refused", "Artifact path contains a symlink; refused");
   }
   const real = realpathSync(join(dir, ...parts)),
     base = realpathSync(dir);
-  if (!real.startsWith(base + sep)) throw new Error("Artifact path escapes the thread folder");
+  if (!real.startsWith(base + sep)) throw new ArtifactError("refused", "Artifact path escapes the thread folder");
   const fd = openSync(real, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   const stat = fstatSync(fd);
   if (!stat.isFile()) {
     closeSync(fd);
-    throw new Error("Artifact is not a regular file");
+    throw new ArtifactError("not-a-file", "Artifact is not a regular file");
   }
   return { fd, size: stat.size, ...artifactKind(path), path };
 }

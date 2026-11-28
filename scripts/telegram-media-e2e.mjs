@@ -90,6 +90,12 @@ const k = await createKit("telegram-media", {
   },
   handler: ({ role, user, results }) => {
     if (role === "coordinator") {
+      if (user.includes("MARK-CHATSCOPE"))
+        return results.length
+          ? say(`COORDINATOR-CHATSCOPE ![Chat shot](artifact:${/[a-f0-9-]{36}/.exec(results[0])[0]}/chat.png)`)
+          : call("bash", {
+              command: `node -e 'const fs=require("node:fs"), p=process.env.PI_ARTIFACTS_DIR; fs.writeFileSync(p+"/chat.png",Buffer.from("${image.toString("base64")}","base64")); console.log(p.split("/").at(-1));'`,
+            });
       if (user.includes("MARK-MEDIASINGLE")) return say(`COORDINATOR-SINGLE before ![Image](artifact:${fixtureThread}/image.png) after.`);
       if (user.includes("MARK-MEDIAVIDEO")) return say(`COORDINATOR-VIDEO before ![Video](artifact:${fixtureThread}/video.mp4) after.`);
       if (user.includes("MARK-MEDIALONG"))
@@ -181,6 +187,14 @@ await k.run(async () => {
       "429 album retry produces no duplicate wrapper or media",
       !rejectPhoto && sends.filter((s) => s.method === "sendMediaGroup").length === 1,
     );
+
+    incoming("MARK-CHATSCOPE binary saved in this chat's own workspace scope");
+    const chatShot = await k.eventually(
+      () => sends.find((s) => s.method === "sendPhoto" && s.input.caption.includes("COORDINATOR-CHATSCOPE")),
+      "A screenshot in a non-Main chat scope was not sent as a photo",
+    );
+    assert.deepEqual(chatShot.input.file.bytes, image);
+    k.check("A binary in a non-Main coordinator chat's workspace scope is sent as a photo through the real runtime", true);
 
     incoming("MARK-MEDIASINGLE single native coordinator reply");
     const photo = await k.eventually(

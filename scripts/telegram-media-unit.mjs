@@ -59,6 +59,17 @@ const medium = openSync(join(dir, "medium.png"), "w");
 ftruncateSync(medium, 10_000_001);
 closeSync(medium);
 const ref = (path) => `artifact:${thread}/${path}`;
+const chatScope = randomUUID(),
+  jobScope = randomUUID(),
+  foreignScope = randomUUID();
+for (const scope of [chatScope, jobScope, foreignScope]) {
+  mkdirSync(join(root, project, "artifacts", scope));
+  writeFileSync(join(root, project, "artifacts", scope, "shot.png"), image);
+}
+writeFileSync(join(root, project, "artifacts", jobScope, "plan.html"), "<!doctype html><title>Job</title>");
+mkdirSync(join(dir, "batch"));
+writeFileSync(join(dir, "empty.png"), "");
+const scopedRef = (scope, path) => `artifact:${scope}/${path}`;
 assert.equal(loadTelegramMedia(join(root, project), ref("medium.png")).method, "sendDocument");
 for (const path of ["../project.json", "missing.png", "link.png", "large.png", "%2e%2e/no", "/etc/passwd", "a\\b"])
   assert.throws(() => loadTelegramMedia(join(root, project), ref(path)));
@@ -202,10 +213,13 @@ function start(receiveUpdates = false) {
   bridge = startTelegram({
     receiveUpdates,
     dispatch: async (input) => {
-      assert.equal(input.id, project);
-      if (input.threadId !== thread) throw Error("unauthorized");
-      await dispatchHook?.();
+      if (input.action === "thread-history" && input.threadId !== thread) throw Error("Unknown agent id");
       return {};
+    },
+    artifactScopes: async (projectId) => {
+      assert.equal(projectId, project);
+      await dispatchHook?.();
+      return new Set([thread, chatScope, jobScope]);
     },
     chats: async () => {
       await chatsHook?.();
@@ -437,8 +451,70 @@ try {
   start();
   await bridge.flush();
   assert.equal(sends.length, 5);
-  assert(sends.every((s) => s.method === "sendMessage" && /unavailable/.test(s.input.text)));
+  assert(sends.every((s) => s.method === "sendMessage" && /Attachment not sent: /.test(s.input.text)));
   assert(sends.every((s) => !s.input.text.includes("!Traversal")));
+
+  // 85-88: scopes of the project's chats and Jobs are sent; refusals say why, typed, with no path.
+  reset(`![Chat shot](${scopedRef(chatScope, "shot.png")}) ![Job shot](${scopedRef(jobScope, "shot.png")})`);
+  start();
+  await bridge.flush();
+  assert.deepEqual(
+    sends.map((s) => s.method),
+    ["sendMediaGroup"],
+    "85/86 chat and Job scope attachments are sent as media",
+  );
+  assert.equal(sends[0].input.files.length, 2);
+  reset(`[Job plan](${scopedRef(jobScope, "plan.html")})`);
+  start();
+  await bridge.flush();
+  assert.deepEqual(
+    sends.map((s) => s.method),
+    ["sendDocument"],
+    "86 a Job-scoped file is sent",
+  );
+
+  reset(
+    [
+      `[Foreign](${scopedRef(foreignScope, "shot.png")})`,
+      `[Dir](${ref("batch")})`,
+      `[Missing](${ref("missing.png")})`,
+      `[Empty](${ref("empty.png")})`,
+      `[Large](${ref("large.png")})`,
+      `[Bad](${ref("../project.json")})`,
+    ].join(" "),
+  );
+  start();
+  await bridge.flush();
+  const reasons = ["unauthorized", "not-a-file", "not-found", "empty", "too-large", "invalid"],
+    wording = [/not part of this project/, /not a regular file/, /not found/, /empty/, /50 MB/, /invalid/];
+  assert.equal(sends.length, 6);
+  sends.forEach((s, i) => {
+    assert.equal(s.method, "sendMessage");
+    assert.match(s.input.text, wording[i], `88 reason text ${reasons[i]}`);
+    assert(!s.input.text.includes(root) && !s.input.text.includes("/artifacts/"), "88 no file system path in the text");
+  });
+  const refused = JSON.parse(readFileSync(statePath)).deliveryErrors.filter((e) => e.kind === "attachment");
+  assert.deepEqual(
+    refused.map((e) => e.reason),
+    reasons,
+    "88 every refusal is recorded once with its typed reason",
+  );
+  assert(refused.every((e) => !JSON.stringify(e).includes(root)));
+
+  // 89: an album with one refused item falls back to single files and records only the refused one.
+  reset(`![A](${ref("demo.png")}) ![B](${ref("batch")}) ![C](${scopedRef(foreignScope, "shot.png")})`);
+  start();
+  await bridge.flush();
+  assert.deepEqual(
+    sends.map((s) => s.method),
+    ["sendPhoto", "sendMessage", "sendMessage"],
+  );
+  assert.deepEqual(
+    JSON.parse(readFileSync(statePath))
+      .deliveryErrors.filter((e) => e.kind === "attachment")
+      .map((e) => e.reason),
+    ["not-a-file", "unauthorized"],
+  );
 
   reset(`${"x".repeat(960)} ![](${ref("demo.png")})`);
   start();
@@ -561,7 +637,14 @@ try {
     sends.map((s) => s.method),
     ["sendPhoto", "sendMessage"],
   );
-  assert.match(sends[1].input.text, /unavailable/);
+  assert.match(sends[1].input.text, /not found/);
+  assert.deepEqual(
+    JSON.parse(readFileSync(statePath))
+      .deliveryErrors.filter((e) => e.kind === "attachment")
+      .map((e) => e.reason),
+    ["not-found"],
+    "89 the saved album plan falls back to singles and the missing item records exactly one refusal",
+  );
   bridge.close();
   start();
   await bridge.flush();
