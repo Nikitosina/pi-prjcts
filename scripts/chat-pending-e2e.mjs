@@ -737,6 +737,22 @@ await kit.run(async () => {
       (await ev(`localStorage.getItem(${JSON.stringify(draftKey)})`)) === null,
       await ev(`localStorage.getItem(${JSON.stringify(draftKey)})`),
     );
+    // A send waits for its draft revision, so even a reload right after it went can settle the draft.
+    await reset();
+    await ev(`(() => { const box = document.querySelector('#composer-input'); box.focus(); })()`);
+    await page.cdp("Input.insertText", { text: "locked send MARK-R9D" });
+    await page.waitFor(`(localStorage.getItem(${JSON.stringify(draftKey)}) ?? "").includes("MARK-R9D")`, "R9D draft stored");
+    await ev(
+      `void navigator.locks.request(${JSON.stringify(`pi-draft-lock:${draftKey}`)}, () => new Promise((end) => { window.__unlockDraft = end; }))`,
+    );
+    await page.waitFor(`!!window.__unlockDraft`, "R9D draft lock held");
+    await ev(`document.querySelector('#composer').requestSubmit()`);
+    await kit.delay(400);
+    const early = await countCalls("message");
+    await ev(`window.__unlockDraft()`);
+    await kit.eventually(async () => (await hostCount(A, undefined, "MARK-R9D")) === 1, "R9D reached the host");
+    check("R9 a send does not go before its draft revision is in its handle", early === 0, early);
+    await page.waitFor(`localStorage.getItem(${JSON.stringify(draftKey)}) === null`, "R9D draft settled");
   });
   // R10: an edited restored draft is its own message and stays in its chat; the old bubble keeps its text and id.
   await section("R10", async () => {
@@ -997,6 +1013,25 @@ await kit.run(async () => {
       "R34 dismissing the unedited restore clears it",
       (await composer()) === "" && (await owners("MARK-R34")).length === 0,
       await composer(),
+    );
+    await ev(`__rule("message", { fail: "json" })`);
+    await typeAndSend("held dismiss MARK-R34B");
+    await page.waitFor(`[...document.querySelectorAll('#feed .msg.owner')].some((n) => n.dataset.delivery === "failed")`, "R34B failed");
+    const r34Key = `pi-draft:${encodeURIComponent(A)}:main`;
+    await ev(
+      `void navigator.locks.request(${JSON.stringify(`pi-draft-lock:${r34Key}`)}, () => new Promise((end) => { window.__unlockDraft = end; }))`,
+    );
+    await page.waitFor(`!!window.__unlockDraft`, "R34B draft lock held");
+    await ev(`document.querySelector('#feed [data-pending-dismiss]').click()`);
+    await kit.delay(300);
+    const heldHandle = await ev(
+      `Object.entries(localStorage).some(([k, v]) => k.startsWith("pi-pending-send:") && v.includes("MARK-R34B"))`,
+    );
+    await ev(`window.__unlockDraft()`);
+    check("R34 a dismissed refusal keeps its handle until its draft is taken", heldHandle === true, heldHandle);
+    await page.waitFor(
+      `!Object.entries(localStorage).some(([k, v]) => k.startsWith("pi-pending-send:") && v.includes("MARK-R34B")) && document.querySelector('#composer-input').value === ""`,
+      "R34B dismissed",
     );
   });
   // R37: a handle another tab removed is stored again before Retry sends; without storage Retry does not send.

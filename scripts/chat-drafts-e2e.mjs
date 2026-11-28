@@ -542,6 +542,24 @@ await kit.run(async () => {
     check("D18 the unsaved text is still in the box after a switch", (await a.composer()) === "keepme and more", await a.composer());
     await page.evaluate(`window.__deny = false`);
     await a.empty();
+    await a.type("sent MARK-QS");
+    await page.evaluate(`__hold("message")`);
+    await a.send();
+    await page.waitFor(`document.querySelectorAll('#feed .msg.owner.pending').length === 1`, "pending MARK-QS");
+    await page.evaluate(`window.__deny = true`);
+    await a.type("newer MARK-QS");
+    await page.evaluate(`__release("message")`);
+    await a.reply("sent MARK-QS");
+    await kit.delay(300);
+    await a.chat(A, other);
+    await a.chat(A, "main");
+    check(
+      "D18 settling a send keeps a newer text the browser could not store",
+      (await a.composer()) === "newer MARK-QS",
+      await a.composer(),
+    );
+    await page.evaluate(`window.__deny = false`);
+    await a.empty();
   });
   // D19, D20: the Host agent composer has one draft per host.
   await section("host agent", async () => {

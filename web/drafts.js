@@ -69,7 +69,9 @@ function takeSent(key, rev, text) {
     took = true;
   }
   if (rev !== undefined && readDraft(key)?.rev === rev) {
-    dropDraft(key);
+    try {
+      localStorage.removeItem(key);
+    } catch {}
     took = true;
   }
   return took;

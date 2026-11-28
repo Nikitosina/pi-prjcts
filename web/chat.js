@@ -131,7 +131,7 @@ export function mountChat(client, media, slash, memory) {
   async function settleHandle(send, work) {
     settling.add(send.id);
     try {
-      return await work(sendKey(send), await (send.revision ?? send.draftRev), send.draft ?? send.text);
+      return await work(sendKey(send), send.draftRev, send.draft ?? send.text);
     } finally {
       settling.delete(send.id);
       saveHandles();
@@ -969,6 +969,8 @@ export function mountChat(client, media, slash, memory) {
       }
       return;
     }
+    // The handle carries the revision before anything is sent, so a reload can still settle the draft.
+    const draftRev = await revision;
     const send = {
       id: uuid(),
       projectId,
@@ -976,7 +978,7 @@ export function mountChat(client, media, slash, memory) {
       text,
       draft: raw,
       draftKey,
-      revision,
+      ...(draftRev ? { draftRev } : {}),
       hostPrefix,
       state: "sending",
       error: "",
@@ -996,16 +998,6 @@ export function mountChat(client, media, slash, memory) {
     ))
       pendingSends.splice(pendingSends.indexOf(old), 1);
     pendingSends.push(send);
-    // The handle is stored before the send without waiting for the draft lock; the revision joins it once known.
-    void revision.then((draftRev) => {
-      send.draftRev = draftRev;
-      if (!draftRev || !savedHandles.has(send.id)) return;
-      try {
-        const stored = JSON.stringify({ ...JSON.parse(savedHandles.get(send.id) ?? "null"), draftRev });
-        localStorage.setItem(HANDLE_PREFIX + send.id, stored);
-        savedHandles.set(send.id, stored);
-      } catch {}
-    });
     renderFeed();
     await deliver(send);
   });
@@ -1146,11 +1138,12 @@ export function mountChat(client, media, slash, memory) {
       );
       if (!send) return;
       if (pendingDismiss) {
+        // Only a refused message's untouched draft goes with its bubble; an edited one is a new, unsent message, and an unconfirmed send may still arrive.
+        const original = send.draft ?? send.text,
+          taken = send.state === "failed" ? settleHandle(send, takeDraftIf) : null;
         pendingSends.splice(pendingSends.indexOf(send), 1);
         renderFeed();
-        // Only a refused message's untouched draft goes with its bubble; an edited one is a new, unsent message, and an unconfirmed send may still arrive.
-        const original = send.draft ?? send.text;
-        if (send.state === "failed" && (await settleHandle(send, takeDraftIf)) && inCurrentChat(send) && input.value === original) {
+        if (taken && (await taken) && inCurrentChat(send) && input.value === original) {
           input.value = "";
           grow();
         }

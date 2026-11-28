@@ -40,7 +40,7 @@ nothing is evicted for size.
 
 ## Size
 
-- D18 The browser refuses to store a draft and the owner is not told; or the older stored text is deleted when the new one cannot be written; or a refused Host agent text is not put back in the composer because it could not be stored; or a switch away and back replaces the unsaved text with the older stored one.
+- D18 The browser refuses to store a draft and the owner is not told; or the older stored text is deleted when the new one cannot be written; or a refused Host agent text is not put back in the composer because it could not be stored; or a switch away and back replaces the unsaved text with the older stored one; or settling a send deletes the stored text it took together with a newer text the browser could not store.
 
 ## Host agent
 
