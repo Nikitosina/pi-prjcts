@@ -82,6 +82,7 @@ import { coordinatorShellTools } from "./coordinator-shell.ts";
 import { coordinatorExecutionTools } from "./coordinator-execution.ts";
 import { taskWorkerWorkspaces } from "./task-worker-workspace.ts";
 import { coordinatorWorkspaces } from "./coordinator-workspace.ts";
+import { coordinatorArtifactScopes } from "./coordinator-workspace-state.ts";
 import { coordinatorGhTools, ghEnabled } from "./coordinator-gh.ts";
 
 import { coordinatorJobReadTools } from "./job-read-tools.ts";
@@ -392,6 +393,8 @@ export type DurableProjectRuntime = {
   /** The coordinator model declares image input. */
   acceptsImages: boolean;
   chats(): Promise<DurableChat[]>;
+  /** Every artifact scope this project owns besides its id: Jobs (their subagents store under the Job id), agents and coordinator chat workspaces. */
+  artifactScopes(): Promise<ReadonlySet<string>>;
   /** Input submissions of one chat, without the transcript; used to settle ledgers of chats not being viewed. */
   chatSubmissions(chatId: string, after?: number): Promise<DurableSubmissionState[]>;
   chatCreate(title?: string): Promise<DurableChat>;
@@ -2587,6 +2590,15 @@ export async function openDurableProject(input: {
       chats: () => {
         assertOpen();
         return chatList();
+      },
+      artifactScopes: async () => {
+        assertOpen();
+        const view = await jobs.snapshot(openedHarness);
+        return new Set([
+          ...view.jobs.map((job) => job.id),
+          ...view.agents.map((agent) => agent.id),
+          ...(await coordinatorArtifactScopes(root)),
+        ]);
       },
       chatSubmissions: async (id, after = -1) => {
         assertOpen();
