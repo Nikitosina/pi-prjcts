@@ -283,6 +283,8 @@ await kit.run(async () => {
     await open(page);
     check("D12 a reload keeps the restored text", (await a.composer()) === "refuse solo MARK-R1", await a.composer());
     await a.empty();
+    check("D12 the bubble stays until Dismiss, even after the field was emptied", (await a.owners("MARK-R1")).length === 1);
+    await page.evaluate(`document.querySelector('#feed [data-pending-dismiss]').click()`);
 
     await page.evaluate(`__rule("message", { fail: "json" })`);
     await a.type("refuse dismiss MARK-R2");
@@ -292,11 +294,34 @@ await kit.run(async () => {
       "failed bubble 2",
     );
     const restored = await a.stored(key(A, "main"));
-    await page.evaluate(`document.querySelector('#feed [data-pending-dismiss]').click()`);
+    await page.evaluate(
+      `[...document.querySelectorAll('#feed .msg.owner.pending')].find((n) => n.innerText.includes("MARK-R2")).querySelector('[data-pending-dismiss]').click()`,
+    );
     check(
       "D14 Dismiss removes the unedited draft with its bubble",
       restored === "refuse dismiss MARK-R2" && (await a.stored(key(A, "main"))) === null && (await a.composer()) === "",
       await a.stored(key(A, "main")),
+    );
+  });
+  // D24: another tab typing over the restored text must not cost the refused message.
+  await section("refusal then another tab writes", async () => {
+    await page.evaluate(`__rule("message", { fail: "json" })`);
+    await a.type("refuse four MARK-R4");
+    await a.send();
+    await page.waitFor(
+      `[...document.querySelectorAll('#feed .msg.owner')].some((n) => n.dataset.delivery === "failed")`,
+      "failed bubble 4",
+    );
+    const tabB5 = await newTab();
+    await open(tabB5);
+    await tab(tabB5).type(" B-WROTE");
+    await tabB5.close();
+    await page.reload();
+    await open(page);
+    check(
+      "D24 the refused message is still on a Retry bubble after a reload",
+      (await a.stored(key(A, "main"))) === "refuse four MARK-R4 B-WROTE" && (await a.owners("MARK-R4")).some((item) => item.retry),
+      { stored: await a.stored(key(A, "main")), owners: await a.owners("MARK-R4") },
     );
   });
   // D11, D13: a refusal does not overwrite the newer draft of another tab; the bubble keeps the text.
@@ -332,7 +357,9 @@ await kit.run(async () => {
     await page.waitFor(`!!document.querySelector('#feed [data-pending-retry]')`, "Retry bubble after reload");
     check("D13 the bubble with the refused text survives a reload", (await a.owners("MARK-R3")).length === 1);
     check("D11 the newer draft is in the composer", (await a.composer()) === "refuse two MARK-R3 NEWER", await a.composer());
-    await page.evaluate(`document.querySelector('#feed [data-pending-dismiss]').click()`);
+    await page.evaluate(
+      `[...document.querySelectorAll('#feed .msg.owner.pending')].find((n) => n.innerText.includes("MARK-R3")).querySelector('[data-pending-dismiss]').click()`,
+    );
     check(
       "D14 Dismiss leaves a draft that differs from the bubble",
       (await a.stored(key(A, "main"))) === "refuse two MARK-R3 NEWER",

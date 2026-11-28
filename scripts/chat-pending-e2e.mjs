@@ -522,6 +522,8 @@ await kit.run(async () => {
 
   // P8: slash commands do not create a pending bubble.
   await reset();
+  // The earlier refusal left its text as this chat's draft, as it should.
+  await ev(`(() => { const box = document.querySelector('#composer-input'); box.value = ""; box.dispatchEvent(new Event("input")); })()`);
   await typeAndSend("/name Slash named");
   await kit.delay(500);
   check(

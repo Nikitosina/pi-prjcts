@@ -56,8 +56,12 @@ export function mountChat(client, media, slash, memory) {
           (item.retryOf === undefined || typeof item.retryOf === "string") &&
           (item.draft === undefined || typeof item.draft === "string") &&
           (item.draftKey === undefined || typeof item.draftKey === "string") &&
+          (item.refused === undefined || item.refused === true) &&
           (item.attachments === undefined || (Array.isArray(item.attachments) && item.attachments.every((id) => typeof id === "string")))
         ) {
+          // A refusal whose text is still the stored draft stays restored: the composer holds it, and the bubble only waits for Dismiss.
+          const draftKey = item.draftKey ?? chatDraftKey(client.storagePrefix, item.projectId, item.chatId);
+          const restored = item.refused === true && loadDraft(draftKey)?.text === (item.draft ?? item.text);
           savedHandles.set(item.id, localStorage.getItem(key));
           found.push({
             id: item.id,
@@ -68,9 +72,9 @@ export function mountChat(client, media, slash, memory) {
             ...(item.attachments ? { attachments: item.attachments } : {}),
             ...(item.draft !== undefined ? { draft: item.draft } : {}),
             ...(item.draftKey ? { draftKey: item.draftKey } : {}),
-            state: "unconfirmed",
-            error: "This page was reloaded before the host confirmed the message.",
-            restored: false,
+            state: item.refused ? "failed" : "unconfirmed",
+            error: item.refused ? "The host refused the message." : "This page was reloaded before the host confirmed the message.",
+            restored,
             refused: false,
             failedRead: 0,
           });
@@ -100,9 +104,17 @@ export function mountChat(client, media, slash, memory) {
     savedHandles.set(id, stored);
     return true;
   }
-  // A handle goes once its message is settled: delivered and shown, dismissed, or refused with the text back in the composer.
+  /** A refusal keeps its handle until Dismiss or a later success: another tab may overwrite the restored draft. */
+  function markRefused(send) {
+    try {
+      const stored = JSON.stringify({ ...JSON.parse(savedHandles.get(send.id) ?? "null"), refused: true });
+      localStorage.setItem(HANDLE_PREFIX + send.id, stored);
+      savedHandles.set(send.id, stored);
+    } catch {}
+  }
+  // A handle goes once its message is settled: delivered and shown, or dismissed.
   function saveHandles() {
-    const open = new Set(pendingSends.filter((send) => !(send.state === "failed" && send.restored)).map((send) => send.id));
+    const open = new Set(pendingSends.map((send) => send.id));
     for (const id of [...savedHandles.keys()])
       if (!open.has(id)) {
         try {
@@ -355,7 +367,7 @@ export function mountChat(client, media, slash, memory) {
       renderLive();
     });
   }
-  const inCurrentChat = (send) => send.projectId === state.projectId && send.chatId === state.chatId;
+  const inCurrentChat = (send) => send.projectId === state.projectId && send.chatId === state.chatId && sendKey(send) === currentKey();
   /** Settles the pending sends of the open chat against transcript read number `read`. Only the host's own records count: a job it admitted is
    * delivered, and the transcript entry the runtime linked to that job is the message. A record the host never admitted, or a text that merely
    * looks alike, proves nothing, and only a read after a refusal without any record proves the refusal. */
@@ -376,6 +388,7 @@ export function mountChat(client, media, slash, memory) {
   }
   /** The host admitted the message: its draft is done, unless another tab stored a newer text since (no trimming in the comparison). */
   function settleSent(send) {
+    if (send.state === "sent") return;
     send.state = "sent";
     if (send.draft !== undefined) dropDraftIf(sendKey(send), send.draft);
   }
@@ -386,8 +399,8 @@ export function mountChat(client, media, slash, memory) {
     const key = sendKey(send),
       original = send.draft ?? send.text,
       stored = loadDraft(key);
+    markRefused(send);
     if (stored?.text === original) send.restored = true;
-    else if (!stored && inCurrentChat(send) && !input.value && saveDraft(key, original)) send.restored = true;
     else return;
     if (inCurrentChat(send) && !input.value) {
       input.value = original;
@@ -1107,9 +1120,9 @@ export function mountChat(client, media, slash, memory) {
       if (!send) return;
       if (pendingDismiss) {
         pendingSends.splice(pendingSends.indexOf(send), 1);
-        // Only a draft the owner has not touched goes with its bubble; an edited one is a new, unsent message.
+        // Only a refused message's untouched draft goes with its bubble; an edited one is a new, unsent message, and an unconfirmed send may still arrive.
         const original = send.draft ?? send.text;
-        if (loadDraft(sendKey(send))?.text === original) {
+        if (send.state === "failed" && loadDraft(sendKey(send))?.text === original) {
           if (inCurrentChat(send) && input.value === original) {
             input.value = "";
             grow();

@@ -432,10 +432,7 @@ export function mountHostagent(client, chat, media) {
       await loadHostAgent();
     } catch (reason) {
       // The stored draft is still the sent text unless the owner typed again meanwhile; then the refused text goes in front of the new one.
-      if (input.value) {
-        input.value = `${raw}\n\n${input.value}`;
-        input.dispatchEvent(new Event("input"));
-      } else input.value = raw;
+      input.value = input.value ? `${raw}\n\n${input.value}` : raw;
       // "has no model" / "not in the model catalog": say it where the owner is looking and open the model picker.
       if (/model/i.test(reason.message ?? "")) {
         error = reason.message;
