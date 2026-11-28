@@ -238,6 +238,13 @@ export function mountChat(client, media, slash, memory) {
   function releaseDraft(send) {
     const owner = clientOf(send.hostId);
     if (owner) dropDraftIf(chatDraftKey(owner, send.projectId, send.chatId), send.text);
+    const key = draftKey(send.projectId, send.chatId, send.hostId),
+      held = drafts.get(key);
+    // The restored copy of this very message, untouched since, goes with it.
+    if (held?.sendId === send.id && held.text === held.original) {
+      if (inCurrentChat(send) && input.value === held.text) setComposer("");
+      drafts.delete(key);
+    }
   }
   on("chat-gone", ({ host, projectId, chatId }) => {
     const key = chatDraftKey(host, projectId, chatId);
@@ -251,12 +258,15 @@ export function mountChat(client, media, slash, memory) {
       away = left && left !== now ? drafts.get(left) : undefined;
     // An unedited restored draft goes back to the bubble's own Retry; an edited one waits for its chat.
     if (away && away.text === away.original) {
+      if (composerStore) dropDraftIf(composerStore, away.text);
       forgetRestored(away.sendId);
       drafts.delete(left);
     }
     composerKey = now;
     composerStore = chatDraftKey(state.host, state.projectId, state.chatId);
-    const saved = loadDraft(composerStore),
+    const stored = loadDraft(composerStore),
+      // A draft whose text is a message still pending in this chat was already sent from this tab: its bubble is the copy, not the composer.
+      saved = stored && !pendingSends.some((send) => inCurrentChat(send) && send.text === stored.text) ? stored : null,
       restored = drafts.get(now);
     input.value = restored?.text ?? saved?.text ?? "";
     grow();
@@ -1131,12 +1141,9 @@ export function mountChat(client, media, slash, memory) {
       if (!send) return;
       if (pendingDismiss) {
         pendingSends.splice(pendingSends.indexOf(send), 1);
-        const held = drafts.get(draftKey(send.projectId, send.chatId, send.hostId));
-        // Only a draft the owner has not touched goes with its bubble; an edited one is a new, unsent message.
-        if (held?.sendId === send.id && held.text === held.original) {
-          if (input.value === held.text) setComposer("");
-          drafts.delete(draftKey(send.projectId, send.chatId, send.hostId));
-        }
+        // Dismissing an unsent message discards the copies of its text that the composer or the store still hold.
+        if (inCurrentChat(send) && input.value === send.text) setComposer("");
+        releaseDraft(send);
       }
       follow.follow();
       if (pendingRetry) send.restored = false;
