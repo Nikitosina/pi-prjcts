@@ -41,6 +41,7 @@ try {
       const type = async (text) => {
         await q(`document.querySelector('#composer-input').focus()`);
         await page.cdp("Input.insertText", { text });
+        await local.delay(100);
       };
       const composer = () => q(`document.querySelector('#composer-input').value`);
       const stored = async (key) => JSON.parse((await q(`localStorage.getItem(${JSON.stringify(key)})`)) ?? "null")?.text ?? null;
@@ -152,6 +153,7 @@ try {
         await pair();
         await openProject(hostId, "Remote drafts", "seed remote");
         await type("remote again MARK-R2");
+        await page.waitFor(`localStorage.getItem(${JSON.stringify(remoteKey)}) !== null`, "remote draft stored");
         const before = await stored(remoteKey);
         await plantHandles();
         const deviceId = await q(`(async()=> (await (await import('/inbox-wire/store.js')).get('inbox-device:${hostId}')).id)()`);

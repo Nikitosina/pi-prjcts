@@ -116,7 +116,7 @@ export function mountChat(client, media, slash, memory) {
   }
   // A handle goes once its message is settled: delivered and shown, or dismissed.
   function saveHandles() {
-    const open = new Set(pendingSends.map((send) => send.id));
+    const open = new Set([...pendingSends.map((send) => send.id), ...settling]);
     for (const id of [...savedHandles.keys()])
       if (!open.has(id)) {
         try {
@@ -126,6 +126,17 @@ export function mountChat(client, media, slash, memory) {
       }
   }
   pendingSends.push(...loadHandles());
+  const settling = new Set(); // attempt ids whose draft is still being settled: their handle stays, so a reload settles it again
+  /** Runs `work` on the draft of `send` and keeps its handle until it has run. */
+  async function settleHandle(send, work) {
+    settling.add(send.id);
+    try {
+      return await work(sendKey(send), await (send.revision ?? send.draftRev), send.draft ?? send.text);
+    } finally {
+      settling.delete(send.id);
+      saveHandles();
+    }
+  }
   const expanded = new Set(); // tool callIds and group keys the owner opened
   const revealed = new Set(); // long owner messages opened during this chat visit, keyed by transcript scope; they stay open until the owner navigates away
   const CHAT_SCOPE = "msg:"; // the coordinator chat's keys have no scope prefix
@@ -382,7 +393,7 @@ export function mountChat(client, media, slash, memory) {
   function settleSent(send) {
     if (send.state === "sent") return;
     send.state = "sent";
-    if (send.draft !== undefined) void settleDraft(sendKey(send), send.draftRev, send.draft);
+    if (send.draft !== undefined) void settleHandle(send, settleDraft);
   }
   /** A refusal the host reported and recorded no job for: the message was not sent. Its text is still the chat's stored draft, shown in the composer
    * of that chat, unless the owner has written something else there since: then the bubble keeps the text and its Retry. */
@@ -958,7 +969,6 @@ export function mountChat(client, media, slash, memory) {
       }
       return;
     }
-    const draftRev = await revision;
     const send = {
       id: uuid(),
       projectId,
@@ -966,7 +976,7 @@ export function mountChat(client, media, slash, memory) {
       text,
       draft: raw,
       draftKey,
-      ...(draftRev ? { draftRev } : {}),
+      revision,
       hostPrefix,
       state: "sending",
       error: "",
@@ -986,6 +996,16 @@ export function mountChat(client, media, slash, memory) {
     ))
       pendingSends.splice(pendingSends.indexOf(old), 1);
     pendingSends.push(send);
+    // The handle is stored before the send without waiting for the draft lock; the revision joins it once known.
+    void revision.then((draftRev) => {
+      send.draftRev = draftRev;
+      if (!draftRev || !savedHandles.has(send.id)) return;
+      try {
+        const stored = JSON.stringify({ ...JSON.parse(savedHandles.get(send.id) ?? "null"), draftRev });
+        localStorage.setItem(HANDLE_PREFIX + send.id, stored);
+        savedHandles.set(send.id, stored);
+      } catch {}
+    });
     renderFeed();
     await deliver(send);
   });
@@ -1127,14 +1147,10 @@ export function mountChat(client, media, slash, memory) {
       if (!send) return;
       if (pendingDismiss) {
         pendingSends.splice(pendingSends.indexOf(send), 1);
+        renderFeed();
         // Only a refused message's untouched draft goes with its bubble; an edited one is a new, unsent message, and an unconfirmed send may still arrive.
         const original = send.draft ?? send.text;
-        if (
-          send.state === "failed" &&
-          (await takeDraftIf(sendKey(send), send.draftRev, original)) &&
-          inCurrentChat(send) &&
-          input.value === original
-        ) {
+        if (send.state === "failed" && (await settleHandle(send, takeDraftIf)) && inCurrentChat(send) && input.value === original) {
           input.value = "";
           grow();
         }

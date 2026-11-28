@@ -370,6 +370,7 @@ await kit.run(async () => {
     await composer(),
   );
   await ev(`document.querySelector('#feed [data-pending-dismiss]').click()`);
+  await kit.eventually(async () => (await composer()) === "", "P6b composer after Dismiss", 50).catch(() => {});
   check("P6b Dismiss takes the unedited draft with its bubble", (await composer()) === "", await composer());
 
   // P7b: the host recorded the message and then reported an error: not "Not sent", no restored draft.
@@ -710,6 +711,32 @@ await kit.run(async () => {
       "R9 nothing was sent again after the reload",
       (await countCalls("message")) === 0 && (await hostCount(A, undefined, "MARK-R9B")) === 1,
     );
+    // A reload while the delivered send still waits to delete its draft keeps the handle, so the new page deletes it.
+    const draftKey = `pi-draft:${encodeURIComponent(A)}:main`;
+    await ev(`window.__rules.message = { fail: "lost", gate: new Promise((open) => { window.__open = open; }) }`);
+    await typeAndSend("settle across reload MARK-R9C");
+    await page.waitFor(
+      `Object.entries(localStorage).some(([k, v]) => k.startsWith("pi-pending-send:") && JSON.parse(v).draftRev && JSON.parse(v).text.includes("MARK-R9C"))`,
+      "R9C handle has its revision",
+    );
+    await ev(
+      `void navigator.locks.request(${JSON.stringify(`pi-draft-lock:${draftKey}`)}, () => new Promise((end) => { window.__unlockDraft = end; }))`,
+    );
+    await page.waitFor(`!!window.__unlockDraft`, "R9C draft lock held");
+    await ev(`window.__open()`);
+    await kit.eventually(async () => (await hostCount(A, undefined, "MARK-R9C")) === 1, "R9C reached the host");
+    await kit.delay(1500);
+    await page.reload();
+    await page.waitFor(`document.body.dataset.ready === "1" && !!document.querySelector('#composer-input')`, "R9C reloaded");
+    await ev(wrapFetch);
+    await kit
+      .eventually(async () => (await ev(`localStorage.getItem(${JSON.stringify(draftKey)})`)) === null, "R9C draft deleted", 50)
+      .catch(() => {});
+    check(
+      "R9 a reload before the delivered send deleted its draft leaves no draft behind",
+      (await ev(`localStorage.getItem(${JSON.stringify(draftKey)})`)) === null,
+      await ev(`localStorage.getItem(${JSON.stringify(draftKey)})`),
+    );
   });
   // R10: an edited restored draft is its own message and stays in its chat; the old bubble keeps its text and id.
   await section("R10", async () => {
@@ -965,6 +992,7 @@ await kit.run(async () => {
     await page.waitFor(`[...document.querySelectorAll('#feed .msg.owner')].some((n) => n.dataset.delivery === "failed")`, "R34 failed");
     check("R34 a real refusal restores the draft", (await composer()) === "untouched MARK-R34", await composer());
     await ev(`document.querySelector('#feed [data-pending-dismiss]').click()`);
+    await kit.eventually(async () => (await composer()) === "", "R34 composer after Dismiss", 50).catch(() => {});
     check(
       "R34 dismissing the unedited restore clears it",
       (await composer()) === "" && (await owners("MARK-R34")).length === 0,

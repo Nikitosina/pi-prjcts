@@ -44,7 +44,7 @@ Written before the code. The saved request is the intent: a restart continues it
 - R6 The saved effective content stays in the record after admission.
 - R7 The attachment block delivered after a restart differs from the one saved (a renamed or deleted upload changes the text).
 - R8 A turn-card Retry whose ack was lost sends under a new request id on the next click, so the chat gets two turns.
-- R9 A browser reload with a message in flight loses the bubble: the owner types it again (a duplicate) or sees nothing about it. A recovery handle must survive the reload, belong to one project and chat, and never leak into another.
+- R9 A browser reload with a message in flight loses the bubble: the owner types it again (a duplicate) or sees nothing about it. A recovery handle must survive the reload, belong to one project and chat, and never leak into another. A delivered send whose handle goes before its draft is deleted leaves that draft behind for good when the page reloads in between.
 - R10 A restored draft that the owner edited stays tied to the old bubble: the old bubble hides Retry, or sending the edit reuses the old request id.
 - R11 A JSON error that did not come from the host's own refusal (a gateway) is taken as proof that nothing was sent, so the draft is restored and a second copy can be sent.
 - R12 A Telegram replay of a record saved before origins were stored is refused as a different message, or a conflicting replay (other text, other chat, a web record) is accepted.
