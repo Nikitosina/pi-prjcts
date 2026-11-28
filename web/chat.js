@@ -220,10 +220,11 @@ export function mountChat(client, media, slash, memory) {
   // The composer shows the draft of the open chat. It is stored on this tab's own input only; switching, reloading and closing never write it.
   // The text of a send in flight stays stored until the host admits the message, so a refusal can give it back, but it is not shown as a draft meanwhile.
   const currentKey = () => chatDraftKey(client.storagePrefix, state.projectId, state.chatId);
-  const sendKey = (send) => send.draftKey ?? chatDraftKey(send.hostPrefix ?? client.storagePrefix, send.projectId, send.chatId);
-  /** The host that owns the send's project: carried by the send, so the selection at the time of a Retry never decides it. A handle stored before
-   * sends named their host has none, and null makes its delivery fail closed. */
-  const sendHost = (send) => (send.hostPrefix === undefined ? null : client.owning(send.hostPrefix));
+  // A handle stored before sends named their host comes from an inbox that had no remote hosts yet, so it belongs to the local host.
+  const sendPrefix = (send) => send.hostPrefix ?? "";
+  const sendKey = (send) => send.draftKey ?? chatDraftKey(sendPrefix(send), send.projectId, send.chatId);
+  /** The host that owns the send's project: carried by the send, so the selection at the time of a Retry never decides it. */
+  const sendHost = (send) => client.owning(sendPrefix(send));
   const carets = new Map(); // draft key → the composer's text and caret when the owner left that chat, for this page's lifetime
   let composerKey = null; // the draft the composer shows
   /** A refused message whose exact text the composer holds now needs no Retry: sending the composer sends it. */
@@ -231,8 +232,11 @@ export function mountChat(client, media, slash, memory) {
   function visibleDraft(key) {
     const stored = loadDraft(key);
     if (!stored) return null;
+    // Only the revision the send took is hidden: the same text typed again is a new draft. Text the browser could not store has no revision.
+    const took = (send) =>
+      send.draftRev !== undefined ? send.draftRev === stored.rev : stored.rev === undefined && send.draft === stored.text;
     const flying = pendingSends.some(
-      (send) => send.draft === stored.text && sendKey(send) === key && (send.state === "sending" || send.state === "unconfirmed"),
+      (send) => took(send) && sendKey(send) === key && (send.state === "sending" || send.state === "unconfirmed"),
     );
     return flying ? null : stored;
   }
@@ -255,6 +259,8 @@ export function mountChat(client, media, slash, memory) {
     if (composerKey && composerKey !== key) carets.set(composerKey, { text: input.value, caret: input.selectionStart });
     composerKey = key;
     showDraft(key);
+    // The composer stays off until the first chat opens: input without a chat would have no draft to belong to.
+    input.disabled = false;
     older = [];
     olderGroups = null;
     follow.follow();

@@ -358,7 +358,47 @@ await kit.run(async () => {
     await tabB7.close();
     await a.empty();
   });
-  // D28: a pending handle stored before sends named their host fails closed on Retry instead of going to the selected host.
+  // D31: the composer takes no input before the first chat opens; a slow start would otherwise file it under no chat.
+  await section("before the first chat", async () => {
+    const slow = await page.newTab("about:blank");
+    extra.push(slow);
+    await slow.cdp("Page.addScriptToEvaluateOnNewDocument", {
+      source: `(() => { const real = window.fetch.bind(window); let open; const gate = new Promise((ok) => (open = ok)); window.__openList = open;
+        window.fetch = async (url, init) => { if (url === "/api" && init?.body && JSON.parse(init.body).action === "list") await gate; return real(url, init); }; })()`,
+    });
+    await slow.navigate(url);
+    await slow.waitFor(`!!document.querySelector('#composer-input') && !!window.__openList`, "slow page");
+    await kit.delay(500);
+    const before = await slow.evaluate(`document.querySelector('#composer-input').disabled`);
+    await slow.evaluate(`window.__openList()`);
+    await slow.waitFor(`document.body.dataset.ready === "1"`, "slow page ready");
+    check(
+      "D31 the composer is off until a chat opens, and on after",
+      before === true && (await slow.evaluate(`document.querySelector('#composer-input').disabled`)) === false,
+      before,
+    );
+  });
+  // D32: an unconfirmed send hides only the revision it took; the same text typed again is a new draft and stays.
+  await section("same text again", async () => {
+    await a.type("again MARK-AGAIN");
+    await page.evaluate(`__hold("message")`);
+    await a.send();
+    await page.waitFor(`document.querySelectorAll('#feed .msg.owner.pending').length === 1`, "pending again");
+    await a.type("again MARK-AGAIN");
+    await a.chat(A, other);
+    await a.chat(A, "main");
+    const shown = await a.composer();
+    await page.evaluate(`__release("message")`);
+    await a.reply("again MARK-AGAIN");
+    await kit.delay(150);
+    check(
+      "D32 the retyped text shows while the first copy is in flight, and survives its settling",
+      shown === "again MARK-AGAIN" && (await a.stored(key(A, "main"))) === "again MARK-AGAIN",
+      { shown, stored: await a.stored(key(A, "main")) },
+    );
+    await a.empty();
+  });
+  // D28: a pending handle stored before sends named their host came from an inbox without remote hosts, so it belongs to the local host.
   await section("handle without a host", async () => {
     await page.evaluate(
       `localStorage.setItem("pi-pending-send:00000000-0000-4000-8000-00000000d028", JSON.stringify({ id: "00000000-0000-4000-8000-00000000d028", projectId: ${JSON.stringify(A)}, chatId: "main", text: "hostless MARK-HOSTLESS" }))`,
@@ -367,14 +407,13 @@ await kit.run(async () => {
     await open(page);
     await page.waitFor(`!!document.querySelector('#feed [data-pending-retry]')`, "hostless bubble");
     await page.evaluate(`document.querySelector('#feed [data-pending-retry]').click()`);
-    await page.waitFor(`document.body.innerText.includes("does not know the host")`, "fail-closed toast");
+    await a.reply("hostless MARK-HOSTLESS");
     check(
-      "D28 a handle without its host is never sent",
-      (await page.evaluate(`window.__calls.filter((c) => c.action === "message").length`)) === 0 &&
+      "D28 a handle without its host is retried on the local host",
+      (await page.evaluate(`window.__calls.filter((c) => c.action === "message").length`)) === 1 &&
         (await a.owners("MARK-HOSTLESS")).length === 1,
       await page.evaluate(`window.__calls`),
     );
-    await page.evaluate(`document.querySelector('#feed [data-pending-dismiss]').click()`);
   });
   // D12, D14: a refusal gives the text back to an empty composer, and it survives a reload; Dismiss takes the unedited draft.
   await section("refusal", async () => {
