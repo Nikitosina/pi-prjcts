@@ -2,22 +2,24 @@
 // host's storage prefix (`pi-host:<id>:` for a remote host), so a reload brings it back and Forget host or a revocation removes a host's drafts.
 // A tab writes only for its own owner's input; nothing here expires or evicts. localStorage has no compare-and-set, so every read-modify-write of
 // one key runs inside a Web Lock named after it: tabs take turns, and a check followed by a delete cannot lose another tab's newer text.
+import { toast } from "./state.js";
+
 const MARK = "pi-draft:";
 const SETTLED = "pi-send-settled:";
 const SETTLED_KEEP_MS = 7 * 24 * 3600 * 1000;
+/** The chat keeps one handle per pending send under this prefix until the send is settled. */
+export const PENDING_PREFIX = "pi-pending-send:";
 
 export const chatDraftKey = (prefix, projectId, chatId) => `${prefix}${MARK}${encodeURIComponent(projectId)}:${encodeURIComponent(chatId)}`;
 export const hostAgentDraftKey = (prefix) => `${prefix}${MARK}host-agent`;
-/** Where a refused Host agent text lives until Retry or Dismiss: the Host agent has no bubble, and its draft may already hold newer text. */
-export const hostAgentRefusedKey = (prefix) => `${prefix}${MARK}host-agent-refused`;
 
 /** Runs `work` alone among all tabs that touch `key`. */
 export function withDraft(key, work) {
   return navigator.locks ? navigator.locks.request(`pi-draft-lock:${key}`, work) : Promise.resolve().then(work);
 }
 
-const typed = new Map(); // key → the latest text this tab typed and has not written yet
-const queued = new Set();
+const typed = new Map(); // key → the latest text this tab typed and has not written yet, with the turn that writes it
+let turns = 0;
 
 /** `{ text, caret }`, or null when there is none. */
 export function loadDraft(key) {
@@ -72,36 +74,50 @@ export function forgetOldSettles() {
       if (key.startsWith(SETTLED) && Date.now() - Number(localStorage.getItem(key)) > SETTLED_KEEP_MS) localStorage.removeItem(key);
   } catch {}
 }
-/** Writes the owner's latest text of `key` in turn with other tabs. An earlier input still waiting for the lock is overtaken by a later one, never the other
- * way round. `done(false)` when the browser refused to keep it. */
-export function typeDraft(key, text, caret, done) {
-  typed.set(key, { text, caret });
-  if (queued.has(key)) return;
-  queued.add(key);
+/** Writes the owner's latest text of `key` in turn with other tabs. Every input queues its own turn and writes only while it is still this tab's
+ * latest, so an earlier input never lands after a later one, whatever other tabs queued in between. */
+export function typeDraft(key, text, caret) {
+  const turn = ++turns;
+  typed.set(key, { text, caret, turn });
   void withDraft(key, () => {
-    queued.delete(key);
     const latest = typed.get(key);
+    if (latest?.turn !== turn) return;
     typed.delete(key);
-    if (latest) done(saveDraft(key, latest.text, latest.caret));
+    saveDraft(key, latest.text, latest.caret);
   });
 }
-/** False when the browser refused to keep the text; the older stored text is then left as it was. An empty field is no draft. */
-export function saveDraft(key, text, caret = text.length) {
-  if (text === "") {
-    dropDraft(key);
-    return true;
-  }
+/** A text given back after a failed send joins what is already there: alone when there is nothing, else below it after a blank line. */
+export const joinDraft = (current, text) => (current === "" || current === text ? text : `${current}\n\n${text}`);
+/** Gives a refused `text` back to the stored draft of `key` in turn with other tabs: the newest stored text, or this tab's unwritten input, stays
+ * and the text joins it, so neither is lost. */
+export const restoreDraft = (key, text) =>
+  withDraft(key, () => {
+    const current = typed.get(key)?.text ?? readDraft(key)?.text ?? "";
+    typed.delete(key);
+    saveDraft(key, joinDraft(current, text));
+  });
+/** The older stored text is left as it was when the browser refuses the new one, and the owner is told. An empty field is no draft. */
+function saveDraft(key, text, caret = text.length) {
+  if (text === "") return dropDraft(key);
   try {
     localStorage.setItem(key, JSON.stringify({ text, caret }));
-    return true;
   } catch {
-    return false;
+    toast("Draft not saved: browser storage is full. The text stays in the box, but a reload would lose it.", { error: true, ms: 8000 });
   }
 }
-/** Forget host or a revoked device: every draft one remote host left in this browser. */
+/** Forget host or a revoked device: every draft and pending-send handle one remote host left in this browser. */
 export function dropHostDrafts(hostId) {
+  const prefix = `pi-host:${hostId}:`;
+  const ownHandle = (key) => {
+    try {
+      const handle = JSON.parse(localStorage.getItem(key) ?? "null");
+      return handle?.hostPrefix === prefix || (typeof handle?.draftKey === "string" && handle.draftKey.startsWith(prefix));
+    } catch {
+      return false;
+    }
+  };
   try {
-    const prefix = `pi-host:${hostId}:${MARK}`;
-    for (const key of Object.keys(localStorage)) if (key.startsWith(prefix)) localStorage.removeItem(key);
+    for (const key of Object.keys(localStorage))
+      if (key.startsWith(prefix + MARK) || (key.startsWith(PENDING_PREFIX) && ownHandle(key))) localStorage.removeItem(key);
   } catch {}
 }

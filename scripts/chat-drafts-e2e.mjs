@@ -314,11 +314,20 @@ await kit.run(async () => {
     );
     await holder.waitFor(`!!window.__unlock`, "lock held by the other tab");
     await a.type("x");
+    // The other tab queues its own write between A's two inputs: A's later input must still land last.
+    await holder.evaluate(
+      `void navigator.locks.request(${JSON.stringify(`pi-draft-lock:${key(A, "main")}`)}, () => localStorage.setItem(${JSON.stringify(key(A, "main"))}, JSON.stringify({ text: "between" })))`,
+    );
     await a.type("y");
     check("D25 typing waits while another tab holds the key", (await a.stored(key(A, "main"))) === null, await a.stored(key(A, "main")));
     await holder.evaluate(`window.__unlock()`);
     await page.waitFor(`localStorage.getItem(${JSON.stringify(key(A, "main"))}) !== null`, "typed text written");
-    check("D25 the later input is the one stored", (await a.stored(key(A, "main"))) === "xy", await a.stored(key(A, "main")));
+    await kit.delay(300);
+    check(
+      "D25 the later input is the one stored, after the other tab's queued write",
+      (await a.stored(key(A, "main"))) === "xy",
+      await a.stored(key(A, "main")),
+    );
     await holder.close();
     await a.empty();
   });
@@ -405,6 +414,36 @@ await kit.run(async () => {
       { stored: await a.stored(key(A, "main")), owners: await a.owners("MARK-R4") },
     );
   });
+  // D30: whether the bubble offers Retry follows what the composer holds now, not what it held when the refusal came back.
+  await section("refusal retry follows the composer", async () => {
+    await page.evaluate(`__rule("message", { fail: "json" })`);
+    await a.type("refuse five MARK-R5");
+    await a.send();
+    await page.waitFor(
+      `[...document.querySelectorAll('#feed .msg.owner')].some((n) => n.dataset.delivery === "failed")`,
+      "failed bubble 5",
+    );
+    check(
+      "D30 while the composer holds the refused text, the bubble has no Retry",
+      (await a.composer()) === "refuse five MARK-R5" && !(await a.owners("MARK-R5")).some((item) => item.retry),
+      await a.owners("MARK-R5"),
+    );
+    await a.chat(A, other);
+    const tabB9 = await newTab();
+    const b9 = tab(tabB9);
+    await open(tabB9);
+    await b9.empty();
+    await b9.type("other text MARK-B9");
+    await tabB9.close();
+    await a.chat(A, "main");
+    await page.waitFor(`document.querySelectorAll('#feed .msg.owner[data-delivery="failed"]').length === 1`, "failed bubble after return");
+    check(
+      "D30 once the composer shows another tab's text, the refused bubble has Retry",
+      (await a.composer()) === "other text MARK-B9" && (await a.owners("MARK-R5")).some((item) => item.retry),
+      { composer: await a.composer(), owners: await a.owners("MARK-R5") },
+    );
+    await a.empty();
+  });
   // D11, D13: a refusal does not overwrite the newer draft of another tab; the bubble keeps the text.
   await section("refusal against a newer draft", async () => {
     await a.type("refuse two MARK-R3");
@@ -477,7 +516,7 @@ await kit.run(async () => {
     await a.type("keepme");
     await page.evaluate(`window.__deny = true`);
     await a.type(" and more");
-    await page.waitFor(`document.body.innerText.includes("cannot keep that much text")`, "the owner is told");
+    await page.waitFor(`document.body.innerText.includes("Draft not saved")`, "the owner is told");
     check("D18 the older stored text is not deleted", (await a.stored(key(A, "main"))) === "keepme", await a.stored(key(A, "main")));
     check("D18 the typed text stays in the box", (await a.composer()) === "keepme and more", await a.composer());
     await page.evaluate(`window.__deny = false`);
@@ -554,7 +593,7 @@ await kit.run(async () => {
       await a.stored(HOST_KEY),
     );
   });
-  // D26: a refused Host agent text keeps a durable home that a newer draft of another tab never overwrites.
+  // D26, D29, D18: a refused Host agent text goes back into its composer and its stored draft, merged with whatever is there, never replacing it.
   await section("host agent refusal", async () => {
     const settings = await rpc({ action: "host-agent-settings" });
     await rpc({ action: "host-agent-settings", revision: settings.revision, patch: { model: "fake/fake-model" } });
@@ -567,50 +606,87 @@ await kit.run(async () => {
     };
     const closeAgent = (target) => target.evaluate(`document.querySelector('#host-agent [data-cmd="host-agent"]').click()`);
     const box = (target) => target.evaluate(`document.querySelector('#ha-composer textarea').value`);
-    const row = (target) =>
-      target.evaluate(`document.querySelector('#ha-refused').hidden ? "" : document.querySelector('#ha-refused').innerText`);
+    const emptyAgent = async (target) => {
+      await target.evaluate(
+        `(() => { const agent = document.querySelector('#ha-composer textarea'); agent.value = ""; agent.dispatchEvent(new Event("input")); })()`,
+      );
+      await kit.delay(150);
+    };
+    const submitAgent = (target) => target.evaluate(`document.querySelector('#ha-composer').requestSubmit()`);
+    const settled = (target) => target.waitFor(`!document.querySelector('#ha-composer').dataset.sending`, "host agent send settled");
+    const sentTexts = () => page.evaluate(`window.__calls.filter((c) => c.action === "host-agent-send").map((c) => c.text)`);
+
+    // D26: A is refused after the owner typed B: the composer and the draft hold both, and the next send carries A.
     await openAgent(page);
-    await a.type("refuse me MARK-HAR", "#ha-composer textarea");
+    await a.type("first ask MARK-HAA", "#ha-composer textarea");
+    await page.evaluate(`__hold("host-agent-send"); __rule("host-agent-send", { fail: "refuse" })`);
+    await submitAgent(page);
+    await page.waitFor(`document.querySelector('#ha-composer').dataset.sending === "1"`, "host agent sending");
+    await a.type("second ask MARK-HAB", "#ha-composer textarea");
+    await page.evaluate(`__release("host-agent-send")`);
+    await settled(page);
+    await kit.delay(150);
+    const merged = "second ask MARK-HAB\n\nfirst ask MARK-HAA";
+    check("D26 the refused text is appended below the newer text in the composer", (await box(page)) === merged, await box(page));
+    check("D26 and stored as the draft", (await a.stored(HOST_KEY)) === merged, await a.stored(HOST_KEY));
+    await page.shot("host-agent-refused-merged", { force: true });
+    await page.reload();
+    await open(page);
+    await openAgent(page);
+    check("D26 a reload keeps both texts", (await box(page)) === merged, await box(page));
+    await submitAgent(page);
+    await settled(page);
+    await kit.delay(300);
+    check(
+      "D26 sending after the refusal carries the refused text, and the draft goes",
+      (await sentTexts()).at(-1)?.includes("MARK-HAA") && (await a.stored(HOST_KEY)) === null,
+      { sent: await sentTexts(), stored: await a.stored(HOST_KEY) },
+    );
+    check("D26 the Host agent has no separate refused-text row", await page.evaluate(`!document.querySelector('#ha-refused')`));
+
+    // D29: another tab stored a newer draft before the refusal: both texts are kept, the newer one first.
+    await a.type("alpha MARK-HAR", "#ha-composer textarea");
     await closeAgent(page);
     const tabB8 = await newTab();
     await open(tabB8);
     await openAgent(tabB8);
-    await tab(tabB8).type(" NEWER", "#ha-composer textarea");
+    await emptyAgent(tabB8);
+    await tab(tabB8).type("beta MARK-HAN", "#ha-composer textarea");
     await closeAgent(tabB8);
     await tabB8.close();
-    await page.evaluate(`__rule("host-agent-send", { fail: "refuse" })`);
-    await page.evaluate(`document.querySelector('#ha-composer').requestSubmit()`);
-    await page.waitFor(`!document.querySelector('#ha-refused').hidden`, "refused row");
-    await page.reload();
-    await open(page);
     await openAgent(page);
+    await page.evaluate(`__rule("host-agent-send", { fail: "refuse" })`);
+    await submitAgent(page);
+    await settled(page);
+    await kit.delay(150);
+    check("D29 the refused text goes back to the emptied composer", (await box(page)) === "alpha MARK-HAR", await box(page));
     check(
-      "D26 the refused text survives a reload on a Retry and Dismiss row, and the newer draft is untouched",
-      (await row(page)).includes("refuse me MARK-HAR") &&
-        (await box(page)) === "refuse me MARK-HAR NEWER" &&
-        (await a.stored(HOST_KEY)) === "refuse me MARK-HAR NEWER",
-      { row: await row(page), box: await box(page), stored: await a.stored(HOST_KEY) },
-    );
-    await page.shot("host-agent-refused-row", { force: true });
-    await page.evaluate(`document.querySelector('[data-ha-refused-retry]').click()`);
-    await page.waitFor(`document.querySelector('#ha-refused').hidden`, "refused row gone after Retry");
-    check(
-      "D26 Retry sends the refused text and leaves the newer draft",
-      (await a.stored(HOST_KEY)) === "refuse me MARK-HAR NEWER" && (await a.stored("pi-draft:host-agent-refused")) === null,
+      "D29 the stored draft keeps the other tab's newer text and adds the refused one",
+      (await a.stored(HOST_KEY)) === "beta MARK-HAN\n\nalpha MARK-HAR",
       await a.stored(HOST_KEY),
     );
-    await page.evaluate(
-      `(() => { const agent = document.querySelector('#ha-composer textarea'); agent.value = ""; agent.dispatchEvent(new Event("input")); __rule("host-agent-send", { fail: "refuse" }); })()`,
-    );
-    await a.type("second MARK-HAR2", "#ha-composer textarea");
-    await page.evaluate(`document.querySelector('#ha-composer').requestSubmit()`);
-    await page.waitFor(`!document.querySelector('#ha-refused').hidden`, "second refused row");
-    await page.evaluate(`document.querySelector('[data-ha-refused-dismiss]').click()`);
-    await page.waitFor(`document.querySelector('#ha-refused').hidden`, "refused row gone after Dismiss");
+    await emptyAgent(page);
+
+    // D18: a refusal while the browser cannot store drafts keeps the text in the composer and says so.
+    await page.evaluate(`window.__deny = true`);
+    await a.type("full MARK-HAF", "#ha-composer textarea");
+    await kit.delay(150);
+    await page.evaluate(`document.querySelector('#toasts').replaceChildren()`);
+    await page.evaluate(`__rule("host-agent-send", { fail: "refuse" })`);
+    await submitAgent(page);
+    await settled(page);
+    await kit.delay(150);
     check(
-      "D26 Dismiss takes the row and the untouched draft",
-      (await a.stored("pi-draft:host-agent-refused")) === null && (await a.stored(HOST_KEY)) === null && (await box(page)) === "",
-      { refused: await a.stored("pi-draft:host-agent-refused"), draft: await a.stored(HOST_KEY), box: await box(page) },
+      "D18 a refused Host agent text stays in the composer when storage is full",
+      (await box(page)) === "full MARK-HAF",
+      await box(page),
     );
+    check(
+      "D18 and the owner sees the warning",
+      await page.evaluate(`document.querySelector('#toasts').innerText.includes("Draft not saved")`),
+      await page.evaluate(`document.querySelector('#toasts').innerText`),
+    );
+    await page.evaluate(`window.__deny = false`);
+    await emptyAgent(page);
   });
 });

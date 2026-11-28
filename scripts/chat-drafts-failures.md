@@ -21,13 +21,14 @@ nothing is evicted for size.
 - D9 A sends and the host admits the message: the sent text stays stored and comes back as a draft after a reload.
 - D10 Between the send and its ack the sent text shows again as a draft (chat switch or reload while sending).
 
-- D25 Another tab writes a newer draft between A's check ("the stored text equals what I sent") and A's delete, and the delete removes the newer text: the check and the delete are not one step across tabs. Likewise an earlier input write that waited its turn must never overwrite a later one.
+- D25 Another tab writes a newer draft between A's check ("the stored text equals what I sent") and A's delete, and the delete removes the newer text: the check and the delete are not one step across tabs. Likewise an earlier input write that waited its turn must never overwrite a later one, even when another tab queued a write between them.
 - D27 A second tab's copy of the same pending message settles the same send a second time and deletes a fresh draft that happens to read the same as the sent text.
 
 ## Refusal
 
 - D11 A refused message restored in A overwrites the newer draft B stored for that chat.
 - D12 A refused message whose text went back to the composer is lost on reload (no stored copy), or the bubble's Retry is gone while the text is only in memory.
+- D30 The bubble's Retry follows a flag set when the refusal came back, not the composer: after a switch, another tab's newer draft fills the composer and the refused text has no Retry left.
 - D13 With a newer draft in the chat, the refused text has no durable copy (no bubble with Retry) after a reload.
 - D14 Dismiss of a refused message leaves its text stored as a draft, or deletes an edited draft the owner made from it.
 
@@ -39,18 +40,19 @@ nothing is evicted for size.
 
 ## Size
 
-- D18 The browser refuses to store a draft and the owner is not told; or the older stored text is deleted when the new one cannot be written.
+- D18 The browser refuses to store a draft and the owner is not told; or the older stored text is deleted when the new one cannot be written; or a refused Host agent text is not put back in the composer because it could not be stored.
 
 ## Host agent
 
 - D19 The Host agent composer keeps no draft over a reload, or shares its draft with a chat.
 - D20 A successful Host agent send leaves its text stored, or deletes a newer draft typed meanwhile; a refused send loses the text.
 
-- D26 A Host agent send is refused while another tab stored a newer Host agent draft: the refused text lives only in the field, so a reload loses it (the Host agent has no bubble). It must be kept under its own key, shown as Retry and Dismiss, and never overwrite the newer draft.
+- D26 A Host agent send is refused after the owner typed something new in its composer: the refused text is lost when the new text is sent, or it replaces the new text. The Host agent has no bubble, so the refused text goes back into the composer and the stored draft, below whatever they hold, after a blank line.
+- D29 A Host agent send is refused while another tab stored a newer Host agent draft: the refusal overwrites the newer draft, or the refused text is not stored and a reload loses it. The stored draft is read and merged inside the key's lock, so both texts stay.
 
 ## Remote hosts
 
 - D21 A remote host's draft is stored under the local key, so a local chat with the same ids shows it.
-- D22 Forget host leaves the remote host's drafts in this browser, or removes local drafts or another host's.
-- D23 A revoked device leaves the host's drafts in this browser.
-- D28 The failed-turn Retry of a remote chat creates a send without the owning host, so the host is whichever one is selected when the send is made or retried, and its draft key follows the selection.
+- D22 Forget host leaves the remote host's drafts or pending-send handles in this browser, or removes local ones or another host's.
+- D23 A revoked device leaves the host's drafts or pending-send handles in this browser.
+- D28 The failed-turn Retry of a remote chat creates a send without the owning host, so the host is whichever one is selected when the send is made or retried, and its draft key follows the selection. A send whose host was forgotten goes to another host instead of failing closed.

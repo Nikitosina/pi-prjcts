@@ -5,7 +5,17 @@ import { clip, clock, dur, esc, imagesHtml, markdown, oneLine } from "./format.j
 import { FILE_ONLY_NOTE, PathSource, insertText, pathsFromTransfer } from "./path-drop.js";
 import { chatArgs, emit, fail, on, stale, state, toast } from "./state.js";
 import { follower } from "./follow.js";
-import { chatDraftKey, dropDraftIf, forgetOldSettles, loadDraft, settleDraft, takeDraftIf, typeDraft, withDraft } from "./drafts.js";
+import {
+  PENDING_PREFIX,
+  chatDraftKey,
+  dropDraftIf,
+  forgetOldSettles,
+  loadDraft,
+  settleDraft,
+  takeDraftIf,
+  typeDraft,
+  withDraft,
+} from "./drafts.js";
 
 export function mountChat(client, media, slash, memory) {
   const { hydrateMedia } = media;
@@ -27,7 +37,7 @@ export function mountChat(client, media, slash, memory) {
   const pendingSends = []; // owner messages sent from this page that the transcript does not show yet, oldest first
   // The recovery handle of an unsettled send survives a reload: its id, project, chat and exact text, so Retry sends the same message under the same id.
   // One storage key per attempt, so tabs never overwrite each other's handles.
-  const HANDLE_PREFIX = "pi-pending-send:",
+  const HANDLE_PREFIX = PENDING_PREFIX,
     LEGACY_HANDLES = "pi-pending-sends";
   const savedHandles = new Map(); // attempt id → the stored text of its handle
   function loadHandles() {
@@ -61,9 +71,6 @@ export function mountChat(client, media, slash, memory) {
           (item.refused === undefined || item.refused === true) &&
           (item.attachments === undefined || (Array.isArray(item.attachments) && item.attachments.every((id) => typeof id === "string")))
         ) {
-          // A refusal whose text is still the stored draft stays restored: the composer holds it, and the bubble only waits for Dismiss.
-          const draftKey = item.draftKey ?? chatDraftKey(item.hostPrefix ?? client.storagePrefix, item.projectId, item.chatId);
-          const restored = item.refused === true && loadDraft(draftKey)?.text === (item.draft ?? item.text);
           savedHandles.set(item.id, localStorage.getItem(key));
           found.push({
             id: item.id,
@@ -77,7 +84,6 @@ export function mountChat(client, media, slash, memory) {
             ...(item.hostPrefix !== undefined ? { hostPrefix: item.hostPrefix } : {}),
             state: item.refused ? "failed" : "unconfirmed",
             error: item.refused ? "The host refused the message." : "This page was reloaded before the host confirmed the message.",
-            restored,
             refused: false,
             failedRead: 0,
           });
@@ -214,7 +220,8 @@ export function mountChat(client, media, slash, memory) {
   const sendHost = (send) => (send.hostPrefix === undefined ? client : client.owning(send.hostPrefix));
   const carets = new Map(); // draft key → the composer's text and caret when the owner left that chat, for this page's lifetime
   let composerKey = null; // the draft the composer shows
-  let unkept = false; // the browser refused to store the draft, and the owner was told
+  /** A refused message whose exact text the composer holds now needs no Retry: sending the composer sends it. */
+  const inComposer = (send) => send.state === "failed" && inCurrentChat(send) && input.value === (send.draft ?? send.text);
   function visibleDraft(key) {
     const stored = loadDraft(key);
     if (!stored) return null;
@@ -231,29 +238,11 @@ export function mountChat(client, media, slash, memory) {
     input.setSelectionRange(caret, caret);
     grow();
   }
-  const forgetRestored = (key) => {
-    let changed = false;
-    for (const send of pendingSends)
-      if (send.restored && send.state === "failed" && sendKey(send) === key && input.value !== (send.draft ?? send.text)) {
-        send.restored = false;
-        changed = true;
-      }
-    return changed;
-  };
   input.addEventListener("input", () => {
-    const key = composerKey ?? currentKey();
-    typeDraft(key, input.value, input.selectionStart, (kept) => {
-      if (kept) unkept = false;
-      else if (!unkept) {
-        unkept = true;
-        toast("This browser cannot keep that much text as a draft. It stays in the box, but a reload would lose it.", {
-          error: true,
-          ms: 8000,
-        });
-      }
-    });
+    typeDraft(composerKey ?? currentKey(), input.value, input.selectionStart);
     // An edit makes a restored draft a different message than the failed bubble's, so that bubble gets its own Retry.
-    if (forgetRestored(key)) renderFeed();
+    if (pendingSends.some((send) => send.state === "failed" && inCurrentChat(send) && send.shownInComposer !== inComposer(send)))
+      renderFeed();
   });
   on("select", () => {
     const key = currentKey();
@@ -408,9 +397,7 @@ export function mountChat(client, media, slash, memory) {
       original = send.draft ?? send.text;
     markRefused(send);
     void withDraft(key, () => {
-      if (!pendingSends.includes(send) || loadDraft(key)?.text !== original) return;
-      send.restored = true;
-      if (inCurrentChat(send) && !input.value) {
+      if (pendingSends.includes(send) && loadDraft(key)?.text === original && inCurrentChat(send) && !input.value) {
         input.value = original;
         grow();
       }
@@ -418,37 +405,44 @@ export function mountChat(client, media, slash, memory) {
     });
   }
   const NO_HANDLE = "This browser cannot keep a recovery copy of the message, so it was not sent.";
+  const NO_HOST = "This chat's host is no longer in this inbox, so the message was not sent.";
+  const NO_HOST_AGAIN =
+    "This chat's host is no longer in this inbox, so the message was not sent again. The first attempt may have reached it.";
   const NO_HANDLE_AGAIN =
     "This browser cannot keep a recovery copy of the message, so it was not sent again. The first attempt may have reached the host.";
   const DELIVERY = { sending: "Sending…", sent: "Sent", failed: "Not sent", unconfirmed: "Delivery not confirmed" };
   function pendingHtml(send) {
+    const back = inComposer(send);
+    send.shownInComposer = back;
     const note =
       send.state === "failed"
-        ? `${esc(clip(oneLine(send.error), 300))}${send.restored ? " The text is back in the composer." : ""}`
+        ? `${esc(clip(oneLine(send.error), 300))}${back ? " The text is back in the composer." : ""}`
         : send.state === "unconfirmed"
           ? `${esc(clip(oneLine(send.error), 200))} The message may or may not have arrived; it is not sent again on its own.`
           : "";
-    const retry = send.state === "unconfirmed" || (send.state === "failed" && !send.restored);
+    const retry = send.state === "unconfirmed" || (send.state === "failed" && !back);
     const actions =
       send.state !== "sending"
         ? `<div class="pending-note" role="status">${note}${retry ? ` <button type="button" class="link-btn" data-pending-retry="${esc(send.id)}">Retry</button>` : ""} <button type="button" class="link-btn" data-pending-dismiss="${esc(send.id)}">Dismiss</button></div>`
         : "";
     const key = `${renderScope}pending:${send.id}`,
       hint = `<button type="button" class="msg-more" data-reveal="${esc(key)}" aria-expanded="${revealed.has(key)}">Show more ▾ · ${send.text.length.toLocaleString("en-US")} chars</button>`;
-    const sig = hash(`${send.state}|${send.error}|${send.restored}`);
+    const sig = hash(`${send.state}|${send.error}|${back}`);
     return `<section class="turn" data-key="p${esc(send.id)}" data-sig="${sig}"><article class="msg owner pending" data-delivery="${send.state}"><div class="msg-meta"><span class="who">You</span><span class="delivery">${DELIVERY[send.state]}</span></div><div class="bubble"><div class="msg-body" tabindex="-1">${markdown(send.text)}</div></div>${hint}${actions}</article></section>`;
   }
   /** Sends one pending message under its own request id (the host returns the job it already holds for a repeated id). A failure never sends again on its own. */
   async function deliver(send) {
-    if (!rememberSend(send)) {
+    // A send whose host was forgotten fails closed: no other host may receive it.
+    const host = sendHost(send);
+    if (!host || !rememberSend(send)) {
       // Only a first attempt is known not to have been sent; an earlier one may have reached the host, so its status stays as it was.
-      const first = send.state === "sending";
+      const first = send.state === "sending",
+        why = host ? (first ? NO_HANDLE : NO_HANDLE_AGAIN) : first ? NO_HOST : NO_HOST_AGAIN;
       if (first) {
         send.state = "failed";
-        send.error = NO_HANDLE;
+        send.error = why;
       }
-      send.restored = false;
-      toast(first ? NO_HANDLE : NO_HANDLE_AGAIN, { error: true, ms: 8000 });
+      toast(why, { error: true, ms: 8000 });
       renderFeed();
       return;
     }
@@ -457,7 +451,7 @@ export function mountChat(client, media, slash, memory) {
     renderFeed();
     let job;
     try {
-      job = await sendHost(send).call("message", {
+      job = await host.call("message", {
         id: send.projectId,
         text: send.text,
         requestId: send.id,
@@ -975,7 +969,6 @@ export function mountChat(client, media, slash, memory) {
       hostPrefix: client.storagePrefix,
       state: "sending",
       error: "",
-      restored: false,
       refused: false,
       failedRead: 0,
     };
@@ -987,7 +980,7 @@ export function mountChat(client, media, slash, memory) {
       return;
     }
     // Sending the restored text again supersedes the bubble it came from.
-    for (const old of pendingSends.filter((item) => item.restored && item.state === "failed" && item.text === text && inCurrentChat(item)))
+    for (const old of pendingSends.filter((item) => item.state === "failed" && inCurrentChat(item) && (item.draft ?? item.text) === raw))
       pendingSends.splice(pendingSends.indexOf(old), 1);
     pendingSends.push(send);
     renderFeed();
@@ -1139,7 +1132,6 @@ export function mountChat(client, media, slash, memory) {
         }
       }
       follow.follow();
-      if (pendingRetry) send.restored = false;
       renderFeed();
       if (pendingRetry) await deliver(send);
       return;
@@ -1149,7 +1141,8 @@ export function mountChat(client, media, slash, memory) {
       const failed = (state.view?.jobs ?? []).find((item) => item.id === retry.dataset.retryJob);
       if (!failed || retry.disabled) return;
       retry.disabled = true; // a second click must not resend
-      const { projectId, chatId } = state; // the recipient is the chat the failed turn is in, whatever the owner opens meanwhile
+      const { projectId, chatId } = state, // the recipient is the chat the failed turn is in, whatever the owner opens meanwhile
+        hostPrefix = client.storagePrefix;
       // One failed turn is one delivery: a click after a lost ack reuses the pending send, and its request id, instead of starting another.
       let send = pendingSends.find((item) => item.retryOf === failed.id && item.projectId === projectId && item.chatId === chatId);
       if (!send) {
@@ -1158,12 +1151,11 @@ export function mountChat(client, media, slash, memory) {
           retryOf: failed.id,
           projectId,
           chatId,
-          hostPrefix: client.storagePrefix,
+          hostPrefix,
           text: failed.text,
           ...(failed.attachments ? { attachments: failed.attachments } : {}),
           state: "sending",
           error: "",
-          restored: false,
           refused: false,
           failedRead: 0,
         };

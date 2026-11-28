@@ -47,6 +47,12 @@ try {
       const remoteKey = `pi-host:${hostId}:pi-draft:${remoteProject}:main`,
         localKey = `pi-draft:${localProject}:main`;
       const hostDrafts = () => q(`Object.keys(localStorage).filter((k) => k.startsWith("pi-host:${hostId}:pi-draft:"))`);
+      // A pending-send handle of each host, as a send that never settled leaves it.
+      const plantHandles = () =>
+        q(
+          `(() => { const put = (id, projectId, hostPrefix) => localStorage.setItem("pi-pending-send:" + id, JSON.stringify({ id, projectId, chatId: "main", text: "unsettled " + id, hostPrefix })); put("remote-handle", ${JSON.stringify(remoteProject)}, "pi-host:${hostId}:"); put("local-handle", ${JSON.stringify(localProject)}, ""); })()`,
+        );
+      const handles = () => q(`Object.keys(localStorage).filter((k) => k.startsWith("pi-pending-send:")).sort()`);
       const pair = async () => {
         await pairHost(page, (await remote.rpc({ action: "remote-pair-start" })).link);
         await page.waitFor(`document.querySelector('[data-host-group="${hostId}"]')?.dataset.state === "online"`, "remote online");
@@ -116,6 +122,7 @@ try {
 
       // D22: Forget host removes that host's drafts only.
       await guarded("forget", async () => {
+        await plantHandles();
         await q(`window.confirm = () => true; document.querySelector('[data-host-menu="${hostId}"]').click()`);
         await page.waitFor(`!!document.querySelector('.host-menu')`, "host menu");
         await q(`[...document.querySelectorAll('.host-menu button')].find((b) => b.textContent.startsWith("Forget host")).click()`);
@@ -125,6 +132,11 @@ try {
           (await hostDrafts()).length === 0 && (await stored(localKey)) === "local draft MARK-L",
           { left: await hostDrafts(), local: await stored(localKey) },
         );
+        check(
+          "D22 Forget host removes the host's pending-send handles and keeps the local one",
+          JSON.stringify(await handles()) === JSON.stringify(["pi-pending-send:local-handle"]),
+          await handles(),
+        );
       });
 
       // D23: a revoked device loses the host's drafts too.
@@ -133,6 +145,7 @@ try {
         await openProject(hostId, "Remote drafts", "seed remote");
         await type("remote again MARK-R2");
         const before = await stored(remoteKey);
+        await plantHandles();
         const deviceId = await q(`(async()=> (await (await import('/inbox-wire/store.js')).get('inbox-device:${hostId}')).id)()`);
         await remote.rpc({ action: "remote-revoke", deviceId, confirm: deviceId });
         await page.waitFor(`document.querySelector('[data-host-group="${hostId}"]')?.dataset.state === "revoked"`, "revoked");
@@ -140,6 +153,11 @@ try {
           "D23 a revoked device's drafts are removed, the local one stays",
           before === "remote again MARK-R2" && (await hostDrafts()).length === 0 && (await stored(localKey)) === "local draft MARK-L",
           { before, left: await hostDrafts() },
+        );
+        check(
+          "D23 a revoked device's pending-send handles are removed, the local one stays",
+          JSON.stringify(await handles()) === JSON.stringify(["pi-pending-send:local-handle"]),
+          await handles(),
         );
       });
       local.result.httpErrors = local.result.httpErrors.filter((e) => !e.url.endsWith("/changes"));

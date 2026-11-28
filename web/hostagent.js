@@ -4,7 +4,7 @@
 import { uuid } from "./api.js";
 import { clip, esc, markdown, oneLine, shortModel } from "./format.js";
 import { emit, fail, inline, on, state, toast } from "./state.js";
-import { dropDraftIf, hostAgentDraftKey, hostAgentRefusedKey, loadDraft, takeDraftIf, typeDraft, withDraft } from "./drafts.js";
+import { dropDraftIf, hostAgentDraftKey, joinDraft, loadDraft, restoreDraft, typeDraft } from "./drafts.js";
 
 export function mountHostagent(client, chat, media) {
   const { forgetReveals, mergeGroups, morph, showThinking, thinkingHtml, transcriptClick, transcriptFocus, transcriptHtml } = chat;
@@ -395,92 +395,50 @@ export function mountHostagent(client, chat, media) {
   // ---------------------------------------------------------------------------------------------------------------- composer
 
   // One draft per host, stored on this tab's own input only; a successful send removes it if it still holds exactly the sent text.
-  const draftKey = hostAgentDraftKey(client.storagePrefix),
-    refusedKey = hostAgentRefusedKey(client.storagePrefix),
-    refusedRow = document.querySelector("#ha-refused");
+  const draftKey = hostAgentDraftKey(client.storagePrefix);
   const stored = loadDraft(draftKey);
   if (stored) {
     input.value = stored.text;
     input.setSelectionRange(stored.caret, stored.caret);
   }
-  let unkept = false;
-  input.addEventListener("input", () => {
-    typeDraft(draftKey, input.value, input.selectionStart, (kept) => {
-      if (kept) unkept = false;
-      else if (!unkept) {
-        unkept = true;
-        toast("This browser cannot keep that much text as a draft. It stays in the box, but a reload would lose it.", {
-          error: true,
-          ms: 8000,
-        });
-      }
-    });
-  });
-  // A refused text has no bubble to hold it, and the draft may already be newer: it lives under its own key until Retry or Dismiss.
-  const refusedText = () => loadDraft(refusedKey)?.text ?? null;
-  function paintRefused() {
-    const text = refusedText();
-    refusedRow.hidden = text === null;
-    refusedRow.innerHTML =
-      text === null
-        ? ""
-        : `<span class="ha-refused-text">Not sent: ${esc(clip(oneLine(text), 160))}</span> <button type="button" class="link-btn" data-ha-refused-retry>Retry</button> <button type="button" class="link-btn" data-ha-refused-dismiss>Dismiss</button>`;
-  }
-  paintRefused();
-  addEventListener("storage", (event) => {
-    if (event.key === refusedKey) paintRefused();
-  });
-  refusedRow.addEventListener("click", async (event) => {
-    const text = refusedText();
-    if (text === null) return;
-    if (event.target.closest("[data-ha-refused-dismiss]")) {
-      await withDraft(refusedKey, () => localStorage.removeItem(refusedKey));
-      if (await takeDraftIf(draftKey, text)) input.value = input.value === text ? "" : input.value;
-      paintRefused();
-    } else if (event.target.closest("[data-ha-refused-retry]")) await send(text, text);
-  });
+  input.addEventListener("input", () => typeDraft(draftKey, input.value, input.selectionStart));
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       form.requestSubmit();
     }
   });
-  /** Sends `text`; `raw` is what the field held, which a success removes from the draft when it is still exactly that. */
-  async function send(raw, text) {
-    if (!available || form.dataset.sending === "1") return;
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const raw = input.value,
+      text = raw.trim();
+    if (!text || !available || form.dataset.sending === "1") return;
     form.dataset.sending = "1";
+    input.value = "";
     try {
       await client.call("host-agent-send", { requestId: uuid(), text });
-      await withDraft(refusedKey, () => localStorage.removeItem(refusedKey));
-      paintRefused();
-      await dropDraftIf(draftKey, raw);
-      error = "";
-      await loadHostAgent();
     } catch (reason) {
-      await withDraft(refusedKey, () => {
-        try {
-          localStorage.setItem(refusedKey, JSON.stringify({ text: raw }));
-        } catch {}
-      });
-      paintRefused();
-      if (!input.value && loadDraft(draftKey)?.text === raw) input.value = raw;
+      // The Host agent has no bubble to keep a refused text: it joins what the composer and the stored draft hold now, replacing neither.
+      input.value = joinDraft(input.value, raw);
+      await restoreDraft(draftKey, raw);
+      delete form.dataset.sending;
       // "has no model" / "not in the model catalog": say it where the owner is looking and open the model picker.
       if (/model/i.test(reason.message ?? "")) {
         error = reason.message;
         paint();
         toggleSettings(true);
       } else fail(reason);
+      return;
+    }
+    try {
+      await dropDraftIf(draftKey, raw);
+      error = "";
+      await loadHostAgent();
+    } catch (reason) {
+      fail(reason);
     } finally {
       delete form.dataset.sending;
     }
-  }
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const raw = input.value,
-      text = raw.trim();
-    if (!text || !available || form.dataset.sending === "1") return;
-    input.value = "";
-    await send(raw, text);
   });
   async function resetHostAgent() {
     const result = await client.call("host-agent-reset").catch(fail);

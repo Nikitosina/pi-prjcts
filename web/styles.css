@@ -4582,8 +4582,3 @@ table.hotkeys tr.clash td {
   text-align: right;
   overflow-wrap: anywhere;
 }
-.ha-refused:not([hidden]) {
-  padding: 6px 12px;
-  font-size: 12.5px;
-  color: var(--muted);
-}

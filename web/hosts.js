@@ -160,9 +160,10 @@ export const projectHost = {
   stream: (path, onFrame, onState) => routed(pathProject(path)).stream(path, onFrame, onState),
   url: (path, options) => routed(pathProject(path)).url(path, options),
   authorizedFetch: (path, init) => routed(pathProject(path)).authorizedFetch(path, init),
-  /** The client of the host with storage prefix `prefix`: a send names its owner, whatever host is selected when it is retried. */
+  /** The client of the host with storage prefix `prefix`, or null once that host is forgotten: a send names its owner, whatever host is selected
+   * when it is retried. */
   owning(prefix) {
-    return groups.find((group) => group.client?.storagePrefix === prefix)?.client ?? (prefix === "" ? localHost : this);
+    return groups.find((group) => group.client?.storagePrefix === prefix)?.client ?? (prefix === "" ? localHost : null);
   },
   get local() {
     return routed().local;
