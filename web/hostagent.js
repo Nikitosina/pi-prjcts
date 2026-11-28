@@ -4,7 +4,7 @@
 import { uuid } from "./api.js";
 import { clip, esc, markdown, oneLine, shortModel } from "./format.js";
 import { emit, fail, inline, on, state, toast } from "./state.js";
-import { dropDraftIf, hostAgentDraftKey, joinDraft, loadDraft, restoreDraft, typeDraft } from "./drafts.js";
+import { draftRevision, hostAgentDraftKey, joinDraft, loadDraft, restoreDraft, settleDraft, typeDraft } from "./drafts.js";
 
 export function mountHostagent(client, chat, media) {
   const { forgetReveals, mergeGroups, morph, showThinking, thinkingHtml, transcriptClick, transcriptFocus, transcriptHtml } = chat;
@@ -424,13 +424,14 @@ export function mountHostagent(client, chat, media) {
     form.dataset.sending = "1";
     input.value = "";
     grow();
+    const rev = await draftRevision(draftKey, raw);
     try {
       await client.call("host-agent-send", { requestId: uuid(), text });
     } catch (reason) {
       // The Host agent has no bubble to keep a refused text: it joins what the composer and the stored draft hold now, replacing neither.
       input.value = joinDraft(input.value, raw);
       grow();
-      await restoreDraft(draftKey, raw, input.value);
+      await restoreDraft(draftKey, raw, rev, input.value);
       delete form.dataset.sending;
       // "has no model" / "not in the model catalog": say it where the owner is looking and open the model picker.
       if (/model/i.test(reason.message ?? "")) {
@@ -441,7 +442,7 @@ export function mountHostagent(client, chat, media) {
       return;
     }
     try {
-      await dropDraftIf(draftKey, raw);
+      await settleDraft(draftKey, rev, raw);
       error = "";
       await loadHostAgent();
     } catch (reason) {

@@ -52,7 +52,7 @@ const logWrites = `(() => {
     }
     return value;
   };
-  Storage.prototype.setItem = function (key, value) { if (window.__denySettled && String(key).startsWith("pi-send-settled:")) throw new DOMException("quota", "QuotaExceededError"); if (window.__deny && String(key).includes("pi-draft:")) throw new DOMException("quota", "QuotaExceededError"); note("set", key); return set.call(this, key, value); };
+  Storage.prototype.setItem = function (key, value) { if (window.__deny && String(key).includes("pi-draft:")) throw new DOMException("quota", "QuotaExceededError"); note("set", key); return set.call(this, key, value); };
   Storage.prototype.removeItem = function (key) { note("remove", key); return remove.call(this, key); };
 })()`;
 
@@ -356,21 +356,6 @@ await kit.run(async () => {
       await a.stored(key(A, "main")),
     );
     await tabB7.close();
-    await a.empty();
-  });
-  // D27: without its settle mark a send does not delete the draft, so no other tab's copy can settle it a second time.
-  await section("settle mark refused", async () => {
-    await a.type("unmarked MARK-UNMARKED");
-    await page.evaluate(`window.__denySettled = true`);
-    await a.send();
-    await a.reply("unmarked MARK-UNMARKED");
-    await kit.delay(300);
-    check(
-      "D27 a send whose settle mark cannot be stored keeps the draft",
-      (await a.stored(key(A, "main"))) === "unmarked MARK-UNMARKED",
-      await a.stored(key(A, "main")),
-    );
-    await page.evaluate(`window.__denySettled = false`);
     await a.empty();
   });
   // D28: a pending handle stored before sends named their host fails closed on Retry instead of going to the selected host.
@@ -711,12 +696,14 @@ await kit.run(async () => {
 
     // D29: the restore waits for its turn; an edit the owner makes meanwhile is written after it and is what stays.
     await a.type("gamma MARK-HAG", "#ha-composer textarea");
+    await page.evaluate(`__hold("host-agent-send"); __rule("host-agent-send", { fail: "refuse" })`);
+    await submitAgent(page);
+    await page.waitFor(`window.__calls.some((c) => c.action === "host-agent-send" && c.text === "gamma MARK-HAG")`, "gamma on its way");
     await page.evaluate(
       `void navigator.locks.request(${JSON.stringify(`pi-draft-lock:${HOST_KEY}`)}, () => new Promise((end) => { window.__unlockAgent = end; }))`,
     );
     await page.waitFor(`!!window.__unlockAgent`, "Host agent draft lock held");
-    await page.evaluate(`__rule("host-agent-send", { fail: "refuse" })`);
-    await submitAgent(page);
+    await page.evaluate(`__release("host-agent-send")`);
     await page.waitFor(`document.querySelector('#ha-composer textarea').value === "gamma MARK-HAG"`, "refused text back in the box");
     await a.type("!", "#ha-composer textarea");
     await page.evaluate(`window.__unlockAgent(); delete window.__unlockAgent`);
@@ -743,6 +730,30 @@ await kit.run(async () => {
       (await box(page)) === "twice MARK-HAT\n\ntwice MARK-HAT" && (await a.stored(HOST_KEY)) === "twice MARK-HAT\n\ntwice MARK-HAT",
       { box: await box(page), stored: await a.stored(HOST_KEY) },
     );
+    await emptyAgent(page);
+
+    // D29: another tab types the very text being sent: that is a new draft, and the refusal adds the sent one to it.
+    await a.type("same again MARK-HAS", "#ha-composer textarea");
+    await page.evaluate(`__hold("host-agent-send"); __rule("host-agent-send", { fail: "refuse" })`);
+    await submitAgent(page);
+    await page.waitFor(`document.querySelector('#ha-composer').dataset.sending === "1"`, "host agent sending same");
+    await closeAgent(page);
+    const tabB10 = await newTab();
+    await open(tabB10);
+    await openAgent(tabB10);
+    await emptyAgent(tabB10);
+    await tab(tabB10).type("same again MARK-HAS", "#ha-composer textarea");
+    await closeAgent(tabB10);
+    await tabB10.close();
+    await page.evaluate(`__release("host-agent-send")`);
+    await settled(page);
+    await kit.delay(150);
+    check(
+      "D29 a text another tab typed that reads the same as the refused one is kept apart from it",
+      (await a.stored(HOST_KEY)) === "same again MARK-HAS\n\nsame again MARK-HAS",
+      await a.stored(HOST_KEY),
+    );
+    await openAgent(page);
     await emptyAgent(page);
 
     // D18: a refusal while the browser cannot store drafts keeps the text in the composer and says so.
