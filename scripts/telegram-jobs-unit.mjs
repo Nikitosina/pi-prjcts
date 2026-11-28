@@ -18,7 +18,9 @@ let calls = [],
   nextId = 100,
   editFault = null,
   gate = null,
-  commandFaults = ["502", "429", "network"];
+  commandFaults = ["502", "429", "network"],
+  topicsFlag = false,
+  nextThread = 900;
 const server = createServer(async (req, res) => {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
@@ -42,6 +44,11 @@ const server = createServer(async (req, res) => {
       Number(fault),
     );
   }
+  if (gate?.method === method) {
+    const { run } = gate;
+    gate = null;
+    await run();
+  }
   if (method === "editMessageText" && editFault === "network") {
     editFault = null;
     return req.socket.destroy();
@@ -51,11 +58,8 @@ const server = createServer(async (req, res) => {
     editFault = null;
     return reply({ ok: false, error_code: 400, description }, 400);
   }
-  if (gate?.method === method) {
-    const { run } = gate;
-    gate = null;
-    await run();
-  }
+  if (method === "getMe") return reply({ ok: true, result: { id: 1, username: "b", has_topics_enabled: topicsFlag } });
+  if (method === "createForumTopic") return reply({ ok: true, result: { message_thread_id: ++nextThread } });
   entry.id = method === "sendMessage" ? ++nextId : undefined;
   reply({ ok: true, result: method === "sendMessage" ? { message_id: entry.id } : true });
 });
@@ -256,6 +260,17 @@ try {
   const staleId = calls.find((c) => c.method === "sendMessage" && c.input.text.includes("Stale job"));
   assert.equal(staleId.input.chat_id, 77);
   assert.equal(afterStale.messages[String(staleId.id)], undefined, "its message id is not routed for the new account");
+  // 69: the owner changes while an edit is in flight and the answer is "not found": the replacement is not sent to the former owner.
+  await bridge.progress(progressFor("j3", "Edited job"));
+  gate = { method: "editMessageText", run: () => repair(OWNER, "Owner") };
+  editFault = "Bad Request: message to edit not found";
+  calls = [];
+  await bridge.progress({ ...progressFor("j3", "Edited job"), title: "Edited job again" });
+  assert.equal(
+    calls.filter((c) => c.method === "sendMessage" && c.input.chat_id === 88 && String(c.input.text).includes("Edited job again")).length,
+    0,
+    "no replacement progress message reaches the former owner",
+  );
   await repair(OWNER, "Owner");
   calls = [];
   // Mixed-origin batches keep a Telegram reply even when an event is the last input sharing its answer.
@@ -417,6 +432,45 @@ try {
   reply = await status();
   assert.match(reply.text, /^Text goes to Notify · Main\./);
   assert.match(reply.text, /Limits unavailable: host down/);
+  // 62: with topics on, a Job's progress message and the reply to a button pressed in a topic stay in that chat's topic.
+  topicsFlag = true;
+  await bridge.setToken("1:fake-token-for-tests-only");
+  assert.equal((await bridge.snapshot()).topics, true);
+  calls = [];
+  await bridge.progress(progressFor("j9", "Topic job"));
+  assert.deepEqual(
+    calls.map((c) => c.method),
+    ["createForumTopic", "sendMessage"],
+  );
+  assert.equal(calls[0].input.name, "p · Main");
+  assert.equal(calls[1].input.message_thread_id, nextThread);
+  const progressThread = nextThread;
+  // j1's progress message was sent to the general thread before topics were on; the next update replaces it in the topic.
+  calls = [];
+  await bridge.progress(plan(["todo", "todo", "todo", "todo", "todo"]));
+  assert.deepEqual(
+    calls.map((c) => [c.method, c.input.message_thread_id]),
+    [["sendMessage", progressThread]],
+  );
+  notices.push(notice(3, { jobId: "j2", mergeable: true }));
+  await bridge.flush();
+  const topicNotice = calls.at(-1);
+  assert.equal(topicNotice.input.message_thread_id, progressThread, "the notice shares its chat's topic with the progress message");
+  assert.equal(calls.filter((c) => c.method === "createForumTopic").length, 0, "the topic is reused");
+  calls = [];
+  // The aborted poll of setToken may still be answered by the fake server; let it drain so it does not swallow the update.
+  await sleep(200);
+  updates.push({
+    update_id: ++updateId,
+    callback_query: {
+      id: "c9",
+      from: { id: OWNER },
+      message: { message_id: topicNotice.id, message_thread_id: progressThread, chat: { id: OWNER, type: "private" } },
+      data: topicNotice.input.reply_markup.inline_keyboard[0][0].callback_data,
+    },
+  });
+  const pressed = await until(() => calls.find((c) => c.method === "sendMessage"));
+  assert.equal(pressed.input.message_thread_id, progressThread, "the reply to a press stays in the topic");
   console.log("telegram-jobs-unit ok");
 } finally {
   bridge.close();
