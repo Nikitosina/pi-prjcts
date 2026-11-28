@@ -629,6 +629,12 @@ await kit.run(async () => {
     const merged = "second ask MARK-HAB\n\nfirst ask MARK-HAA";
     check("D26 the refused text is appended below the newer text in the composer", (await box(page)) === merged, await box(page));
     check("D26 and stored as the draft", (await a.stored(HOST_KEY)) === merged, await a.stored(HOST_KEY));
+    check(
+      "D26 the composer grows to show both texts",
+      await page.evaluate(
+        `(() => { const agent = document.querySelector('#ha-composer textarea'); return agent.scrollHeight <= agent.clientHeight + 1; })()`,
+      ),
+    );
     await page.shot("host-agent-refused-merged", { force: true });
     await page.reload();
     await open(page);
