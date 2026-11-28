@@ -1,6 +1,7 @@
 // The only module that talks to the host. Requests go through `call`.
 import { dropHostStorage } from "./drafts.js";
 import { hostCache, wipeHost } from "./host-cache.js";
+import { openViews } from "./views.js";
 
 const key = `pi-projects-token:${location.origin}`;
 const supplied = new URLSearchParams(location.hash.slice(1)).get("token");
@@ -230,6 +231,10 @@ export function hostClient(transport) {
     /** A view that reads through several calls (Settings, the Host agent) confirms its read of the connection period `epoch` once they all answered. */
     confirmLive: (view, epoch) => markLive(view, epoch),
     isLive: (view) => liveViews.get(view) === transport.epoch,
+    /** Whether every write to this host is refused: it is not online, or a connection drop happened and some view open on it has not read live since. */
+    locked: () =>
+      !transport.local &&
+      (transport.state !== "online" || (transport.epoch > 0 && openViews().some((open) => open.client === host && !host.isLive(open.key)))),
     provenance: (data) => (data && typeof data === "object" ? (provenance.get(data) ?? null) : null),
     storagePrefix: transport.local ? "" : `pi-host:${transport.hostId}:`,
     /** A flow that reads and then writes (Archive's idle check, a revision lookup before a save): its reads never answer from a copy, and once the
@@ -251,7 +256,7 @@ export function hostClient(transport) {
         if (!saved) throw new NeverLoadedError(transport.name);
         return saved.data;
       };
-      if (cache && epoch !== null && transport.epoch !== epoch) throw offlineError();
+      if (cache && ((epoch !== null && transport.epoch !== epoch) || (!read && host.locked()))) throw offlineError();
       if (cache && transport.state === "offline") {
         if (!read || fresh) throw offlineError();
         return copy();
@@ -260,6 +265,8 @@ export function hostClient(transport) {
       if (!cache || !read) {
         // The review opened for reading is saved under its read-only key, so the offline open (which never marks it seen) finds it.
         const keep = cache && action === "pr-review-open" ? await cache.begin() : null;
+        // The wait above may span a disconnect: a write that began on an older connection or while the host is locked is never sent.
+        if (cache && !read && ((epoch !== null && transport.epoch !== epoch) || host.locked())) throw offlineError();
         const data = await plain(read, action, input, signal);
         if (keep && SAVING.has(transport.state)) void cache.put(action, { ...input, seen: false }, data, keep);
         markLive(view, began);
@@ -282,8 +289,6 @@ export function hostClient(transport) {
         if (served) transport.dispatchEvent?.(new Event("copy"));
         return data;
       } catch (error) {
-        // The host itself answered with an error (a missing worker): that is a live answer, so the view does not keep the host read-only.
-        if (error instanceof HostError && error.status > 0 && !attempt.signal.aborted) markLive(view, began);
         if (signal?.aborted || !attempt.signal.aborted) throw error;
         // The host dropped while this read was in flight: it settles now with the copy or an error, whatever the host does next. Nothing is sent again.
         if (fresh) throw attempt.signal.reason;

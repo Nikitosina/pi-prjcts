@@ -72,6 +72,7 @@ export function mountChat(client, media, slash, memory) {
             projectId: item.projectId,
             chatId: item.chatId,
             text: item.text,
+            ...(typeof item.draft === "string" ? { draft: item.draft } : {}),
             ...(item.retryOf ? { retryOf: item.retryOf } : {}),
             ...(item.attachments ? { attachments: item.attachments } : {}),
             state: "unconfirmed",
@@ -86,13 +87,14 @@ export function mountChat(client, media, slash, memory) {
     return found;
   }
   /** Stores the handle before anything is sent; false when the browser cannot keep it, and then nothing may be sent: a reload would lose the message without a trace. */
-  function rememberSend({ id, hostId, projectId, chatId, text, attachments, retryOf }) {
+  function rememberSend({ id, hostId, projectId, chatId, text, draft, attachments, retryOf }) {
     const stored = JSON.stringify({
       id,
       hostId,
       projectId,
       chatId,
       text,
+      ...(draft ? { draft } : {}),
       ...(retryOf ? { retryOf } : {}),
       ...(attachments ? { attachments } : {}),
     });
@@ -237,7 +239,7 @@ export function mountChat(client, media, slash, memory) {
   /** The message reached the host: its draft goes, unless another tab has written a newer one since. */
   function releaseDraft(send) {
     const owner = clientOf(send.hostId);
-    if (owner) dropDraftIf(chatDraftKey(owner, send.projectId, send.chatId), send.text);
+    if (owner) dropDraftIf(chatDraftKey(owner, send.projectId, send.chatId), send.draft ?? send.text);
     const key = draftKey(send.projectId, send.chatId, send.hostId),
       held = drafts.get(key);
     // The restored copy of this very message, untouched since, goes with it.
@@ -258,7 +260,6 @@ export function mountChat(client, media, slash, memory) {
       away = left && left !== now ? drafts.get(left) : undefined;
     // An unedited restored draft goes back to the bubble's own Retry; an edited one waits for its chat.
     if (away && away.text === away.original) {
-      if (composerStore) dropDraftIf(composerStore, away.text);
       forgetRestored(away.sendId);
       drafts.delete(left);
     }
@@ -423,6 +424,9 @@ export function mountChat(client, media, slash, memory) {
       composerKey = draftKey(send.projectId, send.chatId, send.hostId);
       drafts.set(composerKey, { text: send.text, original: send.text, sendId: send.id });
       setComposer(send.text);
+      // The recovery handle goes once the text is back in the composer, so the stored draft becomes its durable copy.
+      const owner = clientOf(send.hostId);
+      if (owner) saveDraft(chatDraftKey(owner, send.projectId, send.chatId), send.text);
     }
   }
   const NO_HANDLE = "This browser cannot keep a recovery copy of the message, so it was not sent.";
@@ -957,7 +961,8 @@ export function mountChat(client, media, slash, memory) {
   });
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const text = input.value.trim();
+    const raw = input.value,
+      text = raw.trim();
     if (!text || !state.projectId) return;
     const gen = state.generation,
       ownedDraft = drafts.get(draftKey());
@@ -969,7 +974,7 @@ export function mountChat(client, media, slash, memory) {
     if (slash) {
       try {
         await slash.command.run(slash.argument);
-        if (store) dropDraftIf(store, text);
+        if (store) dropDraftIf(store, raw);
         if (!stale(gen)) void loadChat();
       } catch (error) {
         if (!stale(gen) && !input.value) setComposer(text);
@@ -983,6 +988,7 @@ export function mountChat(client, media, slash, memory) {
       projectId: state.projectId,
       chatId: state.chatId,
       text,
+      draft: raw,
       state: "sending",
       error: "",
       restored: false,

@@ -4,7 +4,6 @@
 import { clock, esc } from "./format.js";
 import { groupOf, groups, HostState, offlineCopy, remoteGroups } from "./hosts.js";
 import { on, state } from "./state.js";
-import { openViews } from "./views.js";
 
 export const OFFLINE_WRITES = "Host offline: changes are disabled until it is back.";
 
@@ -35,14 +34,19 @@ const READ = [
   "[data-tree]",
   "input[type=search]",
   "#settings nav button",
+  "[data-profile]",
+  "[data-ha-retry]",
+  "[data-retry-memory]",
 ].join(",");
 const CONTROLS = "button, input, textarea, select";
 
 /** The data the open center view rendered: the one answer whose time the banner reports. */
 const displayed = () => (state.focus.kind === "chat" ? state.view : state.focus.data);
 
-function freeze(root, reason) {
-  for (const control of root.querySelectorAll(CONTROLS)) {
+const SIDEBAR_WRITES = "[data-new-chat], [data-archive-chat], [data-decide]";
+
+function freeze(root, reason, only = CONTROLS) {
+  for (const control of root.querySelectorAll(only)) {
     if (control.matches(READ) || control.dataset.offlineOff) continue;
     control.dataset.offlineOff = control.disabled ? "kept" : "1";
     control.dataset.offlineTitle = control.title;
@@ -68,8 +72,7 @@ function thaw(root) {
 function frozenGroup(group) {
   if (!group?.entry) return false;
   const client = group.client;
-  if (!client || group.state !== HostState.Online) return true;
-  return client.epoch > 0 && openViews().some((view) => view.client === client && !client.isLive(view.key));
+  return !client || group.state !== HostState.Online || client.locked();
 }
 
 /** `admin` is the host of Settings and the Host agent; project views follow `state.host`. Nothing is installed until a remote host exists. */
@@ -95,7 +98,12 @@ export function mountOffline(admin) {
       { root: document.querySelector("#host-agent"), panel: "agent" },
     ];
     observer = new MutationObserver(later);
-    for (const root of [...project, ...adminViews.map((view) => view.root)]) observer.observe(root, { childList: true, subtree: true });
+    for (const root of [
+      ...project,
+      ...adminViews.map((view) => view.root),
+      ...["#tree", "#decisions"].map((id) => document.querySelector(id)),
+    ])
+      observer.observe(root, { childList: true, subtree: true });
   }
   const noteOf = (group, copy) =>
     offlineCopy(group)
@@ -132,6 +140,12 @@ export function mountOffline(admin) {
     document.body.dataset.hostOffline = frozen ? "1" : "0";
     paintBanner(frozen);
     for (const root of project) frozen ? freeze(root, OFFLINE_WRITES) : thaw(root);
+    for (const root of [document.querySelector("#tree"), document.querySelector("#decisions")]) {
+      for (const row of root.querySelectorAll("[data-host-group], [data-decision-host]")) {
+        const owner = groups.find((item) => item.key === (row.dataset.hostGroup ?? row.dataset.decisionHost));
+        frozenGroup(owner) ? freeze(row, OFFLINE_WRITES, SIDEBAR_WRITES) : thaw(row);
+      }
+    }
     for (const { root, panel } of adminViews) {
       const owner = groupOf(state.panels[panel]?.client ?? admin);
       const locked = frozenGroup(owner) ? owner : null;

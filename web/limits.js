@@ -56,10 +56,11 @@ export function mountLimits(client) {
     state.limitsPending = { ...state.limitsPending, [provider]: visible };
     state.limitsVisibilityError = null;
     queued.set(provider, (queued.get(provider) ?? 0) + 1);
+    const gate = client.guard(); // the connection at the owner's click: a save queued across a drop is refused
     emit("limits");
     queue = queue.then(async () => {
       try {
-        const snapshot = await client.call("limits-visibility", { provider, visible });
+        const snapshot = await gate.call("limits-visibility", { provider, visible });
         saves++;
         state.limits = snapshot.providers;
         state.limitsVisibility = snapshot.visibility;

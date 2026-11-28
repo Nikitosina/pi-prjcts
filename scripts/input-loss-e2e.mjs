@@ -255,6 +255,8 @@ try {
           run: (_read, _signal, work) => work((path, init) => {
             const body = JSON.parse(init.body);
             calls.push(body);
+            if (window.failures?.[body.action])
+              return Promise.resolve(new Response(JSON.stringify({ ok: false, error: 'host failed' }), { status: window.failures[body.action] }));
             if (window.answers?.[body.action]) return Promise.resolve(new Response(JSON.stringify({ ok: true, data: window.answers[body.action] })));
             return new Promise((_ok, fail) => init.signal?.addEventListener('abort', () => fail(init.signal.reason)));
           }),
@@ -300,6 +302,47 @@ try {
           return copy;
         })()`);
         assert.equal(offline, 1, "no offline copy after the first online visit");
+      });
+
+      // 100: only a successful live answer unlocks a view. 101: a write whose connection changed while it waited is never sent. 103: exact draft compare
+      await soft("100 an HTTP error from the host counts as a live read", async () => {
+        const live = await pageA.evaluate(`(async () => {
+          const { client } = await ${fakeClient("'fake-error'")};
+          const ask = () => client.call('thread-history', { id: 'p', threadId: 'w' }, undefined, { view: 'v500' }).catch(() => {});
+          window.failures = { 'thread-history': 500 };
+          await ask();
+          const afterError = client.isLive('v500');
+          window.failures = {};
+          window.answers = { 'thread-history': { items: [] } };
+          await ask();
+          window.answers = {};
+          return [afterError, client.isLive('v500')];
+        })()`);
+        assert.deepEqual(live, [false, true]);
+      });
+      await soft("101 a PR open waits for its cache token across a reconnect and then sends", async () => {
+        const result = await pageA.evaluate(`(async () => {
+          window.answers = { 'pr-review-open': { head: 'abc', files: [], threads: [], iterations: [] } };
+          const { t, calls, client } = await ${fakeClient("'fake-epoch'")};
+          const pending = client.guard().call('pr-review-open', { id: 'p', provider: 'github', pr: 7, seen: true }).then(() => 'sent', () => 'refused');
+          t.setState('offline');
+          t.setState('online');
+          const outcome = await pending;
+          window.answers = {};
+          return [outcome, calls.length];
+        })()`);
+        assert.deepEqual(result, ["refused", 0]);
+      });
+      await soft("103 a send removes a draft that differs only in whitespace", async () => {
+        const kept = await pageA.evaluate(`(async () => {
+          const { dropDraftIf, saveDraft, loadDraft } = await import('/drafts.js');
+          saveDraft('pi-draft:exact', 'text  ');
+          dropDraftIf('pi-draft:exact', 'text');
+          const survived = loadDraft('pi-draft:exact')?.text === 'text  ';
+          dropDraftIf('pi-draft:exact', 'text  ');
+          return [survived, loadDraft('pi-draft:exact')];
+        })()`);
+        assert.deepEqual(kept, [true, null]);
       });
 
       // 84: Settings forms are dirty-tracked: a reconnect never re-renders a form with unsaved input
@@ -364,11 +407,66 @@ try {
               `(async () => { const { state } = await import('/state.js'); const g = document.body.dataset.hostOffline; return JSON.stringify({ g, sent: window.sent.map((c) => c.action), p: state.host?.provenance?.(state.view), epoch: state.host?.epoch }); })()`,
             )),
         );
+        // 96: the whole host is one unit: its sidebar writes are off too, and the client refuses a write that bypasses the controls
+        const side = await pageA.evaluate(`(async () => {
+          const { state } = await import('/state.js');
+          const row = document.querySelector('[data-host-group="${hostId}"]');
+          const writes = [...row.querySelectorAll('[data-new-chat], [data-archive-chat]')];
+          const refused = await state.host.call('chat-create', { id: state.projectId }).then(() => 'sent', (e) => e.message);
+          return { writes: writes.length, enabled: writes.filter((b) => !b.disabled).length, refused };
+        })()`);
+        assert.ok(side.writes > 0, "no sidebar write control to check");
+        assert.equal(side.enabled, 0, "a sidebar write stayed enabled while the host was locked");
+        assert.match(side.refused, /offline|disabled/i, "the client sent a write to a locked host");
+        // 97: a read retry control stays enabled
+        const retry = await pageA.evaluate(`(async () => {
+          document.querySelector('#host-agent').insertAdjacentHTML('beforeend', '<button data-ha-retry id="probe-retry">Try again</button>');
+          document.querySelector('#focus-view').insertAdjacentHTML('beforeend', '<button data-retry-memory id="probe-memory">Retry</button><button id="probe-write">Save</button>');
+          await new Promise((ok) => setTimeout(ok, 300));
+          const off = (id) => document.querySelector(id).disabled;
+          const result = { ha: off('#probe-retry'), memory: off('#probe-memory'), write: off('#probe-write') };
+          for (const id of ['#probe-retry', '#probe-memory', '#probe-write']) document.querySelector(id).remove();
+          return result;
+        })()`);
+        assert.deepEqual(retry, { ha: false, memory: false, write: true }, "read retry controls are locked with the host");
         await pageA.evaluate(`window.release['show'](); undefined`);
         await pageA.waitFor(`!${composer}.disabled`, "unlocked by the live read", 40);
+        await pageA.waitFor(
+          `[...document.querySelectorAll('[data-host-group="${hostId}"] [data-new-chat]')].every((b) => !b.disabled)`,
+          "sidebar unlocked",
+          40,
+        );
       });
 
       // 86, 87: order across tabs
+      // 98: the Prompt section's Host agent tab belongs to the Settings host; 99: a successful save clears the unsaved mark of General
+      await soft("98 the Host agent prompt tab follows the project's host", async () => {
+        await pageA.evaluate(`document.querySelector('#topbar [data-cmd=settings]').click(); undefined`);
+        await pageA.waitFor(`document.querySelector('#settings').open`, "Settings open");
+        await pageA.evaluate(`document.querySelector('#settings nav [data-section=prompt]').click(); undefined`);
+        await pageA.waitFor(`!!document.querySelector('#settings [data-profile=host]')`, "profile tabs");
+        await pageA.evaluate(`document.querySelector('#settings [data-profile=host]').click(); undefined`);
+        await pageA.waitFor(`document.querySelector('#settings [data-profile=host]').getAttribute('aria-selected') === 'true'`, "host tab");
+        const owner = await pageA.evaluate(`import('/state.js').then(({ state }) => state.panels.settings?.client.local)`);
+        assert.equal(owner, true, "the Host agent prompt is credited to the project's host");
+      });
+      await soft("99 a saved General section stays marked as unsaved", async () => {
+        await pageA.evaluate(`document.querySelector('#settings nav [data-section=general]').click(); undefined`);
+        await pageA.waitFor(`!!document.querySelector('#settings #project-name')`, "General form", 40);
+        await pageA.evaluate(
+          `(() => { const f = document.querySelector('#settings #project-name'); f.dispatchEvent(new Event('input', { bubbles: true })); })()`,
+        );
+        assert.equal(await pageA.evaluate(`document.querySelector('#settings .settings-body').dataset.dirty`), "1");
+        await pageA.evaluate(`document.querySelector('#settings #name-form').requestSubmit(); undefined`);
+        await pageA.waitFor(`document.querySelector('#settings .settings-status').innerText.includes('Renamed')`, "saved", 40);
+        assert.equal(
+          await pageA.evaluate(`document.querySelector('#settings .settings-body').dataset.dirty ?? null`),
+          null,
+          "still dirty after the save",
+        );
+        await pageA.evaluate(`document.querySelector('#settings').close(); undefined`);
+      });
+
       await soft("86 a save that began before another tab's wipe lands after it", async () => {
         const tab = await pageA.newTab(url.href);
         await tab.waitFor(`document.body.dataset.ready === '1'`, "tab ready");
@@ -433,10 +531,17 @@ try {
           window.sent = [];
           window.holds = {};
           window.release = {};
+          window.answers = { 'thread-history': { items: [], toolGroups: null } };
           host.call = (action, input, signal, options) => {
             window.sent.push({ action, input });
             const hold = window.holds[action + ':' + (input?.path ?? '')] ?? window.holds[action];
-            return hold ? hold.then(() => call(action, input, signal, options)) : call(action, input, signal, options);
+            // An answer planted for a view the real host cannot serve (a made-up worker) still counts as that view's live read.
+            const answer = () => {
+              if (!window.answers?.[action]) return call(action, input, signal, options);
+              host.confirmLive(options?.view, host.epoch);
+              return Promise.resolve(window.answers[action]);
+            };
+            return hold ? hold.then(answer) : answer();
           };
         })()`);
       }

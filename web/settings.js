@@ -74,7 +74,11 @@ export function mountSettings(client, project, ui, statusline, promptView, limit
   }
   on("select", () => dialog.open && paint());
   // A reconnect reads the open section again; unsaved prompt text is kept in localStorage (prompts.js), so repainting never loses it.
-  const owner = () => (SECTIONS.find((item) => item.id === section)?.scope === "project" ? (state.host ?? client) : client);
+  // The Prompt section on its Host agent tab reads and saves through the Settings host, not the project's.
+  const owner = () => {
+    const current = SECTIONS.find((item) => item.id === section);
+    return (current?.profile && profile === "host" ? "host" : current?.scope) === "project" ? (state.host ?? client) : client;
+  };
   /** A section with unsaved input is not redrawn after a reconnect: it is read again behind the form, and the host unlocks once that answered. */
   const reconnected = () => {
     if (!dialog.open || owner().state !== "online") return;
@@ -172,6 +176,8 @@ export function mountSettings(client, project, ui, statusline, promptView, limit
   let said = null;
   function say(text, { error = false } = {}) {
     said = { text, error, section, at: Date.now() };
+    // Every confirmed save says so, and what it saved is no longer unsaved input.
+    if (!error) clean(dialog.querySelector(".settings-body"));
     inline(dialog.querySelector(".settings-status"), text, { error });
   }
   function sayFail(error) {

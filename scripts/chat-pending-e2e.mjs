@@ -511,6 +511,39 @@ await kit.run(async () => {
   );
   check("U1 the host stored one message", (await hostCount(A, undefined, "MARK-TURNRETRY")) === 1);
 
+  // P11: a refused message is deleted only by a send, Dismiss or emptying the field: leaving the chat and a reload keep one copy of its text.
+  await reset();
+  await ev(`__rule("message", { fail: "json" })`);
+  await typeAndSend("refused then left MARK-P11");
+  await page.waitFor(
+    `document.querySelector('#composer-input').value === "refused then left MARK-P11"`,
+    "refused text back in the composer",
+  );
+  await select(chatButton(A, other));
+  await page.waitFor(
+    `document.querySelector(${JSON.stringify(chatButton(A, other))}).getAttribute("aria-current") === "true"`,
+    "other for P11",
+  );
+  await select(chatButton(A, "main"));
+  await page.waitFor(
+    `document.querySelector(${JSON.stringify(chatButton(A, "main"))}).getAttribute("aria-current") === "true"`,
+    "main for P11",
+  );
+  await ev(`delete window.__calls`);
+  await page.reload();
+  await page.waitFor(
+    `!window.__calls && document.body.dataset.ready === "1" && !!document.querySelector('#composer-input')`,
+    "P11 reloaded",
+  );
+  await ev(wrapFetch);
+  await kit.delay(800);
+  check(
+    "P11 the refused message survives leaving the chat and a reload",
+    (await composer()).includes("MARK-P11") || (await owners("MARK-P11")).length > 0,
+    await composer(),
+  );
+  await ev(`(() => { const box = document.querySelector('#composer-input'); box.value = ""; box.dispatchEvent(new Event("input")); })()`);
+
   // P8: slash commands do not create a pending bubble.
   await reset();
   await typeAndSend("/name Slash named");

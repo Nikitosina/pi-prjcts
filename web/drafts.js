@@ -22,7 +22,7 @@ export function dropDraft(key) {
 }
 /** Removes the draft only while it still holds `text`: another tab may have written a newer one since it was sent. */
 export function dropDraftIf(key, text) {
-  if (loadDraft(key)?.text.trim() === text.trim()) dropDraft(key);
+  if (loadDraft(key)?.text === text) dropDraft(key);
 }
 /** An empty draft is not stored. Over the limits the oldest drafts go first. */
 export function saveDraft(key, text, caret = text.length) {

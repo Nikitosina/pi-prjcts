@@ -150,3 +150,15 @@ Third review of stage 4: reads are no longer replayed (REMOTE_SPEC.md decision 1
 92. A late Memory save answer repaints the shared focus root over another view. The continuation checks the focus token too.
 93. An event handler that throws is swallowed by the event bus; it now rethrows so page error checks see it.
 94. A PR open that marks seen takes its cache-order token after the response; it now takes it before the request.
+
+## Sixth review of stage 4 (one lock for every write; no draft deleted by navigation)
+
+95. A refused message loses its last durable copy: its recovery handle goes when the text returns to the composer, and leaving the chat then deleted the stored draft. The text is saved as a stored draft when it returns, and a chat switch deletes nothing; only a successful send, Dismiss, an emptied field, a confirmed archive or delete, Forget host or a revocation deletes a draft (`scripts/chat-pending-e2e.mjs`, P11).
+96. The sidebar (New chat, Archive, Needs-you Approve and Deny) wrote while the host was read-only. The host client refuses every write while the host is locked (`host.locked()`), whatever control sent it, and the sidebar and decision rows freeze with the host.
+97. A read retry control (Host agent Try again, Memory Retry) was disabled with the host, so a failed read could never recover. Read retries and Settings profile tabs are on the read allowlist.
+98. The Prompt section on its Host agent tab was credited to, and locked by, the project's host. It follows the Settings host.
+99. General Settings stayed marked unsaved after a successful save. A confirmed save clears the mark in every section.
+100. An HTTP error from the host counted as a live read and unlocked a view that had no fresh data. Only a successful live answer counts.
+101. A PR open or Providers visibility save waited for the cache token across a disconnect and then sent on the new connection. The epoch and the lock are rechecked right before sending, and the Providers queue captures the epoch at the click (the Providers capture has no E2E: that section is Settings-host data and the test page's Settings host is local).
+102. Reserved.
+103. A send removed a draft that differed only in whitespace. The comparison is exact; the handle keeps the composer's exact value.
